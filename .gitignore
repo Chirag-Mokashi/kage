@@ -1,0 +1,56 @@
+# macOS / OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Claude Code local session/permission state (per-machine)
+.claude/
+
+# Secrets — never commit
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+credentials*
+secrets/
+
+# Logs
+*.log
+
+# Python (Stage 1 — when we start building)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node (in case any tooling brings it)
+node_modules/
+package-lock.json
+yarn.lock
+
+# Build artifacts
+dist/
+build/
+*.egg
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Coverage
+htmlcov/
+.coverage
+.tox/
+
+# Local AI data — never commit memory/embeddings
+data/
+~/.kage/
+*.faiss
+*.bin

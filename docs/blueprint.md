@@ -6,7 +6,7 @@
 > **Purpose of this file:** Single source of truth for the kage project state.
 > Open this at the start of any session to re-enter with full context.
 >
-> *Last updated: 2026-05-21, end of Session 1 (planning).*
+> *Last updated: 2026-05-29, end of Session 8 (Layer 3e lock).*
 >
 > *Companion docs:*
 > - [architecture.md](architecture.md) — visual system map
@@ -704,9 +704,132 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 - Specific type-rendering templates (direction locked, format details deferred)
 - Compression model for the cascade tail (local Qwen via Layer 4 router — Layer 4 design)
 
-### Layers 3e, 4, 5, 6, 7
+### Layer 3e — Privacy / Selective Disclosure
 
-**Status:** Not yet designed. Layer 3e next-up (Session 8+).
+**Role in pipeline:** Final privacy gate between Layer 3d's assembled context and Layer 4's dispatch to external tools. If Layer 3b is the hard identity wall during retrieval, Layer 3e is the selective-disclosure gate during dispatch — same data may be safe to send to Claude but redacted before going to Perplexity. This is kage's broker function operationalized: kage knows everything locally; cloud tools see the minimum slice that answers the query.
+
+**Four-stage pipeline:**
+
+```
+   ┌───────────────────────────────────────────────────────────┐
+   │ STAGE 1 — Identity check (hard wall, inviolable)         │
+   │   Defense-in-depth re-enforcement of Layer 3b.           │
+   │   For each chunk: if c.identity ⊄ active.identity → drop │
+   │   Should never fire in healthy operation; logged if it   │
+   │   does (indicates upstream bug).                          │
+   ├───────────────────────────────────────────────────────────┤
+   │ STAGE 2 — Selective Disclosure / Minimization            │
+   │   Input:  Layer 3d's assembled context                   │
+   │   Output: Slice that fits per-tool budget                │
+   │                                                           │
+   │   Per-tool budget table (defaults, user-configurable):   │
+   │     Claude       ~3500 tokens                            │
+   │     Perplexity   ~2000 tokens                            │
+   │     Gemini       ~2500 tokens                            │
+   │     Local Qwen3  effectively unbounded                   │
+   │     Unknown tool DENY (Stage 4)                          │
+   │                                                           │
+   │   Flow:                                                   │
+   │     IF assembled ≤ budget → pass through unchanged       │
+   │     ELSE → prune by LOWEST RELEVANCE first               │
+   │              (Layer 3c RRF + reranker score)             │
+   │              age = tie-breaker only                      │
+   │              optionally summarize the dropped layer      │
+   │                                                           │
+   │   Stage 2 NEVER prunes Layer 5 storage — only the        │
+   │   current dispatch slice. Old-but-relevant memories      │
+   │   survive because Layer 3c's semantic retrieval ranks    │
+   │   them high. Age-based pruning explicitly rejected.      │
+   ├───────────────────────────────────────────────────────────┤
+   │ STAGE 3 — Sensitivity scan (cascade detection)           │
+   │   Tier A: Presidio + custom regex (~ms)                  │
+   │     emails, SSNs, credit cards, API keys, IPs, phones,   │
+   │     IBANs, common credentials                            │
+   │   Tier B: Local NER (Granite/Qwen3) on remaining text    │
+   │     nuanced entities (medical, names-in-context,         │
+   │     organization-specific IDs)                           │
+   │   Tier C: Local LLM-as-redactor (Qwen3-14B)              │
+   │     fires only on uncertain spans OR high-sensitivity    │
+   │     tool routes. Context-aware redaction + utility-      │
+   │     preserving substitution.                             │
+   │                                                           │
+   │   Outputs:                                                │
+   │     • Clean slice → proceed                              │
+   │     • Redacted slice → proceed                           │
+   │     • Hard-block (user-marked local-only or              │
+   │       unredactable secret) → drop entire dispatch,       │
+   │       notify user                                         │
+   ├───────────────────────────────────────────────────────────┤
+   │ STAGE 4 — Per-tool policy (4 outcomes, fail-closed)      │
+   │   Lookup: policy[(target_tool, identity, project)]       │
+   │                                                           │
+   │   PERMIT   → dispatch as-is, silent, audit logged        │
+   │   MODIFY   → first-class outcome (GiL/SMCP pattern):    │
+   │              redact / substitute endpoint / clamp scope, │
+   │              re-run Stages 2-3 on modified slice,        │
+   │              dispatch if compliant, audit what changed   │
+   │   ASK      → risk-adaptive confirmation (PrivWeb):       │
+   │              modal for high-risk, peripheral for med-    │
+   │              risk, silent for low-risk policy matches.   │
+   │              Approval-fatigue mitigation: per-session    │
+   │              "remember" + learned-policy promotion       │
+   │              (N similar confirmations → propose entry)   │
+   │   DENY     → drop, notify user, audit logged             │
+   │                                                           │
+   │   Default = DENY for unknown tools (fail-closed).        │
+   │   Policy schema: declarative, versioned, signed          │
+   │   (policy_version_hash binds to audit). JSON/Rego/Cedar  │
+   │   choice deferred to Stage 1.                            │
+   ├───────────────────────────────────────────────────────────┤
+   │ AUDIT LOG — cross-cutting, hash-chained, signed, async  │
+   │   Ed25519-signed records, SHA-256 per-identity hash     │
+   │   chain (OAP pattern). Async write ~9ms — does not       │
+   │   block dispatch latency. Hot index: SQLite WAL.         │
+   │   Archival rollups daily/weekly.                         │
+   │                                                           │
+   │   Logged fields:                                          │
+   │     • timestamp (UTC)                                    │
+   │     • target_tool                                        │
+   │     • active_identity, active_project                    │
+   │     • original_query_hash (full query optional)          │
+   │     • slice_summary (chunk IDs + relevance scores)       │
+   │       OR slice hash (raw text not stored by default)     │
+   │     • redactions_applied (count, types, locations)       │
+   │     • minimization_rate (% of assembled context sent)    │
+   │     • stage_4_decision (PERMIT/MODIFY/ASK/DENY)          │
+   │     • policy_version_hash                                │
+   │     • user_confirmation (if ASK fired)                   │
+   │                                                           │
+   │   Queryable:                                              │
+   │     "what did kage send to Claude last week?"            │
+   │     "which dispatches were modified vs. permitted?"      │
+   │     "show all ASK prompts and my responses this month"   │
+   │     "did anything get blocked, and why?"                 │
+   │                                                           │
+   │   Retention: indefinite for personal scale (forensic).   │
+   └───────────────────────────────────────────────────────────┘
+```
+
+**Cosmos Q K validation (Session 8):** Six evidence-driven refinements integrated. Strongest mechanisms:
+- HEMA: Compact+Vector at <3500 tokens reaches 87% QA accuracy vs. 41% raw — minimization is a real lever, not just a policy formality.
+- Anonymous-by-Construction: LLM-redactor 0.99 recall + utility preserved — justifies Tier C in cascade.
+- PIIBench: Presidio F1=0.14 — proves cascade (not Presidio-only) is necessary.
+- GiL / SMCP: MODIFY as first-class outcome (not just PERMIT/DENY) — adopted.
+- OAP: Ed25519 + SHA-256 hash chain, async ~9ms, decision signing ~10ms — concrete audit mechanism.
+- PrivWeb / RTBAS: risk-adaptive confirmation reduces fatigue while maintaining safety (RTBAS: 0 attacks at 2% utility loss).
+
+**Honest novelty framing:** Layer 3e's gate pattern (identity + minimization + sensitivity + policy + audit) is acknowledged prior art — enclawed (single-user hardened gateway), Secure MCP gateway guidance, SMCP protocol, Governance-in-the-Loop (GiL) all combine these. kage's novel claim is the **integration** at personal scale: local-first personal broker + minimization-first design + cross-vendor dispatch + integration with state-aware identity partition memory (the 4th differentiator). Pitch the integration; cite the components.
+
+**Deferred to Stage 1 engineering:**
+- Exact PII pattern library (Presidio version + custom rule set)
+- Policy schema format choice (JSON DSL vs Rego vs Cedar)
+- Per-tool default policy templates
+- Confirmation UX rendering (which prompt format)
+- Audit log query interface (CLI command shape)
+
+### Layers 4, 5, 6, 7
+
+**Status:** Not yet designed. Layer 4 (Multi-Vendor Router) next-up (Session 8+).
 
 ---
 
@@ -799,6 +922,10 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 | 54 | **Layer 3d 3-tier × 5-type orthogonal model locked (Session 7, Cosmos Q J-validated).** Every memory has TWO orthogonal attributes: TIER (HOT/WARM/COLD residency) and TYPE (Core/Procedural/Semantic-SOR/Semantic-Vocab/Episodic per #46). HOT is deterministic per (active_project, active_identity) — constant across queries for user-trust predictability. WARM is per-query, populated by Layer 3c output. COLD is invisible by default, retrieved only on explicit reference. Validated against Letta/MemGPT (3-tier), Zep/Graphiti (3-tier graph hierarchy), MIRIX (typed-without-tier — kage composes both), Mem0 (selective retrieval). | Session 7 |
 | 55 | **Layer 3d overflow strategy: CASCADE (Session 7, Cosmos Q J-validated).** When relevant memory > available budget, kage applies in order: (1) top-K select by Layer 3c reranker score, (2) extractive compression of TAIL with evidence-sufficiency check (ECoRAG pattern), (3) only then drop. **Recursive summarization explicitly REJECTED** based on MemGPT DMR evidence (35.3% recursive summarization vs 93.4% paging+retrieval with GPT-4 Turbo). ECoRAG evidence: 1000 docs → 659 tokens with 35.51 EM, vs full RAG 127,880 tokens near-zero. | Session 7 |
 | 56 | **Layer 3d multi-resolution rendering for cross-tool budget scaling (Session 7, Cosmos Q J-validated).** HOT tier stays CONSTANT across target tools (kage's foundation is consistent — user-trust property). WARM tier degrades fidelity per target window size (ClawVM pattern): Level 1 full structured (Claude 200K, Gemini 1M) → Level 2-3 compressed structured / structured fields (Qwen 32K) → Level 4 pointer references ("memory:ep:X available on demand") under heavy constraint. Per SPL `USING MODEL` clause and ClawVM multi-resolution representations. **Type-aware rendering** mandatory per all tiers, validated by GRAVITY +4.4 percentage point benchmark advantage over unstructured summary in same prompt slot. | Session 7 |
+| 57 | **Layer 3e four-stage privacy gate locked (Session 8, Cosmos Q K-validated).** Pipeline: identity check (hard, defense-in-depth re-enforcement of Layer 3b) → selective disclosure / minimization (per-tool budget, relevance-pruned) → sensitivity scan (cascade: Presidio rules → local NER → local LLM-redactor only on uncertain/high-risk) → per-tool policy (4 outcomes: PERMIT / MODIFY / ASK / DENY, fail-closed default). Cross-cutting audit log: Ed25519-signed records, SHA-256 per-identity hash chain, async write ~9ms (OAP pattern), SQLite WAL hot index, queryable. Engineering details (PII library version, policy schema format JSON/Rego/Cedar, confirmation UX rendering) deferred to Stage 1. | Session 8 |
+| 58 | **Relevance-first minimization in Stage 2 (NOT age-based, Session 8).** When over per-tool budget, Stage 2 prunes by LOWEST relevance first using Layer 3c's RRF + reranker scores. Age is tie-breaker only — never the primary cut. Storage (Layer 5) is NEVER pruned by Stage 2; only the current dispatch slice. Old-but-relevant memories survive because Layer 3c's semantic retrieval ranks them high regardless of age (e.g. "remember what we decided in March?" surfaces March memory via reranker score, not recency). HEMA's age-weighted pruning was a working-context heuristic, not appropriate for kage's persistent memory layer. | Session 8 |
+| 59 | **Aggressive default budgets, user-configurable per-tool (Session 8).** Default per-tool minimization is aggressive (Claude ~3500, Perplexity ~2000, Gemini ~2500 tokens) — favors sending the minimum useful slice. User can raise per-tool ceiling at config time for specific tasks. Aligns with Privacy Goal (locked May 24): "nothing leaves unless explicitly routed." Validated by HEMA evidence (Compact+Vector at <3500 tokens reaches 87% QA accuracy vs 41% raw) — aggressive minimization is not a quality sacrifice when paired with two-channel design (summary + selective verbatim). | Session 8 |
+| 60 | **Layer 3e novelty framing: integration, not invention (Session 8).** Acknowledged prior art for the 4-stage gate pattern: enclawed (single-user hardened gateway, ArXiv 2604), Secure MCP gateway guidance (Errico et al., 2511), SMCP protocol formalization, Governance-in-the-Loop (GiL, 2026). kage's novel claim is the INTEGRATION at personal scale: local-first personal broker + minimization-first design + cross-vendor dispatch + integration with state-aware identity partition memory (differentiator #4). Pitch the integration; cite the components. Honest framing maintained per #53 precedent. | Session 8 |
 
 ---
 
@@ -808,8 +935,8 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 
 1. ✓ **Layer 3c — Hybrid retrieval shape** — LOCKED Session 7 (#49-52)
 2. ✓ **Layer 3d — Tiered assembly shape** — LOCKED Session 7 (#54-56)
-3. **Layer 3e — Privacy / disclosure mechanics** (allowlist schema, redaction rules, audit format) — **next up**
-4. **Layer 4 — Multi-vendor router** (signal sources for routing decisions: cost, capability, privacy, latency)
+3. ✓ **Layer 3e — Privacy / disclosure mechanics** — LOCKED Session 8 (#57-60)
+4. **Layer 4 — Multi-vendor router** (signal sources for routing decisions: cost, capability, privacy, latency) — **next up**
 5. **Layer 5 — Memory storage** (on-disk layout, FAISS + BM25 + graph + episodic, partition tags)
 6. **Layer 6 — Learning T1** (preferences + entities + implicit feedback)
 7. **Layer 7 — MCP server out** (endpoints, schema, auth)
@@ -1116,6 +1243,45 @@ Items deliberately set aside — either deferred to a later cycle, conditional o
 - Open `docs/blueprint.md`. Confirm context loads.
 - Layer 3c is locked. Move to Layer 3d (Tiered Assembly) design.
 - After 3d → 3e → 4 → 5 → 6 → 7 → 1+2 detail → Cycle 1 pitch.
+
+### Session 8 — 2026-05-29 (Layer 3e lock)
+
+**Done:**
+- Layer 3e (Privacy / Selective Disclosure) FULLY LOCKED via four-stage pipeline
+  - STAGE 1: Identity check (defense-in-depth re-enforcement of Layer 3b)
+  - STAGE 2: Selective disclosure / minimization (per-tool budget, relevance-pruned)
+  - STAGE 3: Sensitivity scan (cascade: Presidio → local NER → local LLM-redactor)
+  - STAGE 4: Per-tool policy (PERMIT / MODIFY / ASK / DENY, fail-closed default)
+  - Cross-cutting audit log: Ed25519-signed records, SHA-256 per-identity hash chain, async write, queryable (OAP pattern)
+- Cosmos Q K returned strong evidence pack — six refinements integrated:
+  - HEMA: minimization is a real lever (87% vs 41% QA accuracy with Compact+Vector at <3500 tokens)
+  - PIIBench: Presidio F1=0.14 alone is insufficient → cascade detection required
+  - Anonymous-by-Construction: LLM-redactor achieves 0.99 recall while preserving utility
+  - GiL / SMCP: MODIFY adopted as first-class outcome (not just allow/deny)
+  - OAP: hash-chain audit mechanism concrete (async ~9ms write, decision signing ~10ms)
+  - PrivWeb / RTBAS: risk-adaptive confirmation reduces approval fatigue (RTBAS: 0 attacks at 2% utility loss)
+- User pushback caught age-based pruning flaw — corrected to RELEVANCE-FIRST pruning (decision #58)
+  - Original draft borrowed HEMA's age-weighted pruning; HEMA pruning is for working-context window, NOT persistent memory layer
+  - Old-but-relevant memories ("remember March's decision?") must survive — Layer 3c's reranker handles this; Stage 2 trusts those scores
+  - Layer 5 storage is NEVER pruned by Stage 2 — only the current dispatch slice
+- Decisions #57-60 added to §7
+- Honest novelty framing locked (#60): the gate pattern is prior art (enclawed, Secure MCP, SMCP, GiL); kage's claim is the INTEGRATION at personal scale with minimization-first design
+
+**Cosmos K limitation noted:** retrieved corpus had limited direct production documentation for named commercial products (Mem0, MIRIX, Zep, Claude Projects, ChatGPT Memory, Apple Private Cloud Compute) and for query-rewriting/hierarchical pointer expansion in deployed personal assistants. Q1 sub-categories (e) query rewriting and (d) hierarchical disclosure remain less evidenced — flagged for Stage 1 revisit if/when production references become available.
+
+**Deferred to Stage 1 engineering:**
+- Exact PII pattern library (Presidio version + custom rule set)
+- Policy schema format choice (JSON DSL vs Rego vs Cedar)
+- Per-tool default policy templates
+- Confirmation UX rendering (which prompt format)
+- Audit log query interface (CLI command shape)
+- Per-tool budget calibration (starting heuristics: Claude 3500, Perplexity 2000, Gemini 2500)
+
+**Layer 3e is the SECOND fully-locked layer of kage's pipeline (after 3c).** Layers 3a, 3b, 3d also locked at directional altitude. Five-of-nine layers have lock state; four remain to design (4, 5, 6, 7, plus 1+2 detail).
+
+**Next session resume point:**
+- Commit + push Layer 3d + 3e blueprint edits to GitHub (Session 7+8 work bundled)
+- Begin Layer 4 (Multi-Vendor Router) design — Pattern 5 (pre-classification) directionally locked, needs full design
 
 ### Session 4 — 2026-05-23 (brainstorm integration + new principles)
 

@@ -609,9 +609,104 @@ A memory becomes **retrievable** as soon as it's `indexed`. Graph-retrievable wh
 - **Matches "Pattern C — eager indexing + lifecycle ops"** in the sync column: embeddings + BM25 tokens computed at save time; lifecycle ops (deprecate/retag/forget) supported.
 - **No structural changes to PROPOSED ingest pipeline.** Hybrid sync/async is the right call.
 
-### Layers 3d, 3e, 4, 5, 6, 7
+### Layer 3d — Tiered Assembly
 
-**Status:** Not yet designed. To be tackled layer-by-layer after 3c locks.
+**Status:** Designed and locked (directional). Session 7. Validated against Cosmos Q J (MemGPT/Letta, Zep/Graphiti, MIRIX, Mem0, GRAVITY, ECoRAG, ClawVM, SPL evidence).
+
+**Role in pipeline:** After Layer 3c returns ranked memories, Layer 3d assembles them into prompt-shaped context within the target agent's token budget. Hands off to Layer 3e (privacy gate) before Layer 4 dispatch.
+
+**3-tier residency × 5-type schema (orthogonal dimensions):**
+
+Every memory has TWO orthogonal attributes:
+
+```
+   TIER (Layer 3d residency status)        TYPE (memory schema #46)
+   ────────────────────────────────         ─────────────────────────
+   • HOT  — always in context               • Core
+   • WARM — retrieved per query             • Procedural
+   • COLD — deep storage, on demand only    • Semantic-system-of-record
+                                            • Semantic-vocabulary
+                                            • Episodic-provisional
+
+   Typical mappings:
+   • Core memory       → typically HOT
+   • Semantic-vocab    → HOT if frequently used, else WARM
+   • Procedural        → WARM (retrieved when applicable)
+   • Semantic-SOR      → WARM (decisions retrieved per query)
+   • Episodic          → WARM when recent → COLD with age
+```
+
+**Assembly flow per query (locked):**
+
+```
+   1. Layer 3c hands kage: ranked list of relevant memories
+      (typed + provenance-tagged)
+
+   2. Layer 3d allocates token budget for target tool:
+      • Reserve output budget FIRST (first-class constraint)
+      • Then allocate: HOT (deterministic) + WARM (Layer 3c output)
+      • System prompt + user query/history fill remaining space
+
+   3. Format per memory type (type-aware rendering, mandatory):
+      • Decisions: "X (because Y, consequences Z)"
+      • Episodic: with timestamps + structured event fields
+      • Procedural: numbered step lists
+      • Facts: with validity date ranges (Graphiti pattern)
+      • Glossary: inline definitions on first reference
+
+   4. Compose final ordered context:
+      • HOT first (Core memory frames the rest)
+      • WARM second (query-relevant, in rank order)
+      • User query last
+
+   5. Hand off to Layer 3e (privacy gate)
+```
+
+**Overflow strategy (locked) — CASCADE, not recursive summarization:**
+
+When relevant memory > available budget, kage applies in order:
+
+```
+   Step 1: Top-K select by Layer 3c reranker score
+   Step 2: Extractive compression of TAIL items (lower-ranked)
+           with evidence-sufficiency check (ECoRAG pattern)
+   Step 3: Only drop items that fail rank AND compression
+           threshold
+
+   Recursive summarization is EXPLICITLY REJECTED — Cosmos Q J
+   evidence: MemGPT DMR 35.3% (recursive summarization) vs 93.4%
+   (paging + retrieval). Compression beats truncation: ECoRAG
+   on 1000 docs uses 659 tokens for 35.51 EM, vs full RAG at
+   127,880 tokens with near-zero performance.
+```
+
+**Cross-tool budget normalization (locked) — multi-resolution rendering:**
+
+HOT tier stays constant across target tools (kage's foundation is consistent). WARM tier degrades fidelity per target window size (ClawVM pattern):
+
+```
+   Target tool        WARM rendering level
+   ─────────────────  ──────────────────────────────────────────
+   Claude 200K        Level 1 — Full structured rendering
+   Gemini 1M          Level 1 — Full structured rendering
+   Qwen3 32K          Level 2-3 — Compressed structured / fields
+   Heavy constraint   Level 4 — Pointer references ("memory:ep:X
+                                available on demand")
+```
+
+**Type-aware rendering — empirically validated:**
+
+GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors yield +5.7% on LoCoMo vs +1.3% for unstructured summary in same prompt slot — **net +4.4 percentage points from structure alone**. Validates kage's type-aware rendering as mandatory, not optional.
+
+**Deferred to Stage 1 engineering:**
+
+- Exact HOT budget percentage (starting heuristic: 15%, calibrate post-launch from real usage)
+- Specific type-rendering templates (direction locked, format details deferred)
+- Compression model for the cascade tail (local Qwen via Layer 4 router — Layer 4 design)
+
+### Layers 3e, 4, 5, 6, 7
+
+**Status:** Not yet designed. Layer 3e next-up (Session 8+).
 
 ---
 
@@ -701,6 +796,9 @@ A memory becomes **retrievable** as soon as it's `indexed`. Graph-retrievable wh
 | 51 | **Re-ranker: bge-reranker-v2-m3 (MemReranker not viable for v1, Session 7).** Cosmos Q3 originally recommended MemReranker-0.6B for agent memory, but post-Cosmos verification: (a) MemReranker-0.6B is NOT publicly downloadable — only available via Memos hosted API, which violates kage's local-first principle; (b) MemReranker-4B IS downloadable (Apache 2.0 confirmed) but bf16 weights are 8.83GB — too heavy alongside Qwen3-14B + Granite on 24GB unified memory; (c) jina-reranker-v3 is CC BY-NC, rejected for license reasons. Fall back to bge-reranker-v2-m3: Apache 2.0, ~500MB, ~4 MAP-point gap vs MemReranker-0.6B on agent-memory benchmarks but fits memory budget cleanly. **v1.5 upgrade paths flagged:** (a) if MemReranker-0.6B is released publicly (HF Discussions request pending), swap is trivial behind SentenceTransformer interface; (b) MemReranker-4B Q4-quantized (~2.5GB) is a v1.5/v2 engineering project once quality preservation is validated. **Constraint Reconsideration Trigger applies** (see #52): if quality demonstrably blocks v1 use cases, revisit. | Session 7 |
 | 52 | **Constraint Reconsideration Trigger pattern locked (Session 7).** Safety net for the 4th differentiator's constraint encoding to prevent over-restriction failure mode. **The pattern:** every constraint encoded in Consequences MUST include the rationale's PREMISES (the "because Y" portion). When the Adaptation Principle detects a premise has materially changed (new tools available, scale shift, user behavior drift, new evidence), kage SURFACES the constraint for reconsideration — does NOT silently enforce. This makes constraint encoding a hypothesis-under-current-conditions, not a verdict. Specific operational rules: (a) every Consequences entry has WHY field; (b) periodic premise-validity checks (kage's background workers re-evaluate active constraints); (c) when reconsideration is triggered, kage surfaces with current evidence and asks user to confirm, modify, or revoke; (d) user can always force-reconsider via `kage reconsider <decision>` command. This reconciles Honesty + Adaptation + Confidence-Gated Learning + Awareness over Control simultaneously. | Session 7 |
 | 53 | **4th Differentiator promoted (Session 7).** "Multi-modal memory layer with Confidence-Gated Learning, constraint encoding, and identity-aware retrieval" is added as differentiator #4 in §3. Composed of six locked elements (5 memory types #46, CGL principle, Consequences with Reconsideration Trigger #48 + #52, identity-aware retrieval Layer 3b, privacy-by-architecture, three-mode user support #47). Validated by absence-from-shipping-products across Cosmos Q1-Q5, Q7, Q E v2 + Agent OS audit. **Academic novelty NOT claimed** — Bhatt et al. 2025 (#27) is acknowledged ancestor for the matrix abstraction; the 4th differentiator's claim is product/engineering combination novelty at personal scale. Honest framing maintained. Cosmos Q F null retrieval doesn't disturb the case (tool failure, not novelty evidence). Research-paper-path #18.5 remains deferred post-v1.0 ship. | Session 7 |
+| 54 | **Layer 3d 3-tier × 5-type orthogonal model locked (Session 7, Cosmos Q J-validated).** Every memory has TWO orthogonal attributes: TIER (HOT/WARM/COLD residency) and TYPE (Core/Procedural/Semantic-SOR/Semantic-Vocab/Episodic per #46). HOT is deterministic per (active_project, active_identity) — constant across queries for user-trust predictability. WARM is per-query, populated by Layer 3c output. COLD is invisible by default, retrieved only on explicit reference. Validated against Letta/MemGPT (3-tier), Zep/Graphiti (3-tier graph hierarchy), MIRIX (typed-without-tier — kage composes both), Mem0 (selective retrieval). | Session 7 |
+| 55 | **Layer 3d overflow strategy: CASCADE (Session 7, Cosmos Q J-validated).** When relevant memory > available budget, kage applies in order: (1) top-K select by Layer 3c reranker score, (2) extractive compression of TAIL with evidence-sufficiency check (ECoRAG pattern), (3) only then drop. **Recursive summarization explicitly REJECTED** based on MemGPT DMR evidence (35.3% recursive summarization vs 93.4% paging+retrieval with GPT-4 Turbo). ECoRAG evidence: 1000 docs → 659 tokens with 35.51 EM, vs full RAG 127,880 tokens near-zero. | Session 7 |
+| 56 | **Layer 3d multi-resolution rendering for cross-tool budget scaling (Session 7, Cosmos Q J-validated).** HOT tier stays CONSTANT across target tools (kage's foundation is consistent — user-trust property). WARM tier degrades fidelity per target window size (ClawVM pattern): Level 1 full structured (Claude 200K, Gemini 1M) → Level 2-3 compressed structured / structured fields (Qwen 32K) → Level 4 pointer references ("memory:ep:X available on demand") under heavy constraint. Per SPL `USING MODEL` clause and ClawVM multi-resolution representations. **Type-aware rendering** mandatory per all tiers, validated by GRAVITY +4.4 percentage point benchmark advantage over unstructured summary in same prompt slot. | Session 7 |
 
 ---
 
@@ -708,9 +806,9 @@ A memory becomes **retrievable** as soon as it's `indexed`. Graph-retrievable wh
 
 ### Pending — to be designed in subsequent sessions
 
-1. **Layer 3c — Hybrid retrieval shape** (vector + graph + episodic specifics) — **next up**
-2. **Layer 3d — Tiered assembly shape** (hot/recall/archival inside each partition cell)
-3. **Layer 3e — Privacy / disclosure mechanics** (allowlist schema, redaction rules, audit format)
+1. ✓ **Layer 3c — Hybrid retrieval shape** — LOCKED Session 7 (#49-52)
+2. ✓ **Layer 3d — Tiered assembly shape** — LOCKED Session 7 (#54-56)
+3. **Layer 3e — Privacy / disclosure mechanics** (allowlist schema, redaction rules, audit format) — **next up**
 4. **Layer 4 — Multi-vendor router** (signal sources for routing decisions: cost, capability, privacy, latency)
 5. **Layer 5 — Memory storage** (on-disk layout, FAISS + BM25 + graph + episodic, partition tags)
 6. **Layer 6 — Learning T1** (preferences + entities + implicit feedback)
@@ -989,6 +1087,13 @@ Items deliberately set aside — either deferred to a later cycle, conditional o
 - Cosmos Q I (rerankers / MLX search) returned null retrieval — same tool issue; recommendation defaulted to bge from audited facts (matched our independent reasoning)
 
 **Layer 3c is the FIRST fully-locked layer of kage's retrieval pipeline.**
+
+**Layer 3d also locked at directional altitude (Session 7 continuation):**
+- 3-tier × 5-type orthogonal model (decision #54)
+- CASCADE overflow strategy — recursive summarization rejected (decision #55)
+- Multi-resolution cross-tool rendering — HOT constant, WARM scales (decision #56)
+- Cosmos Q J returned real evidence after two prior null runs; validated the design with three refinements (orthogonal type×tier, cascade overflow, multi-resolution rendering)
+- Type-aware rendering empirically validated (+4.4 pp from structure alone per GRAVITY benchmark)
 
 **Pending (background, non-blocking):**
 - MemReranker-0.6B HF Discussions response — if positive, v1.5 swap

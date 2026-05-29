@@ -132,7 +132,7 @@ The cloud tools stay. The devices stay. kage makes them work together as arms of
 
 **Important framing (recalibrated Session 4 after Cosmos Q2 finding):** kage's defensibility lives at the **product and engineering level**, not as an academic abstraction. Bhatt et al. 2025 (Microsoft Research, arXiv:2509.14608, "Enterprise AI Must Enforce Participant-Aware Access Control") already formalizes 2-D access-control matrices as bipartite graphs over documents × entities, with biclique-based safe-sharing regions for enterprise multi-user RAG. **kage does not claim to invent that abstraction.** kage applies it to a domain — *single-user multi-identity personal AI* — that the academic literature does not yet address, with three novel engineering contributions.
 
-**Three real differentiators (genuinely novel):**
+**Four real differentiators (genuinely novel):**
 
 ```
    1. First-of-kind SHIPPED personal-AI with state-aware
@@ -149,6 +149,26 @@ The cloud tools stay. The devices stay. kage makes them work together as arms of
       (Personal = {chirag@, mokashi.ch@gmail},
        NEU = {mokashi.ch@neu, research-email@})         ★ genuinely novel
                                                            for personal AI
+
+   4. Multi-modal memory layer with Confidence-Gated     ★ novel combination
+      Learning, constraint encoding, and identity-         (promoted Session 7)
+      aware retrieval. Composed of locked elements:
+        • Five typed memory types (#46) — Core /
+          Procedural / Semantic-system-of-record /
+          Semantic-vocabulary / Episodic-provisional
+        • Confidence-Gated Learning principle —
+          observe-confirm-graduate flow
+        • Constraint encoding via Consequences field
+          (#48) with Reconsideration Trigger (#51)
+        • Identity-aware retrieval (Layer 3b hard
+          identity wall + project state-aware spillover)
+        • Privacy-by-architecture (not by DP budgets)
+        • Three-mode user support (#47) — pure local /
+          hybrid Notion mirror / Notion-canonical
+      Each element exists in some shipping system; the
+      COMBINATION is absent from current personal-AI
+      products (verified across Cosmos Q1-Q5, Q7, Q E v2,
+      Agent OS audit, and product landscape review).
 ```
 
 **Supporting differentiators (shared with prior art but absent from current personal-AI products):**
@@ -676,6 +696,11 @@ A memory becomes **retrievable** as soon as it's `indexed`. Graph-retrievable wh
 | 46 | **Five Memory Types locked for kage's memory schema (Session 5, Agent OS-validated).** Independent confirmation from Oleg Kupshukov's "Agent OS" handbook (the YouTube creator's solution to cross-AI context loss) that the right memory schema has five typed components. kage adopts the SAME structure as locked memory types, with kage automating the capture that Agent OS does manually: **(1) CORE memory** = always-in-context (project/identity overview, current state, "what NOT to do" prohibitions — Agent OS "Project Context"); **(2) PROCEDURAL memory** = how-to / workflow patterns (Agent OS "Workflow"); **(3) SEMANTIC system-of-record memory** = authoritative decisions including the constraint-encoding "Consequences" field that records what becomes FORBIDDEN by each decision (Agent OS "Decisions Log"); **(4) SEMANTIC vocabulary memory** = entity definitions, disambiguations (Agent OS "Glossary"); **(5) EPISODIC provisional memory** = observed patterns awaiting graduation to formal types via Confidence-Gated Learning principle (Agent OS "Working Insights"). All five composed with kage's existing (project × identity) partition matrix from Layer 3b. kage automates capture; user confirms/edits/discards (Awareness over Control + Confidence-Gated Learning). Structure is locked; engineering details deferred to Layer 5 (memory storage) + Layer 6 (learning) design sessions. | Session 5 |
 | 47 | **Three-mode user support locked (Session 6, 2026-05-28). Agent OS coexistence strategy.** kage supports a continuum of inspection/storage modes: **Mode 1 — Pure kage local**: `~/.kage/memory/` markdown files; no external dependencies; privacy-first. **Mode 2 — Hybrid**: kage local + Notion mirror (read-mostly, optional write-back) for users who want inspection/sharing layer. **Mode 3 — Notion-canonical**: kage auto-maintains the user's existing Agent OS-style Notion pages via Notion MCP — kage adds automation on top of their existing setup. v1 ships Mode 1; Modes 2 and 3 added when Notion connector is wired (v1.5+). Strategic framing: kage doesn't compete with Notion; kage automates what Agent OS does manually. | Session 6 |
 | 48 | **Consequences-field-as-detection-signal locked for Layer 6 design (Session 6).** kage's Confidence-Gated Learning must detect not just "we decided X" moments but the constraint-defining "and therefore Y is off-limits" moments. Linguistic signals to watch for: "we chose X, so don't propose Y anymore" · "X is our default. Other approaches off the table" · "X is the rule. Y was considered and rejected because Z" · "From now on, X — never Y." When detected, kage extracts a constraint field separately from the choice, storing as system-of-record SEMANTIC memory with both Decision and Consequences populated. Layer 6 design constraint: capture constraints, not just facts. Why: vector retrieval over text returns facts but not constraints; kage's memory needs to encode behavioral consequences for retrieval to be useful. | Session 6 |
+| 49 | **Layer 3c (Hybrid Retrieval) FULLY LOCKED (Session 7).** Final v1 composition: BM25 (OJ substrate) + Granite Embedding 311M R2 at native 768d for dense (Apache 2.0, see #50) + FAISS for ANN index + LightRAG query-side dual-level keyword split (1 LLM call/query) + RRF score fusion (k=60) + bge-reranker-v2-m3 for re-ranking (Apache 2.0, see #51) + Graphify-style edge provenance tags (EXTRACTED/INFERRED/AMBIGUOUS) + hybrid sync/async ingest pipeline. Total memory budget: ~1.0-1.5GB for retrieval stack, fits comfortably alongside Qwen3-14B Q4_K_M on M5 Pro 24GB. All components Apache 2.0. Layer 3c is the first FULLY-LOCKED layer of kage's retrieval pipeline. | Session 7 |
+| 50 | **Embedding model: Granite Embedding 311M R2 (replaces jina-embeddings-v3, Session 7).** Cosmos Q7 originally recommended jina-embeddings-v3 as default, but post-Cosmos license verification revealed jina-v3 is CC BY-NC 4.0 (non-commercial). Granite Embedding 311M R2 is Apache 2.0 (IBM Research), 311M params, 768d native, MTEB-v2 Retrieval Avg 65.2 (slightly higher than jina-v3 in the relevant comparison), 200+ languages. Trade-off: no Matryoshka truncation, but native 768d at MTEB 65.2 is already smaller than jina at 1024d and competitive on quality. License preservation outweighs the Matryoshka feature. | Session 7 |
+| 51 | **Re-ranker: bge-reranker-v2-m3 (MemReranker not viable for v1, Session 7).** Cosmos Q3 originally recommended MemReranker-0.6B for agent memory, but post-Cosmos verification: (a) MemReranker-0.6B is NOT publicly downloadable — only available via Memos hosted API, which violates kage's local-first principle; (b) MemReranker-4B IS downloadable (Apache 2.0 confirmed) but bf16 weights are 8.83GB — too heavy alongside Qwen3-14B + Granite on 24GB unified memory; (c) jina-reranker-v3 is CC BY-NC, rejected for license reasons. Fall back to bge-reranker-v2-m3: Apache 2.0, ~500MB, ~4 MAP-point gap vs MemReranker-0.6B on agent-memory benchmarks but fits memory budget cleanly. **v1.5 upgrade paths flagged:** (a) if MemReranker-0.6B is released publicly (HF Discussions request pending), swap is trivial behind SentenceTransformer interface; (b) MemReranker-4B Q4-quantized (~2.5GB) is a v1.5/v2 engineering project once quality preservation is validated. **Constraint Reconsideration Trigger applies** (see #52): if quality demonstrably blocks v1 use cases, revisit. | Session 7 |
+| 52 | **Constraint Reconsideration Trigger pattern locked (Session 7).** Safety net for the 4th differentiator's constraint encoding to prevent over-restriction failure mode. **The pattern:** every constraint encoded in Consequences MUST include the rationale's PREMISES (the "because Y" portion). When the Adaptation Principle detects a premise has materially changed (new tools available, scale shift, user behavior drift, new evidence), kage SURFACES the constraint for reconsideration — does NOT silently enforce. This makes constraint encoding a hypothesis-under-current-conditions, not a verdict. Specific operational rules: (a) every Consequences entry has WHY field; (b) periodic premise-validity checks (kage's background workers re-evaluate active constraints); (c) when reconsideration is triggered, kage surfaces with current evidence and asks user to confirm, modify, or revoke; (d) user can always force-reconsider via `kage reconsider <decision>` command. This reconciles Honesty + Adaptation + Confidence-Gated Learning + Awareness over Control simultaneously. | Session 7 |
+| 53 | **4th Differentiator promoted (Session 7).** "Multi-modal memory layer with Confidence-Gated Learning, constraint encoding, and identity-aware retrieval" is added as differentiator #4 in §3. Composed of six locked elements (5 memory types #46, CGL principle, Consequences with Reconsideration Trigger #48 + #52, identity-aware retrieval Layer 3b, privacy-by-architecture, three-mode user support #47). Validated by absence-from-shipping-products across Cosmos Q1-Q5, Q7, Q E v2 + Agent OS audit. **Academic novelty NOT claimed** — Bhatt et al. 2025 (#27) is acknowledged ancestor for the matrix abstraction; the 4th differentiator's claim is product/engineering combination novelty at personal scale. Honest framing maintained. Cosmos Q F null retrieval doesn't disturb the case (tool failure, not novelty evidence). Research-paper-path #18.5 remains deferred post-v1.0 ship. | Session 7 |
 
 ---
 
@@ -944,6 +969,48 @@ Items deliberately set aside — either deferred to a later cycle, conditional o
 - Then Priority 4: lock Layer 3c with verified Cosmos picks.
 - Then Layer-by-layer through Layers 3d, 3e, 4, 5, 6, 7.
 - Then Cycle 1 pitch.
+
+### Session 7 — 2026-05-29 (Layer 3c lock + 4th differentiator promotion)
+
+**Done:**
+- License verification on Cosmos-recommended models surfaced two real issues:
+  - jina-embeddings-v3 is CC BY-NC 4.0 (non-commercial) — REJECTED
+  - MemReranker-0.6B is API-only via hosted Memos service — REJECTED (violates local-first)
+  - MemReranker-4B is downloadable, Apache 2.0, but 8.83GB bf16 — too heavy for v1
+- Granite Embedding 311M R2 swapped in as default embedding model (Apache 2.0, decision #50)
+- bge-reranker-v2-m3 confirmed as v1 reranker (Apache 2.0, decision #51)
+- MemReranker-0.6B HF Discussions request pending (user-initiated) — if released publicly, swap-in candidate for v1.5
+- MemReranker-4B Q4-quantized flagged as v1.5/v2 engineering project (quality validation needed)
+- Layer 3c FULLY LOCKED (decision #49): BM25 + Granite + FAISS + LightRAG dual-level + RRF + bge-reranker + Graphify provenance + hybrid sync/async ingest
+- Constraint Reconsideration Trigger pattern locked (#52) — addresses the over-restriction failure mode for constraint encoding
+- 4th differentiator promoted (#53) — "Multi-modal memory layer with CGL, constraint encoding, identity-aware retrieval" added to §3
+- §3 (Defensible Differentiator) updated to four real differentiators
+- Cosmos Q F (4th differentiator novelty check) returned null retrieval — tool failure, not novelty evidence; doesn't disturb the case
+- Cosmos Q I (rerankers / MLX search) returned null retrieval — same tool issue; recommendation defaulted to bge from audited facts (matched our independent reasoning)
+
+**Layer 3c is the FIRST fully-locked layer of kage's retrieval pipeline.**
+
+**Pending (background, non-blocking):**
+- MemReranker-0.6B HF Discussions response — if positive, v1.5 swap
+- MemReranker-4B quantization quality validation — v1.5/v2 engineering project
+- Cosmos tool reliability — track whether subsequent queries retrieve documents
+
+**Pending revisits / design work:**
+- Layer 3d (Tiered Assembly) design — next-up
+- Layer 3e (Privacy / Disclosure) design
+- Layer 4 (Multi-Vendor Router) design — Pattern 5 already locked directionally
+- Layer 5 (Memory Storage) design — 5-type schema locked #46, needs operational design
+- Layer 6 (Learning) dedicated design session — memory-layer learning, NOT LoRA
+- Layer 7 (MCP Server out) design — priority HIGH per #41
+- Layer 1 + Layer 2 detail
+- Layer 2 dedicated agent-architecture session (Q E v2 + OJ source audit)
+- Cycle 1 pitch
+- Integrate Agent OS coexistence patterns into Layer 5 + Layer 6 design
+
+**Next session resume point:**
+- Open `docs/blueprint.md`. Confirm context loads.
+- Layer 3c is locked. Move to Layer 3d (Tiered Assembly) design.
+- After 3d → 3e → 4 → 5 → 6 → 7 → 1+2 detail → Cycle 1 pitch.
 
 ### Session 4 — 2026-05-23 (brainstorm integration + new principles)
 

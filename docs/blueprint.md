@@ -6,7 +6,7 @@
 > **Purpose of this file:** Single source of truth for the kage project state.
 > Open this at the start of any session to re-enter with full context.
 >
-> *Last updated: 2026-05-29, end of Session 8 (Layer 3e lock).*
+> *Last updated: 2026-05-30, end of Session 9 (Layer 4 lock).*
 >
 > *Companion docs:*
 > - [architecture.md](architecture.md) — visual system map
@@ -827,9 +827,293 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 - Confirmation UX rendering (which prompt format)
 - Audit log query interface (CLI command shape)
 
-### Layers 4, 5, 6, 7
+### Layer 4 — Multi-Vendor Router
 
-**Status:** Not yet designed. Layer 4 (Multi-Vendor Router) next-up (Session 8+).
+**Status:** Designed and locked (directional). Session 9. Validated against Cosmos Q L (vLLM-SR / Workload-Router-Pool, RouteLLM, Johnson & Lee taxonomy, Select-then-Route, AAP/OAP, Claude Code permission empirical brittleness, SPL-flow chain pattern).
+
+**Role in pipeline:** After Layer 3e produces a privacy-cleared, minimized context slice, Layer 4 selects WHICH model handles the query and dispatches. Decision boundary: Layer 3e decides WHAT goes out; Layer 4 decides WHERE it goes. Both must agree per the Design B contract (#64).
+
+**Routing tuple — 3-dimensional:**
+
+```
+   target = (VENDOR, ACCOUNT, MODEL)
+   
+   Examples:
+     (Claude,     NEU,      Opus)
+     (Claude,     Personal, Sonnet)
+     (Gemini,     NEU,      Pro)
+     (Perplexity, Personal, Pro)
+     (Local,      -,        Qwen3-14B-Q4)
+   
+   Account is FIRST-CLASS and INDEPENDENT of identity/
+   project context (decision #61). Memory partition wall
+   (Layer 3b) stays inviolable; the PAYER changes, the
+   CONTEXT doesn't. Data protection is handled by Layer
+   3e (minimization + sensitivity cascade), NOT by
+   account-identity coupling.
+```
+
+**Six-class taxonomy with two-part class policy (decision #62):**
+
+```
+   CLASS         LOCAL/CLOUD BIAS    PREFERRED VENDOR (if cloud)
+   ────────────  ──────────────────  ──────────────────────────
+   chat          local first         Claude (Haiku/Sonnet ok)
+   code          cloud-leaning v1    Claude (Sonnet, then Opus)
+   reasoning     cloud-leaning v1    Claude (Opus on NEU)
+   research      cloud               Perplexity (facts) / Claude
+   multimodal    cloud               Gemini
+   system-ctrl   LOCAL ONLY          n/a (hard rule)
+   
+   Model TIER is "best available on chosen account" (NEU=
+   Opus when free; Personal=whatever's there). Per-class
+   policy values are LEARNED over time via Layer 6's
+   reputation table (decision #68); v1 starts static.
+```
+
+**Minimum-viable-model decision cascade (decision #63):**
+
+```
+   For every query:
+     1. Classify (#62) — embedding classifier <15ms
+     2. Try LOCAL first if class qualifies
+          AND classifier confident
+          AND local-reputation high enough
+     3. Else CLOUD with best-available on chosen account
+     4. If best-available fails capability bar: escalate
+        within account (Personal: Haiku→Sonnet→Opus) OR
+        fall to alternate account
+   
+   "Never over-route" (Opus for chat is slow even when
+   free). "Never under-route" (Haiku for hard reasoning
+   fails quality bar). RouterArena [8.1] finding:
+   recognizing-cheaper-suffices is where most savings live.
+```
+
+**Layer 3e × Layer 4 contract — Design B (decision #64):**
+
+```
+   "Filter a ranked list" — not iterative loop:
+   
+     1. Layer 4 produces ranked candidate list per #63
+     2. Layer 3e walks the list:
+          - Stage 1 (identity) and Stage 2 (minimization)
+            cached once
+          - Stage 3 (sensitivity) and Stage 4 (policy)
+            re-run per candidate (account-specific policy)
+     3. Top survivor of the filtered list is dispatched
+     4. Cycle limit: max 3 candidates before fail-closed
+        ("no acceptable target found")
+   
+   Validated by vLLM-SR pattern [10.1]: "cache lookup
+   occurs after safety checks but before model invocation."
+   AAP [4.2]: "authorization must be evaluated at
+   execution time."
+```
+
+**Safety Copilot — three-tier action gate (decision #65):**
+
+```
+   TIER 1 — Read-only / informational    → SILENT execution
+            (list files, summarize, query)
+   
+   TIER 2 — Reversible state changes     → CONFIRM + UNDO PATH
+            (rename file, save memory, draft email)
+   
+   TIER 3 — Irreversible / high blast    → FULL SAFETY BRIEFING
+            (rm -rf, send email NOW, git push --force,
+             execute curl, drop database, system settings)
+   
+   Tier 3 Safety Copilot pattern (Jarvis-style):
+     1. State exactly what will happen, plain English
+     2. Surface what could go wrong
+     3. Walk precondition checklist
+        (backup exists? working tree clean? remote pushed?)
+     4. REFUSE if hard precondition unmet (no backup +
+        irreversible op = aborting until satisfied or
+        explicit override)
+     5. Explicit typed confirmation (not just click)
+     6. Optional 5-second cancel window
+     7. Dry-run preview where feasible
+   
+   Justified by Claude Code empirical brittleness evidence
+   [3.1, 3.2]: deny rules silently ignored, Cmd+Enter dual-
+   action approval, sandbox bypasses, 851GB auto-yes
+   subagent. Generic "are you sure?" is empirically broken.
+```
+
+**Cost ceiling — class-aware graduated cascade (decision #66):**
+
+```
+   Per-account budget tracking (NEU + Personal each
+   tracked separately). 80% → peripheral warn. 100% OR
+   per-query >3× expected → mitigation cascade, PATH
+   SELECTED BY TASK CLASS:
+   
+   HIGH-importance classes (research / reasoning / code /
+   multimodal):
+     (a) CROSS-ACCOUNT FALLBACK first — same/comparable
+         tier on alternate account (quality preserved)
+     (b) If no alternate capacity:
+         shape tools → compress prompts → downgrade model
+     (c) TERMINATE as last resort
+   
+   LOW-importance classes (chat):
+     (a) DOWNGRADE / MITIGATE first — cheaper model on
+         same account (Opus → Sonnet → Haiku → local)
+     (b) Only cross-account if downgrade insufficient
+     (c) TERMINATE as last resort
+   
+   NON-CLOUD classes (system-ctrl):
+     N/A — local-only, no cascade
+   
+   User informed peripherally at each step (Honesty).
+   User override per query ("treat as HIGH" or "use Opus
+   regardless"). Per-query smart routing (#62 + #63)
+   handles routine optimization; cascade fires only under
+   pressure.
+   
+   Validated by vLLM-SR concrete pattern [4.3]: >3×
+   expected = trigger, graduated mitigation cascade.
+```
+
+**Failure cascade — explicit ordered chain (decision #67):**
+
+```
+   Per-class chain, user-configurable. Default heuristics:
+   
+   research:    NEU-Claude-Opus → NEU-Claude-Sonnet →
+                Perplexity → Personal-Claude-Sonnet →
+                Local-Qwen3
+   reasoning:   NEU-Claude-Opus → NEU-Claude-Sonnet →
+                Personal-Claude-Sonnet → Local-Qwen3
+   code:        NEU-Claude-Sonnet → NEU-Claude-Opus →
+                Personal-Claude-Sonnet → Local-Qwen3
+   multimodal:  NEU-Gemini-Pro → NEU-Gemini-Flash →
+                Personal-Gemini → Local (limited)
+   chat:        Local-Qwen3 → NEU-Claude-Haiku →
+                Personal-Claude-Haiku
+   system-ctrl: Local-Qwen3 (no fallback — local-only)
+   
+   Failure handling:
+     TRANSIENT (timeout, 5xx, rate-limit): retry same
+       target N times, then fall through
+     HARD (auth fail, content-policy block, account
+       suspended): no retry, fall through immediately
+   
+   Layer 3e re-checks per fallback target (Design B #64).
+   Notification policy: silent for transient retries,
+   peripheral for cascade traversal, explicit interrupt
+   for cascade exhaustion or content-policy block.
+   
+   Validated: SPL-flow [13.1] explicit Ollama → OpenRouter
+   chain; vLLM-SR [10.1] multi-provider/multi-endpoint
+   routing design.
+```
+
+**Local-to-cloud graduation — reputation table (decision #68):**
+
+```
+   kage tracks per (class, model, account) outcome
+   counters + Bayesian confidence bounds (vLLM-SR [4.8]
+   pattern). When local's confidence bound exceeds
+   class-specific threshold, that class GRADUATES to
+   local-default.
+   
+   Realistic expectations (Honesty Principle):
+     Will Qwen3-14B-Q4 beat Opus on hard reasoning? NO.
+     14B has a real capability ceiling regardless of
+     fine-tuning. The local advantage is PERSONALIZATION
+     (knows YOU), CONTEXT IMMEDIACY (memory is local),
+     LATENCY (no round-trip), PRIVACY, and REPETITION.
+   
+   Expected graduation curve (end of year 1):
+     ~60-70% of queries → local (chat, system-ctrl,
+       code/simple, narrow specialized domains)
+     ~30-40% of queries → cloud (research, hard reasoning,
+       multimodal, complex code)
+   
+   This IS the broker function working as designed. NOT
+   "local replaces cloud." Local and cloud each do their
+   best work.
+   
+   Un-graduation: if local regresses on a class
+   (distribution shift, regression), class returns to
+   cloud-default. Honesty Principle — user informed.
+   
+   Confidence-Gated Learning principle (locked, deferred
+   to Layer 6) is operationalized at the routing layer
+   here. Layer 6 owns the learning loop; Layer 4 just
+   consumes the reputation table.
+```
+
+**Novelty framing (decision #69) — integration is the novelty:**
+
+```
+   Acknowledged prior art (Cosmos Q L retrieval):
+     • vLLM-SR / Workload-Router-Pool: gateway identity,
+       per-decision policy, graduated mitigation cascade,
+       signal-driven routing
+     • RouteLLM: task-class routing with cost threshold
+     • Johnson & Lee: discrete taxonomy + per-class policy
+     • Select-then-Route: multi-dim taxonomy + cascade
+     • AAP / OAP: JWT identity claim + execution-time
+       authorization
+     • Claude Code permission tiers (with documented
+       empirical brittleness motivating Safety Copilot)
+     • SPL-flow: explicit fallback chain pattern
+   
+   What's novel under Cosmos retrieval:
+     Combining ALL of (multi-account routing within a
+     single vendor + task-class minimum-viable + feedback-
+     driven local graduation + pre-action Safety Copilot
+     + per-account privacy/policy gate integration) in
+     a unified LOCAL-FIRST PERSONAL BROKER. No single
+     production or research system shown doing this.
+   
+   Direct quote from Cosmos Q L: "the most novel part of
+   kage's combined approach would likely be the joint
+   optimization across identity/account policy, task
+   taxonomy, adaptive graduation, and safety-copilot UX
+   in a single local-first runtime, with explicit
+   fallback chains and per-account budgets."
+   
+   Stronger novelty signal than #1 differentiator (which
+   has Bhatt et al. 2025 as academic ancestor). Layer 4's
+   integration has no single ancestor.
+   
+   Honest pitch: "kage applies enterprise-gateway patterns
+   to a personal-scale local broker, in a unified
+   composition that shipped products and research papers
+   address only piecewise. The novelty is the integration,
+   not the components."
+   
+   Matches honest-framing precedent set by #53 and #60.
+```
+
+**Parked v1.5+ candidates (informed by Session 9 brainstorm):**
+
+- Parallel local assist — local model gathers info / scouts references in parallel while cloud reasons on main thread
+- Plan-and-execute pattern — heavy model produces plan; light/local model executes
+- Cross-session optimization — kage learns "your side questions during research are usually chat-class" and routes proactively
+- Context-aware downrouting — kage detects thread shift from heavy to light topic mid-session and downroutes next query before user asks
+
+**Deferred to Stage 1 engineering:**
+
+- Exact qualification criteria per class (heuristic v1; learned over time)
+- Initial confidence thresholds
+- Override UX (user forces tier higher for a specific query)
+- Risk-tier classifier shape (rules vs LLM vs hybrid)
+- Precondition checklist library per action type
+- Per-class default chain configs (starting heuristics above; user-tunable)
+- Token-vs-dollar accounting per account
+- Reputation table schema and update frequency
+- Graduation thresholds per class
+- Cycle-limit behavior for Design B candidate ordering
+
+### Layers 5, 6, 7
+
+**Status:** Not yet designed. Layer 5 (Memory Storage) or Layer 7 (MCP Server Out) next-up (Session 10+).
 
 ---
 
@@ -926,6 +1210,15 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 | 58 | **Relevance-first minimization in Stage 2 (NOT age-based, Session 8).** When over per-tool budget, Stage 2 prunes by LOWEST relevance first using Layer 3c's RRF + reranker scores. Age is tie-breaker only — never the primary cut. Storage (Layer 5) is NEVER pruned by Stage 2; only the current dispatch slice. Old-but-relevant memories survive because Layer 3c's semantic retrieval ranks them high regardless of age (e.g. "remember what we decided in March?" surfaces March memory via reranker score, not recency). HEMA's age-weighted pruning was a working-context heuristic, not appropriate for kage's persistent memory layer. | Session 8 |
 | 59 | **Aggressive default budgets, user-configurable per-tool (Session 8).** Default per-tool minimization is aggressive (Claude ~3500, Perplexity ~2000, Gemini ~2500 tokens) — favors sending the minimum useful slice. User can raise per-tool ceiling at config time for specific tasks. Aligns with Privacy Goal (locked May 24): "nothing leaves unless explicitly routed." Validated by HEMA evidence (Compact+Vector at <3500 tokens reaches 87% QA accuracy vs 41% raw) — aggressive minimization is not a quality sacrifice when paired with two-channel design (summary + selective verbatim). | Session 8 |
 | 60 | **Layer 3e novelty framing: integration, not invention (Session 8).** Acknowledged prior art for the 4-stage gate pattern: enclawed (single-user hardened gateway, ArXiv 2604), Secure MCP gateway guidance (Errico et al., 2511), SMCP protocol formalization, Governance-in-the-Loop (GiL, 2026). kage's novel claim is the INTEGRATION at personal scale: local-first personal broker + minimization-first design + cross-vendor dispatch + integration with state-aware identity partition memory (differentiator #4). Pitch the integration; cite the components. Honest framing maintained per #53 precedent. | Session 8 |
+| 61 | **Layer 4 routing tuple: (VENDOR, ACCOUNT, MODEL) — account is first-class AND decoupled from identity/project (Session 9, Cosmos Q L-validated).** Account is independent of identity/project context; user can mix freely (e.g., personal project routed via NEU account). Identity/project wall (Layer 3b) stays inviolable; memory partition does not change based on account choice. Data protection is handled by Layer 3e (minimization + sensitivity cascade), NOT by account-identity coupling — account choice affects BILLING, not data exposure. Account is user-overridable per query/session. Default chain: local first if #63 qualifies → NEU cloud (free credits + best tier) → Personal cloud as overflow (possibly deprecated long-term). Audit log captures (memory_identity, account_used) pair; routine cross-billing does NOT interrupt — only meaningful events (budget thresholds, account failures, sensitivity blocks) trigger user notification. Mechanism: bearer-token / JWT identity claim per account [4.2, 4.4]. Layer 3e policy widens to 3-dim key (target_vendor, target_account, target_model). | Session 9 |
+| 62 | **Layer 4 pre-classification: small discrete six-class taxonomy + two-part per-class policy (Session 9, Cosmos Q L-validated).** Taxonomy: chat / code / reasoning / research / multimodal / system-ctrl. Class policy drives (a) LOCAL-vs-CLOUD bias and (b) preferred VENDOR within cloud (research → Perplexity, multimodal → Gemini, default → Claude). Model TIER is "best available on chosen account" (NEU=Opus, Personal=whatever's there), NOT class-derived — collapses unneeded complexity. Embedding classifier (mmBERT-class) at <15ms latency [5.5]. Per-class policy values are LEARNED over time via Layer 6 reputation table (see #68); v1 starts with static defaults. Auditable, version-controlled, testable. Validated by Johnson & Lee [11.1], Select-then-Route [12.1]; RouterArena [8.1] confirms discrete taxonomy + explicit policy avoids the "learned routers don't recognize cheaper-suffices" failure mode. | Session 9 |
+| 63 | **Layer 4 routing principle: MINIMUM VIABLE MODEL (Session 9, Cosmos Q L-validated).** For every query, route to the LOWEST-TIER target meeting the task-class capability bar. Never over-route (Opus for chat is slow even when free). Never under-route (Haiku for hard reasoning fails the bar). Decision cascade per query: (1) classify per #62; (2) try LOCAL first if class qualifies, classifier confident, reputation table supports it; (3) else CLOUD with best-available on chosen account; (4) escalate within account if needed (Personal: Haiku→Sonnet→Opus) OR fall to alternate account. Mirrors Layer 3e's minimization at the data level (same broker philosophy, model-selection layer). Validated by RouterArena [8.1] finding that recognizing-when-smaller-models-suffice captures most router savings. Engineering specifics (qualification criteria, confidence thresholds, override UX) deferred to Stage 1. | Session 9 |
+| 64 | **Layer 3e × Layer 4 contract: DESIGN B — filter a ranked list (Session 9, Cosmos Q L-validated).** Layer 4 produces a ranked candidate list (per #61-#63); Layer 3e walks the list and filters. Top survivor is dispatched. One pass, not iterative loop. Stages 1-2 of Layer 3e (identity check + minimization) run once and cache; Stages 3-4 (sensitivity + per-tool policy) re-run per candidate because same data routed via different (vendor, account, model) has different policies. Max 3 candidate iterations before fail-closed (kage reports "no acceptable target found"). Validated by vLLM-SR [10.1] pattern ("cache lookup occurs after safety checks but before model invocation") and AAP [4.4] ("authorization must be evaluated at execution time"). | Session 9 |
+| 65 | **Layer 4 Safety Copilot: 3-tier risk model with Jarvis-style briefing for Tier 3 (Session 9, Cosmos Q L-validated).** Three tiers based on blast radius: TIER 1 read-only/informational → silent execution; TIER 2 reversible state changes → confirm + undo path preserved; TIER 3 irreversible/high blast → full Safety Copilot briefing (state what will happen + surface what could go wrong + walk precondition checklist + REFUSE if hard precondition unmet + explicit typed confirmation + optional 5-second cancel window + dry-run preview where feasible). Reference: Jarvis briefing Tony before Extremis injection (Iron Man 3, Mark 45 era). User stays in command; kage covers diligence. Justified by Claude Code empirical brittleness evidence [3.1, 3.2]: deny rules silently ignored, Cmd+Enter dual-action approvals, 851GB auto-yes subagent — generic "are you sure?" is empirically broken. Connects to Complement framing, Honesty (TARS), Confidence-Gated Learning (Layer 6 deferred). Risk-tier classifier shape, precondition library, override UX deferred to Stage 1. | Session 9 |
+| 66 | **Layer 4 cost ceiling: class-aware graduated mitigation cascade (Session 9, Cosmos Q L-validated).** Per-account budget tracking (NEU + Personal each separate). 80% → peripheral warn (no interrupt). 100% OR per-query >3× expected → mitigation cascade, PATH SELECTED BY TASK CLASS. HIGH-importance (research/reasoning/code/multimodal): (a) cross-account fallback first (preserve quality), (b) shape tools → compress → downgrade if no alternate capacity, (c) terminate as last resort. LOW-importance (chat): (a) downgrade/mitigate first (cheaper model same account), (b) only cross-account if downgrade insufficient, (c) terminate. NON-CLOUD (system-ctrl): no cascade (local-only). User informed peripherally at each step (Honesty). Per-query smart routing (#62 + #63) handles routine optimization without budget pressure — cascade fires only under actual pressure. Validated by vLLM-SR concrete pattern [4.3]. | Session 9 |
+| 67 | **Layer 4 failure cascade: explicit ordered chain per class (Session 9, Cosmos Q L-validated).** Per-class fallback chain (user-configurable; starting heuristics: research = NEU-Opus → NEU-Sonnet → Perplexity → Personal-Sonnet → Local; chat = Local → NEU-Haiku → Personal-Haiku; system-ctrl = Local only). Failure types: TRANSIENT (timeout, 5xx, rate-limit) → retry same target N times then fall through; HARD (auth fail, content-policy block, account suspended) → no retry, fall through immediately. Layer 3e re-checks per fallback target (Design B #64). Notification: silent for transient retries, peripheral for cascade traversal, explicit interrupt for cascade exhaustion or content-policy block. Validated by SPL-flow [13.1] explicit Ollama → OpenRouter pattern and vLLM-SR [10.1] multi-provider routing design. Retry counts, content-policy recovery UX, idempotency guarantees deferred to Stage 1. | Session 9 |
+| 68 | **Layer 4 local-to-cloud graduation: reputation table + Bayesian confidence bounds (Session 9, Cosmos Q L-validated).** Per (class, model, account) outcome counters (successes/total) + Bayesian confidence bound [4.8]. When local's lower CI bound exceeds class-specific threshold, class GRADUATES to local-default. Realistic expectations (Honesty Principle): Qwen3-14B-Q4 will NOT beat Opus on hard reasoning (14B capability ceiling is real regardless of fine-tuning); local advantage is PERSONALIZATION + CONTEXT IMMEDIACY + LATENCY + PRIVACY + REPETITION. Expected end-of-year-1: ~60-70% queries → local (chat, system-ctrl, code/simple, narrow specialized), ~30-40% → cloud (research, hard reasoning, multimodal, complex code). THIS IS the broker function working as designed — NOT "local replaces cloud." Un-graduation: if local regresses on a class, returns to cloud-default with user notification (Honesty). Operationalizes Confidence-Gated Learning (locked principle, deferred to Layer 6); Layer 6 owns learning loop, Layer 4 consumes the table. Engineering specifics (success definition, schema, thresholds, distillation pipeline) deferred to Layer 6 design. | Session 9 |
+| 69 | **Layer 4 novelty framing: integration is the novelty (Session 9).** Acknowledged prior art (Cosmos Q L): vLLM-SR (gateway identity + per-decision policy + graduated mitigation), RouteLLM (task-class routing), Johnson & Lee (discrete taxonomy + per-class policy), Select-then-Route (multi-dim taxonomy + cascade), AAP/OAP (JWT identity + execution-time authorization), Claude Code permission tiers (with documented empirical brittleness motivating Safety Copilot), SPL-flow (explicit fallback chain). kage's novel claim is the UNIFIED COMPOSITION of (multi-account routing within single vendor + task-class minimum-viable + feedback-driven local graduation + pre-action Safety Copilot + per-account privacy/policy gate integration) in a local-first personal broker — no single production or research system shown doing all five. Direct Cosmos Q L quote: "the most novel part of kage's combined approach would likely be the joint optimization across identity/account policy, task taxonomy, adaptive graduation, and safety-copilot UX in a single local-first runtime, with explicit fallback chains and per-account budgets." Stronger novelty signal than #1 differentiator (Bhatt et al. 2025 ancestor); Layer 4 integration has no single ancestor. Honest pitch: "kage applies enterprise-gateway patterns to a personal-scale local broker, in a unified composition shipped products and research papers address only piecewise." Matches #53 and #60 honest-framing precedent. | Session 9 |
 
 ---
 
@@ -936,8 +1229,8 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 1. ✓ **Layer 3c — Hybrid retrieval shape** — LOCKED Session 7 (#49-52)
 2. ✓ **Layer 3d — Tiered assembly shape** — LOCKED Session 7 (#54-56)
 3. ✓ **Layer 3e — Privacy / disclosure mechanics** — LOCKED Session 8 (#57-60)
-4. **Layer 4 — Multi-vendor router** (signal sources for routing decisions: cost, capability, privacy, latency) — **next up**
-5. **Layer 5 — Memory storage** (on-disk layout, FAISS + BM25 + graph + episodic, partition tags)
+4. ✓ **Layer 4 — Multi-vendor router** — LOCKED Session 9 (#61-69)
+5. **Layer 5 — Memory storage** (on-disk layout, FAISS + BM25 + graph + episodic, partition tags) — **next up**
 6. **Layer 6 — Learning T1** (preferences + entities + implicit feedback)
 7. **Layer 7 — MCP server out** (endpoints, schema, auth)
 8. **Layer 1 — Trigger / Interface detail** (CLI shape, menu bar, okiro)
@@ -1282,6 +1575,54 @@ Items deliberately set aside — either deferred to a later cycle, conditional o
 **Next session resume point:**
 - Commit + push Layer 3d + 3e blueprint edits to GitHub (Session 7+8 work bundled)
 - Begin Layer 4 (Multi-Vendor Router) design — Pattern 5 (pre-classification) directionally locked, needs full design
+
+### Session 9 — 2026-05-30 (Layer 4 lock)
+
+**Done:**
+- Layer 4 (Multi-Vendor Router) FULLY LOCKED across 9 directional decisions (#61-#69)
+  - #61: Routing tuple is (VENDOR, ACCOUNT, MODEL); account is first-class AND decoupled from identity/project
+  - #62: Six-class discrete taxonomy + two-part class policy (LOCAL-or-CLOUD + preferred vendor); model TIER is "best available on account," not class-derived
+  - #63: Minimum viable model is the routing principle (try local first → cloud best-available → escalate as needed)
+  - #64: Layer 3e × Layer 4 contract is Design B — "filter a ranked list" (one pass, not iterative)
+  - #65: Safety Copilot pattern with 3-tier risk model (silent / confirm+undo / full Jarvis briefing)
+  - #66: Cost ceiling via class-aware graduated mitigation cascade (HIGH classes: cross-account first; LOW classes: downgrade first)
+  - #67: Failure cascade as explicit ordered chain per class
+  - #68: Local-to-cloud graduation via reputation table + Bayesian confidence bounds (CGL operationalized at Layer 4)
+  - #69: Novelty framing — integration is the novelty; cite vLLM-SR, RouteLLM, Johnson & Lee, Select-then-Route, AAP/OAP, Claude Code, SPL-flow as prior art
+- Cosmos Q L returned strong evidence pack — 5 of 7 design choices have direct production/research precedent
+  - RouterArena validated minimum-viable framing
+  - vLLM-SR validated Design B (per-target gate) + graduated mitigation cascade
+  - Claude Code brittleness evidence [3.1, 3.2] justified Safety Copilot (not just confirmation)
+  - AAP/OAP validated bearer-token identity as account mechanism
+  - SPL-flow validated explicit fallback chain pattern
+- User refinements through Session 9 conversation:
+  - Account decoupled from identity/project (his framing — billing ≠ context)
+  - Privacy data protection comes from Layer 3e cascade, NOT account-identity coupling
+  - Model TIER simplified to "best available on account" (his sharpening — avoids over-engineering)
+  - Cross-account fallback BEFORE quality degradation only for HIGH-importance classes (his nuance)
+  - Per-class cascade ordering (HIGH vs LOW classes get different cascades)
+- Iron Man references locked to memory: Jarvis (Mark 45 + Extremis) is the Safety Copilot reference; TARS (Interstellar) is the Honesty Principle reference
+- Cosmos Q L explicitly identified integration as novel: "joint optimization across identity/account policy, task taxonomy, adaptive graduation, and safety-copilot UX in a single local-first runtime, with explicit fallback chains and per-account budgets"
+- Stronger novelty signal than #1 differentiator (which has Bhatt et al. 2025 as academic ancestor) — Layer 4 integration has no single ancestor
+
+**v1.5+ candidates parked (Layer 6 + future Layer 4 refinement):**
+- Parallel local assist (cloud reasons; local gathers info in parallel)
+- Plan-and-execute pattern (heavy plans; light executes)
+- Cross-session optimization (learn user routing patterns proactively)
+- Context-aware downrouting (detect thread shift mid-session)
+
+**Realistic graduation expectations (Honesty Principle):**
+- Qwen3-14B-Q4 will NOT beat Opus on hard reasoning — 14B has a real capability ceiling regardless of fine-tuning
+- Local advantage is personalization + context immediacy + latency + privacy + repetition
+- End-of-year-1 expected: ~60-70% queries → local; ~30-40% → cloud
+- This IS the broker function working as designed
+
+**Layer 4 is the THIRD fully-locked layer of kage's pipeline (after 3c and 3e).** Layers 3a, 3b, 3d also locked at directional altitude. Six-of-nine layers have lock state; three remain to design (5, 6, 7, plus 1+2 detail).
+
+**Next session resume point:**
+- User noted: may revisit Layer 4 tomorrow to ensure nothing was missed (Complete-over-fast principle supports this)
+- After Layer 4 review confirmed: begin Layer 5 (Memory Storage) design or Layer 7 (MCP Server Out) priority HIGH per #41
+- Cycle 1 pitch after all layers locked
 
 ### Session 4 — 2026-05-23 (brainstorm integration + new principles)
 

@@ -6,7 +6,7 @@
 > **Purpose of this file:** Single source of truth for the kage project state.
 > Open this at the start of any session to re-enter with full context.
 >
-> *Last updated: 2026-06-01, end of Session 10 (Layer 4 revisit refinements).*
+> *Last updated: 2026-06-02, end of Session 11 (Layer 5 lock).*
 >
 > *Companion docs:*
 > - [architecture.md](architecture.md) — visual system map
@@ -1111,9 +1111,102 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 - Graduation thresholds per class
 - Cycle-limit behavior for Design B candidate ordering
 
-### Layers 5, 6, 7
+### Layer 5 — Memory Storage
 
-**Status:** Not yet designed. Layer 5 (Memory Storage) or Layer 7 (MCP Server Out) next-up (Session 10+).
+**Status:** Designed and locked (directional). Session 11. Validated against Cosmos Q M (Claude/ChatGPT opacity, MemX, vstash, Miteski "memory as metabolism," Foundation Agents survey, MIRIX typed schema, Letta/MemGPT, Cognee, Obsidian/Notion PKM patterns).
+
+**Role in pipeline:** PERSISTENCE substrate. All layers above operate logically on memories; Layer 5 is where they physically live. The read path feeds Layer 3c; the write path is fed by Layer 3b ingest (#28).
+
+**Three sub-store architecture (5A authoritative; 5B + 5C derived):**
+
+```
+   ~/.kage/
+   ├── memory/                   ← 5A: CONTENT (source of truth)
+   │   ├── core/
+   │   ├── procedural/
+   │   ├── semantic-sor/
+   │   ├── semantic-vocab/
+   │   └── episodic/
+   │       └── 01HK..-session-9-router-lock.md
+   ├── indexes/
+   │   ├── kage.db               ← 5B: SQLite (metadata +
+   │   │                           partition + FTS5 + audit +
+   │   │                           schema version)
+   │   └── vector.faiss          ← 5C: FAISS (IndexFlatIP,
+   │                               Granite 768d, derived)
+   └── config/
+       ├── accounts.toml         (Layer 4 #61)
+       └── policies.toml         (Layer 3e #57)
+```
+
+**5A — CONTENT STORE (decision #70):**
+- Markdown files, one per memory, YAML frontmatter for metadata
+- Folder structure BY TYPE (5-type schema #46); partition (identities/projects/state) lives in frontmatter + SQLite index, NOT in folders (because memories belong to MULTIPLE projects/identities per #18)
+- File naming: `<ulid>-<slug>.md` (ULID = time-sortable, globally unique)
+- AUTHORITATIVE source of truth; everything else regenerable from these files
+- Rationale: human-readable (inverts ChatGPT bio-tool opacity), git-trackable (free versioning), Agent-OS/Notion-compatible. Validated by Obsidian local-first pattern [6.1], Miteski "plain text as authoritative" [10.1]
+
+**5B — SQLITE (decision #71):**
+- Single file `kage.db`, stock SQLite (NOT libSQL — revisit at Layer 8 mesh), WAL mode
+- Tables: `memories` (id, type, state, content_path, content_hash, timestamps, access_count, vitality_score, schema_version), `memory_projects` + `memory_identities` (many-to-many JOIN tables, NOT JSON arrays — indexed sub-ms partition filter at 100K), `memory_fts` (FTS5 BM25), `audit_log` (Ed25519 + SHA-256 hash chain per #57), `schema_version`
+- Schema versioning + integrity checks (PRAGMA integrity_check on startup, content-hash verification, mismatch logs+alerts never silent overwrite) — vstash pattern [8.2]
+- DERIVED from 5A; fully regenerable. Validated by MemX (FTS5 1100× speedup, <90ms at 100K) [7.1], vstash (20.9ms at 50K) [8.1]
+
+**5C — FAISS VECTOR INDEX (decision #72):**
+- FAISS `IndexFlatIP` for v1 (exact search — zero accuracy loss at ≤100K; ~300MB at 100K×768d; upgrade to IVF/HNSW only beyond ~500K vectors, which personal scale won't hit for years)
+- Granite Embedding 311M R2, 768d (#50)
+- Incremental add/remove via IndexIDMap; full rebuild ONLY on embedding-model swap
+- Persist to `vector.faiss`, load at startup (<1s), checkpoint after async ingest batches + on shutdown
+- docid→vectorid mapping in SQLite (5B)
+- DERIVED from 5A; embedding model version recorded so kage knows when reindex is needed
+
+**Memory budget (M5 Pro 24GB, at 100K memories):**
+```
+   Qwen3-14B Q4_K_M       ~10 GB
+   Granite Embedding 311M  ~0.5-1 GB
+   bge-reranker-v2-m3      ~0.5 GB
+   FAISS (100K × 768d)     ~0.3 GB
+   SQLite (metadata+FTS5)  ~0.1-0.5 GB
+   OS + overhead           ~4-6 GB
+   ─────────────────────────────────
+   Total                   ~16-18 GB  → fits with headroom
+```
+
+**Read path:** SQLite pre-filter (project AND identity AND state → candidate docids) → FTS5 BM25 + FAISS dense over candidates → RRF fusion → bge-reranker (Layer 3c) → fetch winning content from markdown (5A).
+
+**Write path (#28 hybrid):** SYNC: write markdown (5A) → insert SQLite rows (5B) → return success. ASYNC: embed via Granite → add to FAISS (5C) → update FTS5 + docid map (5B). Crash-safe: if async fails, memory still findable via SQLite metadata + manual reindex.
+
+**Retention (decision #73):**
+- scoped/baseline (committed): NEVER auto-expire (echoes #58 — old-but-relevant must survive)
+- pending: OPTIONAL flag-not-delete after N days (default OFF; parked #15.5; flag for review, never silent drop)
+- Deletion: soft-delete to `~/.kage/memory/.trash/` with 30-day grace (Safety Copilot #65 Tier-2 undo path), then optional hard-purge. Audit log NEVER purged (#57 immutable)
+
+**Three-mode support (decision #74):**
+- `MemoryStore` interface (save/get/query/update/delete) — everything above Layer 5 talks through this; mode-agnostic
+- v1 ships `LocalAdapter` ONLY (5A+5B+5C, fully local)
+- `HybridAdapter` (Notion mirror) and `NotionCanonicalAdapter` DEFERRED entirely — parked on roadmap per #47
+- Rationale: locking the INTERFACE now (cheap, per #22 "architect for 3 years") means adding Notion later = one new adapter, zero rework of locked layers. "Source of truth" is the only thing that varies across modes
+- Cosmos Q M novelty finding: no system does true user-selectable tri-mode storage; kage's #47 is novel at productized level (deferred but architecturally preserved)
+
+**Schema evolution (decision #75):**
+- Schema version stamped in 5A frontmatter + 5B table
+- Old memories readable FOREVER; additive changes use default-on-read (no migration)
+- Structural changes use versioned idempotent migrations (vstash pattern), gated by Safety Copilot (#65 Tier-3: backup-verify before run)
+- Markdown-source-of-truth makes migration safe: migrate authoritative files, regenerate SQLite+FAISS from them (no index/content drift). Git-trackable = reviewable diff + rollback
+- Embedding model change → full FAISS reindex (per 5C)
+
+**Novelty framing (decision #76):** Claude/ChatGPT/Gemini storage internals are OPAQUE (Cosmos Q M found no public substrate disclosure). kage's hybrid (files-authoritative + SQLite-index + FAISS-derived) matches MemX + vstash reference designs — the two closest production analogs. Honest framing per #53/#60/#69 precedent: the storage pattern is well-trodden; kage's contribution is the COMPOSITION (typed schema #46 + partition matrix #18 + tri-mode-ready interface + derived-index discipline) at personal scale. Tri-mode storage as user choice is the one genuinely novel element (Q M Q8).
+
+**Deferred to Stage 1 engineering:**
+- FTS5 tokenizer config + BM25 k1/b tuning (QuackIR [14.1] flags hard-coded defaults to plan around)
+- Exact TTL / grace-window values (30 days heuristic)
+- Migration framework / tooling choice + testing harness (fits Testing Protocol)
+- Vitality-score-driven cold-memory archival (possible v2)
+- All Notion adapter integration (v1.5+)
+
+### Layers 6, 7
+
+**Status:** Not yet designed. Layer 6 (Learning — owns reputation table #68) or Layer 7 (MCP Server Out, priority HIGH #41) next-up (Session 12+).
 
 ---
 
@@ -1219,6 +1312,13 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 | 67 | **Layer 4 failure cascade: explicit ordered chain per class (Session 9, Cosmos Q L-validated).** Per-class fallback chain (user-configurable; starting heuristics: research = NEU-Opus → NEU-Sonnet → Perplexity → Personal-Sonnet → Local; chat = Local → NEU-Haiku → Personal-Haiku; system-ctrl = Local only). Failure types: TRANSIENT (timeout, 5xx, rate-limit) → retry same target N times then fall through; HARD (auth fail, content-policy block, account suspended) → no retry, fall through immediately. Layer 3e re-checks per fallback target (Design B #64). Notification: silent for transient retries, peripheral for cascade traversal, explicit interrupt for cascade exhaustion or content-policy block. Validated by SPL-flow [13.1] explicit Ollama → OpenRouter pattern and vLLM-SR [10.1] multi-provider routing design. Retry counts, content-policy recovery UX, idempotency guarantees deferred to Stage 1. **Session 10 revisit (2026-06-01):** Three additions. (a) Chains DRAWN FROM CURATED POOL (#64 Session 10 refinement) rather than hand-listed — when pool changes (new model added, deprecated model removed), chains update automatically; chain entries reference pool members by tag, not hard-coded supplier/account/model. (b) Transient retry count locked at N=2 default (user-configurable per chain). (c) Content-policy block (model REFUSES the query — not Layer 3e gate-blocked, but the model itself declines) now SURFACES TO USER WITH OPTIONS rather than auto-retrying — avoids silent vendor-shopping when a supplier has principled refusal; user gets context-aware choices (try alternate model? rephrase? cancel?). | Session 9 → 10 |
 | 68 | **Layer 4 local-to-cloud graduation: reputation table + Bayesian confidence bounds (Session 9, Cosmos Q L-validated).** Per (class, model, account) outcome counters (successes/total) + Bayesian confidence bound [4.8]. When local's lower CI bound exceeds class-specific threshold, class GRADUATES to local-default. Realistic expectations (Honesty Principle): Qwen3-14B-Q4 will NOT beat Opus on hard reasoning (14B capability ceiling is real regardless of fine-tuning); local advantage is PERSONALIZATION + CONTEXT IMMEDIACY + LATENCY + PRIVACY + REPETITION. Expected end-of-year-1: ~60-70% queries → local (chat, system-ctrl, code/simple, narrow specialized), ~30-40% → cloud (research, hard reasoning, multimodal, complex code). THIS IS the broker function working as designed — NOT "local replaces cloud." Un-graduation: if local regresses on a class, returns to cloud-default with user notification (Honesty). Operationalizes Confidence-Gated Learning (locked principle, deferred to Layer 6); Layer 6 owns learning loop, Layer 4 consumes the table. Engineering specifics (success definition, schema, thresholds, distillation pipeline) deferred to Layer 6 design. **Session 10 revisit (2026-06-01):** Three previously-deferred items locked at SHAPE level (engineering specifics still Layer 6). (a) Success-definition SHAPE = weighted BLEND of user-acceptance signal + shadow-agreement signal (cloud-comparison during Phase 1+); exact weights deferred but blended-not-single is locked — avoids Layer 6 picking a weaker single-metric definition. (b) Graduation thresholds CLASS-SPECIFIC (not global) — chat might graduate at 85% confidence; code might require 95%; risky/system-ctrl classes get higher bars. (c) Un-graduation sensitivity = ROLLING-WINDOW N=20 with confidence drop trigger — smooth not jumpy; one bad query won't un-graduate a class, but sustained regression will. | Session 9 → 10 |
 | 69 | **Layer 4 novelty framing: integration is the novelty (Session 9).** Acknowledged prior art (Cosmos Q L): vLLM-SR (gateway identity + per-decision policy + graduated mitigation), RouteLLM (task-class routing), Johnson & Lee (discrete taxonomy + per-class policy), Select-then-Route (multi-dim taxonomy + cascade), AAP/OAP (JWT identity + execution-time authorization), Claude Code permission tiers (with documented empirical brittleness motivating Safety Copilot), SPL-flow (explicit fallback chain). kage's novel claim is the UNIFIED COMPOSITION of (multi-account routing within single vendor + task-class minimum-viable + feedback-driven local graduation + pre-action Safety Copilot + per-account privacy/policy gate integration) in a local-first personal broker — no single production or research system shown doing all five. Direct Cosmos Q L quote: "the most novel part of kage's combined approach would likely be the joint optimization across identity/account policy, task taxonomy, adaptive graduation, and safety-copilot UX in a single local-first runtime, with explicit fallback chains and per-account budgets." Stronger novelty signal than #1 differentiator (Bhatt et al. 2025 ancestor); Layer 4 integration has no single ancestor. Honest pitch: "kage applies enterprise-gateway patterns to a personal-scale local broker, in a unified composition shipped products and research papers address only piecewise." Matches #53 and #60 honest-framing precedent. **Session 10 revisit (2026-06-01):** Two refinements. (a) HEDGED LANGUAGE until v1.0 ships — use "applies / proposes / composes" not "is first to / invented / pioneered"; the integration claim stays modest until working system exists as evidence. Avoids over-promising in pre-build phase. (b) Publication-strategy stub locked: README architecture section + blog post at v1.0 ship; arXiv preprint / conference submission deferred to research path #18.5. WHEN of novelty claim locked (v1.0 ship); form/venue stays light. | Session 9 → 10 |
+| 70 | **Layer 5A content store: markdown files, one per memory, folder-by-type (Session 11, Cosmos Q M-validated).** Markdown + YAML frontmatter, one file per memory (Obsidian model, not append-only journal). Folder structure BY TYPE (5-type schema #46); partition (identities/projects/state) lives in frontmatter + SQLite index, NOT folders (memories belong to MULTIPLE projects/identities per #18). Filename `<ulid>-<slug>.md` (ULID time-sortable + unique). 5A is AUTHORITATIVE source of truth; 5B + 5C derived/regenerable. Rationale: human-readable (inverts ChatGPT bio-tool opacity — Q M [2.1] found 96% system-created, 28% GDPR-personal), git-trackable, Agent-OS/Notion-compatible. Validated by Obsidian local-first [6.1] + Miteski plain-text-authoritative [10.1]. | Session 11 |
+| 71 | **Layer 5B SQLite store: single file, join-table partition, FTS5, audit, schema versioning (Session 11, Cosmos Q M-validated).** Single `kage.db`, STOCK SQLite (not libSQL — revisit at Layer 8 mesh), WAL mode. Tables: memories (metadata + lifecycle: timestamps, access_count, vitality_score, content_hash, schema_version), memory_projects + memory_identities (many-to-many JOIN tables not JSON arrays — indexed sub-ms partition filter at 100K), memory_fts (FTS5 BM25), audit_log (Ed25519+SHA-256 hash chain per #57), schema_version. Schema versioning + integrity checks (PRAGMA integrity_check on startup, content-hash verification, never silent overwrite) — vstash pattern [8.2]. DERIVED from 5A. Validated by MemX (FTS5 1100× speedup, <90ms at 100K) [7.1], vstash (20.9ms at 50K) [8.1]. | Session 11 |
+| 72 | **Layer 5C FAISS vector index: IndexFlatIP exact search for v1 (Session 11, Cosmos Q M-validated).** FAISS IndexFlatIP (exact, zero accuracy loss at ≤100K; ~300MB at 100K×768d; upgrade to IVF/HNSW only beyond ~500K vectors — won't hit personal scale for years). Granite 311M R2 768d (#50). Incremental add/remove via IndexIDMap; full rebuild ONLY on embedding-model swap. Persist to vector.faiss, load at startup (<1s), checkpoint after async batches + shutdown. docid→vectorid map in SQLite. DERIVED from 5A; model version recorded for reindex trigger. Memory budget confirmed: full stack ~16-18GB on 24GB (Qwen3-14B 10GB + Granite + reranker + FAISS 0.3GB + SQLite + OS). Matches #49 budget math. | Session 11 |
+| 73 | **Layer 5 retention: never-expire committed + flag-not-delete pending + soft-delete grace (Session 11).** scoped/baseline NEVER auto-expire (echoes #58 — old-but-relevant must survive; defeating this defeats the broker). pending: OPTIONAL flag-not-delete after N days (default OFF, parked #15.5; flag for review, never silent drop — Honesty + Awareness over Control). Deletion: soft-delete to ~/.kage/memory/.trash/ with 30-day grace (Safety Copilot #65 Tier-2 undo path) then optional hard-purge. Audit log NEVER purged (#57 immutable). Storage is not the constraint (100K memories < 1GB total). Exact TTL/grace values deferred to Stage 1. | Session 11 |
+| 74 | **Layer 5 three-mode support: MemoryStore interface + LocalAdapter v1; Notion deferred (Session 11, Cosmos Q M-validated).** `MemoryStore` interface (save/get/query/update/delete) — everything above Layer 5 is mode-agnostic. v1 ships `LocalAdapter` ONLY (5A+5B+5C fully local). `HybridAdapter` (Notion mirror) + `NotionCanonicalAdapter` DEFERRED entirely, parked per #47. Rationale: locking the INTERFACE now is cheap insurance (per #22 architect-for-3-years) — adding Notion later = one new adapter, zero rework of locked layers; "source of truth" is the only thing that varies across modes. User chose local-first now, Notion only if industry requires later. Q M Q8 novelty: no system does user-selectable tri-mode storage; kage's #47 novel at productized level (architecturally preserved, deferred). | Session 11 |
+| 75 | **Layer 5 schema evolution: forward-compatible reads + versioned idempotent migrations (Session 11, Cosmos Q M-validated).** Schema version stamped in 5A frontmatter + 5B table. Old memories readable FOREVER; additive changes use default-on-read (no migration). Structural changes use versioned idempotent migrations (vstash pattern [8.1]), gated by Safety Copilot (#65 Tier-3: backup-verify before run). Markdown-source-of-truth makes migration safe — migrate authoritative files, regenerate SQLite+FAISS (no index/content drift); git-trackable = reviewable diff + rollback. Embedding model change → full FAISS reindex (5C). Discipline: never silently drop data, never make old memories unreadable. Migration framework + testing harness deferred to Stage 1. | Session 11 |
+| 76 | **Layer 5 novelty framing: composition is the contribution; tri-mode is the novel element (Session 11).** Claude/ChatGPT/Gemini storage internals OPAQUE (Cosmos Q M: no public substrate disclosure). kage's hybrid (files-authoritative + SQLite-index + FAISS-derived) matches MemX + vstash — the two closest production analogs. Honest framing per #53/#60/#69: storage pattern is well-trodden; kage's contribution is the COMPOSITION (typed schema #46 + partition matrix #18 + tri-mode-ready interface + derived-index discipline) at personal scale. Tri-mode storage as user choice (#47) is the one genuinely novel element per Q M Q8. | Session 11 |
 
 ---
 
@@ -1230,8 +1330,8 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 2. ✓ **Layer 3d — Tiered assembly shape** — LOCKED Session 7 (#54-56)
 3. ✓ **Layer 3e — Privacy / disclosure mechanics** — LOCKED Session 8 (#57-60)
 4. ✓ **Layer 4 — Multi-vendor router** — LOCKED Session 9 (#61-69)
-5. **Layer 5 — Memory storage** (on-disk layout, FAISS + BM25 + graph + episodic, partition tags) — **next up**
-6. **Layer 6 — Learning T1** (preferences + entities + implicit feedback)
+5. ✓ **Layer 5 — Memory storage** — LOCKED Session 11 (#70-76)
+6. **Layer 6 — Learning T1** (preferences + entities + implicit feedback) — **next up** (owns reputation table #68)
 7. **Layer 7 — MCP server out** (endpoints, schema, auth)
 8. **Layer 1 — Trigger / Interface detail** (CLI shape, menu bar, okiro)
 9. **Layer 2 — Helper agents detail** (Librarian responsibilities, Monitor scope)
@@ -1617,7 +1717,7 @@ Items deliberately set aside — either deferred to a later cycle, conditional o
 - End-of-year-1 expected: ~60-70% queries → local; ~30-40% → cloud
 - This IS the broker function working as designed
 
-**Layer 4 is the THIRD fully-locked layer of kage's pipeline (after 3c and 3e).** Layers 3a, 3b, 3d also locked at directional altitude. Six-of-nine layers have lock state; three remain to design (5, 6, 7, plus 1+2 detail).
+**Layer 4 is the THIRD fully-locked layer of kage's pipeline (after 3c and 3e).** Layers 3a, 3b, 3d also locked at directional altitude. (As of Session 11, Layer 5 is also locked — see Session 11 entry.)
 
 **Next session resume point:**
 - User noted: may revisit Layer 4 tomorrow to ensure nothing was missed (Complete-over-fast principle supports this)
@@ -1661,6 +1761,42 @@ Items deliberately set aside — either deferred to a later cycle, conditional o
 - OR Layer 7 (MCP Server Out) — priority HIGH per #41
 - OR Layer 6 (Learning) — owns reputation table #68 depends on
 - User to choose entry point for next session
+
+### Session 11 — 2026-06-02 (Layer 5 lock)
+
+**Done:**
+- Layer 5 (Memory Storage) FULLY LOCKED across 7 decisions (#70-#76)
+- Cosmos Q M fired and processed — strong evidence pack; two near-identical production analogs (MemX, vstash) validated the design
+- Walked sub-store-by-sub-store (5A → 5B → 5C) then remaining sub-questions (Q4 retention → Q6 three-mode → Q7 schema evolution), per user's "discuss every bold recommendation before locking" rule
+
+**Architecture locked — three sub-stores, 5A authoritative:**
+- #70: 5A content store — markdown files, one per memory, folder-by-type, ULID-slug naming, frontmatter partition. Authoritative source of truth.
+- #71: 5B SQLite — single file, stock SQLite (not libSQL), join-table partition (not JSON arrays), FTS5 BM25, audit log hash chain (#57), schema versioning + integrity checks. Derived.
+- #72: 5C FAISS — IndexFlatIP exact search for v1, Granite 768d, incremental updates, full rebuild only on model swap. Derived. Memory budget reconfirmed ~16-18GB on 24GB.
+- #73: Retention — committed never-expire; pending flag-not-delete (default off); soft-delete 30-day grace; audit never purged.
+- #74: Three-mode — MemoryStore interface locked now (cheap insurance per #22); LocalAdapter only for v1; Notion adapters deferred entirely (user uses local-first now, Notion only if industry requires later).
+- #75: Schema evolution — forward-compatible reads + versioned idempotent migrations gated by Safety Copilot; markdown-source-of-truth makes migration safe.
+- #76: Novelty framing — composition is the contribution; tri-mode storage as user choice is the one genuinely novel element (Q M Q8).
+
+**Cosmos Q M key findings:**
+- Claude/ChatGPT/Gemini storage internals OPAQUE — no public substrate disclosure; can't copy, must design from analogs
+- MemX [7.1]: libSQL + FTS5 + RRF + reranker, FTS5 1100× speedup at 100K, <90ms end-to-end — kage's near-exact use case
+- vstash [8.1]: single-file SQLite WAL + FTS5 + vectors, 20.9ms at 50K, schema versioning + integrity checks (adopted)
+- Miteski [10.1]: "plain text authoritative + relational index + embeddings derived" + "no heavyweight infra for single-user"
+- ChatGPT bio-tool anti-pattern reconfirmed [2.1]: 96% system-created, 28% GDPR-personal — validates kage's wall-save (#16) discipline again
+- Tri-mode storage as user choice: NOT found in any system → kage's #47 novel at productized level
+
+**User decisions through session:**
+- Followed recommended system for 5A (markdown + folder-by-type + ULID naming)
+- Confirmed Q M evidence sufficient — no second Cosmos search needed for 5B (MemX/vstash are near-identical analogs; Constraint Reconsideration Trigger #52 is the Stage-1 safety net)
+- Deferred Notion: lock the interface (zero-cost future-proofing per #22), build LocalAdapter only, add Notion adapter later behind interface with no rework
+
+**Layer 5 is the FOURTH fully-locked layer (after 3c, 3e, 4).** Seven-of-nine layers now have lock state (3a, 3b directional; 3c, 3d, 3e, 4, 5 locked). Two remain: Layer 6 (Learning), Layer 7 (MCP Server Out), plus Layer 1+2 detail.
+
+**Next session resume point:**
+- Layer 6 (Learning) — owns the reputation table #68 depends on; memory-layer learning NOT LoRA (#39); Confidence-Gated Learning principle (deferred to here); success-definition shape locked #68; integrate Agent OS coexistence patterns
+- OR Layer 7 (MCP Server Out) — priority HIGH per #41
+- User to choose entry point
 
 ### Session 4 — 2026-05-23 (brainstorm integration + new principles)
 

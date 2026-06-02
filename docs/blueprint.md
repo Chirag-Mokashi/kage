@@ -6,7 +6,7 @@
 > **Purpose of this file:** Single source of truth for the kage project state.
 > Open this at the start of any session to re-enter with full context.
 >
-> *Last updated: 2026-06-02, end of Session 11 (Layer 5 lock).*
+> *Last updated: 2026-06-03, end of Session 12 (Layer 1 in design — foundational decisions locked).*
 >
 > *Companion docs:*
 > - [architecture.md](architecture.md) — visual system map
@@ -334,12 +334,33 @@ Note: this principle **supersedes** the earlier "Correction-Driven Personalizati
 
 ### Layer 1 — Trigger / Interface
 
-**Status:** Outline only.
-- CLI (`kage ask`, `kage memory add`, etc.)
-- MCP server (in) — for external tools to query kage
-- Menu bar (Mac-native) — status display
-- `okiro` keyword as wake trigger
-- (Detailed design deferred to its turn)
+**Status:** IN DESIGN (Session 12, 2026-06-03). Foundational decisions locked (#77-80); command-set + first-run report + interactive-session design still open (resume tomorrow). Cosmos Q O (interactive-session CLI patterns + OpenJarvis) fired, results pending.
+
+**What Layer 1 is:** the human-and-tool-facing surface. Two inbound directions: human (CLI, later menu-bar/hotkey/voice) and tools (MCP server IN — external tools query kage's memory; distinct from Layer 7 MCP server OUT).
+
+**Locked this session:**
+
+- **Permission model (#77):** kage does NOT reinvent permissions — rides macOS native rails. macOS TCC prompts for capabilities (Calendar/Camera/Mic/Screen/Full-Disk), Touch ID for sudo/sensitive actions, OAuth for cloud account content (Gmail/Calendar). kage's own Safety Copilot (#65) layers ON TOP for risky-action briefing. macOS answers "CAN kage touch this?"; Safety Copilot answers "SHOULD it, now?" Matches locked privacy principle #2.
+
+- **CLI embodies the 10 characteristics from command one (#78):** even v0 (zero intelligence) feels like kage because the interface carries the character. Installer-style transparent output (progress steps, inline `[y/N]`, plain-language "what happened / what it touched", "✓ local" markers). Characteristic→behavior map: Transparent=show every step; Controlled=inline confirm before any action; Aware=report detected state; Local=mark what stays local; Broker=show routing decisions; Adoptable=always show next command; Modular=each command composes + inspectable. **Transparent-vs-Silent tension resolved by context:** verbose on explicit commands; quiet as daemon (surfaces via status or peripheral notice only).
+
+- **v1 scope is terminal-first (#79):** v1 Layer 1 = CLI + typed `okiro` + MCP-server-IN + terminal status/doctor/notices. Menu bar, global hotkey, voice/LiveKit, Übersicht HUD all DEFERRED to v1.5 — each is just a different front-end onto the same CLI core (build core once, wrap later; Modular). Matches "basic elements first" + engineer-credential audience.
+
+- **Daemon sequencing (#80):** v0 = LAUNCH-ON-DEMAND (kage runs, answers, exits — simplest, debuggable, no idle cost). Daemon added LATER when ambient features exist (Librarian, shadow runs, okiro morning briefing, Layer 3a watchers). Code architected so daemon drops in cleanly (per #22). Long-term vision stays always-on; build sequences into it. A daemon only earns its keep once there's background work — premature before then.
+
+**Mechanics clarified (educational, for the record):**
+- Three macOS access zones: FREE (home files, configs, project dirs, process info, Chrome profile *labels*, Spotlight index — no prompt) · PROMPTED (Calendar/Contacts/Camera/Mic/Screen/Full-Disk/Accessibility/Automation — one TCC "Allow") · BLOCKED (system files via SIP, other apps' Keychain items, Chrome's *encrypted* cookies/tokens, Secure Enclave — hard walls).
+- Account access: detection ≠ access. kage reads account LABELS locally (Chrome profiles / macOS Internet Accounts) but real Gmail/Calendar access requires per-account OAuth consent. **This is a correction to #15's "detect accounts" optimism** — Chrome being logged in does NOT grant kage access; OAuth does. Better for the Privacy Goal.
+- TCC inheritance: a CLI launched from Terminal inherits Terminal's TCC identity, so gated-API prompts fire attributed to the terminal app, interactively. The daemon wrinkle (manual grants + signing/notarization) only bites a standalone launchd daemon — another reason on-demand-first (#80) is cleaner for v0.
+- Capability tiering across versions: v1 BROKER (memory, read email/calendar, route) → v1.5 MEDIATOR begins (manipulate calendar, send email, open apps, installs) → v2 full MEDIATOR (camera, mic, screenshots, deep OS control). Matches locked BROKER→MEDIATOR nesting; scary permissions earned incrementally.
+
+**Open (resume tomorrow):**
+- Command set: milestone-0 candidate = `init` + `test` + `status` + `doctor` (functional verbs store/retrieve/route exist as INTERNAL functions the test suite drives; `remember`/`recall`/`ask` exposed at milestone-1 human-review per Testing Protocol). `okiro` = one-line stub in v0 (keyword preserved; real version deferred to daemon/briefing era). NOT yet locked.
+- First-Run Discovery Report (probe → report findings → per-capability permission request) — designed, not locked.
+- `kage status` / `kage doctor` introspection output — designed, not locked.
+- Interactive-session (REPL, Claude-Code-like) as the DIRECTION beyond milestone-0 — awaiting Cosmos Q O.
+- MCP-server-IN scope (read-only? which memory types? auth) — not yet designed.
+- `kage test` scope: one-word command running the bundled Testing-Protocol suite; first concrete goal is benchmarking local-vs-cloud competitiveness. User authors test cases (possibly via available skills).
 
 ### Layer 2 — Internal Helper Agents
 
@@ -1319,6 +1340,10 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 | 74 | **Layer 5 three-mode support: MemoryStore interface + LocalAdapter v1; Notion deferred (Session 11, Cosmos Q M-validated).** `MemoryStore` interface (save/get/query/update/delete) — everything above Layer 5 is mode-agnostic. v1 ships `LocalAdapter` ONLY (5A+5B+5C fully local). `HybridAdapter` (Notion mirror) + `NotionCanonicalAdapter` DEFERRED entirely, parked per #47. Rationale: locking the INTERFACE now is cheap insurance (per #22 architect-for-3-years) — adding Notion later = one new adapter, zero rework of locked layers; "source of truth" is the only thing that varies across modes. User chose local-first now, Notion only if industry requires later. Q M Q8 novelty: no system does user-selectable tri-mode storage; kage's #47 novel at productized level (architecturally preserved, deferred). | Session 11 |
 | 75 | **Layer 5 schema evolution: forward-compatible reads + versioned idempotent migrations (Session 11, Cosmos Q M-validated).** Schema version stamped in 5A frontmatter + 5B table. Old memories readable FOREVER; additive changes use default-on-read (no migration). Structural changes use versioned idempotent migrations (vstash pattern [8.1]), gated by Safety Copilot (#65 Tier-3: backup-verify before run). Markdown-source-of-truth makes migration safe — migrate authoritative files, regenerate SQLite+FAISS (no index/content drift); git-trackable = reviewable diff + rollback. Embedding model change → full FAISS reindex (5C). Discipline: never silently drop data, never make old memories unreadable. Migration framework + testing harness deferred to Stage 1. | Session 11 |
 | 76 | **Layer 5 novelty framing: composition is the contribution; tri-mode is the novel element (Session 11).** Claude/ChatGPT/Gemini storage internals OPAQUE (Cosmos Q M: no public substrate disclosure). kage's hybrid (files-authoritative + SQLite-index + FAISS-derived) matches MemX + vstash — the two closest production analogs. Honest framing per #53/#60/#69: storage pattern is well-trodden; kage's contribution is the COMPOSITION (typed schema #46 + partition matrix #18 + tri-mode-ready interface + derived-index discipline) at personal scale. Tri-mode storage as user choice (#47) is the one genuinely novel element per Q M Q8. | Session 11 |
+| 77 | **Layer 1 permission model: ride macOS native rails + Safety Copilot on top (Session 12).** kage does NOT reinvent permissions. macOS TCC prompts for capabilities (Calendar/Camera/Mic/Screen/Full-Disk/Accessibility/Automation), Touch ID for sudo/sensitive actions, OAuth for cloud account content. kage's Safety Copilot (#65) layers on top for risky-action briefing. macOS = "CAN kage touch this?"; Safety Copilot = "SHOULD it, now?" Matches locked privacy principle #2. Detection ≠ access (corrects #15): kage reads account LABELS locally but needs per-account OAuth for real Gmail/Calendar access — Chrome being logged in grants nothing. | Session 12 |
+| 78 | **Layer 1 CLI embodies the 10 characteristics from command one (Session 12).** Even v0 (zero intelligence) feels like kage because the interface carries the character. Installer-style transparent output: progress steps, inline `[y/N]` confirms, plain-language "what happened / what it touched", "✓ local" markers. Characteristic→behavior map locked (Transparent=show every step; Controlled=inline confirm before any action; Aware=report state; Local=mark what stays local; Broker=show routing; Adoptable=show next command; Modular=composes + inspectable). Transparent-vs-Silent tension resolved by CONTEXT: verbose on explicit commands, quiet as daemon (surfaces via status / peripheral notice). Engineering polish deferred to Stage 1. | Session 12 |
+| 79 | **Layer 1 v1 scope is terminal-first (Session 12).** v1 Layer 1 = CLI + typed `okiro` + MCP-server-IN + terminal status/doctor/notices. Menu bar, global hotkey, voice/LiveKit, Übersicht HUD DEFERRED to v1.5 — each is a different front-end onto the same CLI core (build core once, wrap later; Modular characteristic). Matches "basic elements first" deployment philosophy + engineer-credential primary work-audience (CLI ergonomics = the credential). | Session 12 |
+| 80 | **Layer 1 daemon sequencing: on-demand v0, daemon added when ambient features land (Session 12).** v0 = launch-on-demand (kage runs, answers, exits — simplest, debuggable, zero idle cost). Daemon added LATER when ambient features exist (Librarian, shadow runs, okiro morning briefing, Layer 3a watchers). Code architected so daemon drops in cleanly (per #22 architect-for-3-years). Long-term vision stays always-on; build sequences into it — a daemon only earns its keep once background work exists. Also sidesteps the launchd-daemon TCC wrinkle (manual grants + signing) since a terminal-launched process inherits Terminal's TCC identity. | Session 12 |
 
 ---
 
@@ -1331,9 +1356,9 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 3. ✓ **Layer 3e — Privacy / disclosure mechanics** — LOCKED Session 8 (#57-60)
 4. ✓ **Layer 4 — Multi-vendor router** — LOCKED Session 9 (#61-69)
 5. ✓ **Layer 5 — Memory storage** — LOCKED Session 11 (#70-76)
-6. **Layer 6 — Learning T1** (preferences + entities + implicit feedback) — **next up** (owns reputation table #68)
+6. **Layer 6 — Learning T1** (preferences + entities + implicit feedback) (owns reputation table #68)
 7. **Layer 7 — MCP server out** (endpoints, schema, auth)
-8. **Layer 1 — Trigger / Interface detail** (CLI shape, menu bar, okiro)
+8. ◐ **Layer 1 — Trigger / Interface** — IN DESIGN Session 12 (#77-80 locked: permission model, CLI-character, terminal-first scope, daemon sequencing). **resume tomorrow:** command set, first-run report, interactive-session (Cosmos Q O pending)
 9. **Layer 2 — Helper agents detail** (Librarian responsibilities, Monitor scope)
 
 ### Pending — cross-cutting
@@ -1797,6 +1822,42 @@ Items deliberately set aside — either deferred to a later cycle, conditional o
 - Layer 6 (Learning) — owns the reputation table #68 depends on; memory-layer learning NOT LoRA (#39); Confidence-Gated Learning principle (deferred to here); success-definition shape locked #68; integrate Agent OS coexistence patterns
 - OR Layer 7 (MCP Server Out) — priority HIGH per #41
 - User to choose entry point
+
+### Session 12 — 2026-06-03 (Layer 1 — in design, foundational decisions locked)
+
+**Done:**
+- Began Layer 1 (Trigger / Interface). Long educational session — much of it clearing up HOW kage starts, what it can access, and what the user sees, before committing interface decisions.
+- Four foundational decisions LOCKED (#77-80); command-set + first-run report + interactive-session design left OPEN for next session.
+
+**Locked (#77-80):**
+- #77: Permission model — ride macOS native rails (TCC + Touch ID + OAuth) + Safety Copilot on top. Detection ≠ access (corrects #15: account labels readable locally, but real Gmail/Calendar access needs per-account OAuth).
+- #78: CLI embodies the 10 characteristics from command one — installer-style transparent output, inline [y/N], "✓ local" markers; Transparent-vs-Silent resolved by context (verbose explicit / quiet daemon).
+- #79: v1 scope is terminal-first — CLI + typed okiro + MCP-server-IN; menu bar / hotkey / voice / HUD deferred to v1.5 (front-ends on same CLI core).
+- #80: Daemon sequencing — on-demand v0, daemon added when ambient features land; architect clean per #22.
+
+**Educational ground covered (recorded in Layer 1 section):**
+- Three macOS access zones (FREE / TCC-PROMPTED / BLOCKED-by-SIP-Keychain-SecureEnclave)
+- Lifecycle: git clone (download once) → kage init (kage's own setup wizard, ≠ git init) → daemon later. Ollama analogy.
+- TCC inheritance: terminal-launched process inherits Terminal's TCC identity; launchd-daemon wrinkle (manual grants + signing) is why on-demand-first is cleaner.
+- Capability tiering: v1 BROKER (memory/read-email/calendar/route) → v1.5 MEDIATOR begins (manipulate calendar, send email, open apps) → v2 full MEDIATOR (camera, mic, screenshots, OS control).
+- First-Run Discovery Report (probe → report → per-capability permission) — designed, not locked.
+- kage status / kage doctor introspection output — designed, not locked.
+- Interactive-session (Claude-Code-like REPL) reframe — the DIRECTION beyond milestone-0; user wants shortened conversations with context bar + slash-commands. Awaiting Cosmos Q O.
+
+**Command-set discussion (OPEN — resume tomorrow):**
+- Milestone-0 candidate narrowed by user to: `init` + `test` + `status` + `doctor`. Functional logic (store/retrieve/route) exists as INTERNAL functions the test suite drives; `remember`/`recall`/`ask` exposed at milestone-1 (human-review step of Testing Protocol). `okiro` = one-line stub in v0 (keyword preserved).
+- `kage test` = one-word command running the bundled Testing-Protocol suite. **User's first concrete validation goal: benchmark how competitive local is vs cloud.** User will author test cases next session, possibly using available skills.
+- NOT yet locked — user wants to write test cases and discuss commands tomorrow.
+
+**Cosmos Q O (interactive-session CLI patterns + OpenJarvis) FIRED — results pending.** User to paste next session (chose to wait rather than process at end of long day).
+
+**Layer 1 status: IN DESIGN.** Foundational decisions locked; surface/command design continues next session. Layer count: 5 layers fully locked (3c, 3d directional + 3e, 4, 5); Layer 1 partially locked; Layer 6, 7, 2 remain.
+
+**Next session resume point:**
+- Paste Cosmos Q O results (interactive-session CLI patterns + OpenJarvis findings)
+- Lock the milestone-0 command set (init/test/status/doctor)
+- User writes test cases for the local-vs-cloud benchmark (possibly via skills)
+- Then: continue Layer 1 (first-run report, status/doctor output, interactive-session direction) OR move to Layer 6/7
 
 ### Session 4 — 2026-05-23 (brainstorm integration + new principles)
 

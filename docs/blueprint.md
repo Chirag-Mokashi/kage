@@ -6,12 +6,14 @@
 > **Purpose of this file:** Single source of truth for the kage project state.
 > Open this at the start of any session to re-enter with full context.
 >
-> *Last updated: 2026-06-03, end of Session 12 (Layer 1 in design — foundational decisions locked).*
+> *Last updated: 2026-06-03, Session 13 (Odysseus substrate reconciliation). **NOTE: substrate changed OpenJarvis → Odysseus (extend, not fork); see §4 + decisions #81–#90.***
 >
 > *Companion docs:*
 > - [architecture.md](architecture.md) — visual system map
 > - [ROADMAP.md](ROADMAP.md) — cycle-by-cycle execution plan
 > - [competitor-flowcharts.md](competitor-flowcharts.md) — engine comparisons
+> - [odysseus-deep-dive.md](odysseus-deep-dive.md) — substrate internals (Session 13)
+> - [odysseus-reconciliation.md](odysseus-reconciliation.md) — all 80 decisions × Odysseus (Session 13)
 
 ---
 
@@ -311,22 +313,24 @@ Note: this principle **supersedes** the earlier "Correction-Driven Personalizati
 ## 4 · The 7-Layer Architecture (decomposed)
 
 ```
-   Layer 1: TRIGGER / INTERFACE   ╳ Universal (CLI + MCP + UX)
-   Layer 2: INTERNAL AGENTS       ◐ Like OJ (Librarian + Monitor opt-in)
-   Layer 3a: ACTIVE CONTEXT DETECT★ UNIQUE (cascade + bootstrap)
-   Layer 3b: PARTITION FILTER     ★ UNIQUE (project × identity matrix)
-   Layer 3c: HYBRID RETRIEVAL     ◐ From Mem0 (vector/graph/episodic)
-   Layer 3d: TIERED ASSEMBLY      ◐ From Letta (hot/recall/archival)
-   Layer 3e: PRIVACY/DISCLOSURE   ◐ Strong layer; mostly emergent
-   Layer 4:  MULTI-VENDOR ROUTER  ◐ Standalone tools exist; not bundled
-   Layer 5:  MEMORY STORAGE       ◐ From OJ (FAISS+BM25 substrate)
-   Layer 6:  LEARNING (T1)        ◐ Prompt-only first; DSPy later
-   Layer 7:  MCP SERVER (out)     ╳ Standard delivery channel
+   Layer 1: TRIGGER / INTERFACE   ╳ Headless CLI + okiro + MCP in/out (kage's own repo)
+   Layer 2: INTERNAL AGENTS       ★ Librarian + Monitor = kage's own; external via MCP
+   Layer 3a: ACTIVE CONTEXT DETECT★ BUILD — kage-unique (cascade + bootstrap)
+   Layer 3b: PARTITION FILTER     ★ BUILD — kage-unique (project × identity matrix)
+   Layer 3c: HYBRID RETRIEVAL     ◐ Donated (Odysseus/Chroma baseline) + kage RRF/reranker
+   Layer 3d: TIERED ASSEMBLY      ◐ Donated (Odysseus compaction) + kage tier×type
+   Layer 3e: PRIVACY/DISCLOSURE   ★ BUILD — kage-unique (Odysseus has NONE — the moat)
+   Layer 4:  MULTI-VENDOR ROUTER  ◐ Donated (Odysseus dispatch) + kage account/classify
+   Layer 5:  MEMORY STORAGE       ◐ markdown SoT = kage; Chroma/SQLite derived (Odysseus)
+   Layer 6:  LEARNING (T1)        ★ BUILD — kage-unique (memory-layer learning, not LoRA)
+   Layer 7:  MCP SERVER (out)     ╳ Standard delivery; kage exposes partitioned memory
 
-   ★ unique to kage   ◐ borrowed/shared   ╳ universal
+   ★ kage builds (moat)   ◐ donated by Odysseus, kage wraps   ╳ universal
 ```
 
-**Only Layers 3a and 3b are starred.** They are where engineering effort concentrates and where competitive moat lives. The rest are commodity layers wired correctly.
+**kage BUILDS the starred layers (3a, 3b, 3e) + its own Layer 2 / Layer 6 logic** — that's where engineering effort concentrates and the competitive moat lives. The ◐ layers are **donated by the substrate (Odysseus, MIT) and wrapped** by kage.
+
+**Substrate (Session 13 — supersedes the OpenJarvis plan):** kage now *extends* PewDiePie's **Odysseus** (MIT), in its **own repo**, as a **headless** engine — Odysseus is a consumed client/arm, never kage's face. OpenJarvis is retired as substrate (kept only as a design reference). The deep-dive showed Odysseus already ships serviceable 3c/3d/4/5 (donated) but has **no 3a and no 3e** — exactly kage's stars. Full analysis: [odysseus-deep-dive.md](odysseus-deep-dive.md); decision-by-decision reconciliation (nothing dropped): [odysseus-reconciliation.md](odysseus-reconciliation.md). New decisions #81–#90 (§7) record the swap.
 
 ---
 
@@ -535,7 +539,7 @@ After Layer 3a resolves `(active_project, active_identity)` and Layer 3b filters
 **Proposed v1.0 shape:**
 ```
 BM25 (lexical)            ──┐
-FAISS (dense vector)       ──┼─► RRF score fusion ──► Cross-encoder
+ChromaDB (dense vec)       ──┼─► RRF score fusion ──► Cross-encoder
 LightRAG query-side          │   (k=60, N retrievers)  re-ranker
   dual-level keyword       ──┘                          (top-50 → top-10)
   split (1 LLM call/query)
@@ -549,8 +553,8 @@ LightRAG query-side          │   (k=60, N retrievers)  re-ranker
 
 | Component | Choice | Source |
 |---|---|---|
-| Lexical retrieval | BM25 | Inherited from OpenJarvis substrate |
-| Dense retrieval | FAISS | Inherited from OpenJarvis substrate |
+| Lexical retrieval | BM25 / FTS5 | Donated by Odysseus substrate (per #85) |
+| Dense retrieval | **ChromaDB** (was FAISS) | Donated by Odysseus; supersedes FAISS per #85 |
 | Query expansion | LightRAG-style dual-level keyword split (low-level entities + high-level themes) | Stolen from LightRAG paper; query-side only, no graph required |
 | Score fusion | Reciprocal Rank Fusion (RRF), k=60 | Industry default |
 | Re-ranking | Dedicated cross-encoder (bge-reranker-v2-m3 as default, mxbai-rerank-v2-base as swap-in) | Stage 0 altitude — model choice swappable behind interface |
@@ -1136,6 +1140,8 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 
 **Status:** Designed and locked (directional). Session 11. Validated against Cosmos Q M (Claude/ChatGPT opacity, MemX, vstash, Miteski "memory as metabolism," Foundation Agents survey, MIRIX typed schema, Letta/MemGPT, Cognee, Obsidian/Notion PKM patterns).
 
+> **⚠ Partially superseded by #85 (Session 13):** the **vector index is now ChromaDB, not FAISS** (Odysseus's store; native metadata filtering fits the 3b partition wall). Every "FAISS" below now denotes **ChromaDB (the derived vector index)**; the IndexFlatIP / budget details describe the role Chroma fills at personal scale. The **markdown source-of-truth (5A) is unchanged and reconfirmed** (#84) — one brain, one truth; Odysseus delegates memory to kage.
+
 **Role in pipeline:** PERSISTENCE substrate. All layers above operate logically on memories; Layer 5 is where they physically live. The read path feeds Layer 3c; the write path is fed by Layer 3b ingest (#28).
 
 **Three sub-store architecture (5A authoritative; 5B + 5C derived):**
@@ -1173,7 +1179,7 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 - Schema versioning + integrity checks (PRAGMA integrity_check on startup, content-hash verification, mismatch logs+alerts never silent overwrite) — vstash pattern [8.2]
 - DERIVED from 5A; fully regenerable. Validated by MemX (FTS5 1100× speedup, <90ms at 100K) [7.1], vstash (20.9ms at 50K) [8.1]
 
-**5C — FAISS VECTOR INDEX (decision #72):**
+**5C — VECTOR INDEX (decision #72; backend FAISS → ChromaDB per #85, Session 13):**
 - FAISS `IndexFlatIP` for v1 (exact search — zero accuracy loss at ≤100K; ~300MB at 100K×768d; upgrade to IVF/HNSW only beyond ~500K vectors, which personal scale won't hit for years)
 - Granite Embedding 311M R2, 768d (#50)
 - Incremental add/remove via IndexIDMap; full rebuild ONLY on embedding-model swap
@@ -1344,6 +1350,16 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 | 78 | **Layer 1 CLI embodies the 10 characteristics from command one (Session 12).** Even v0 (zero intelligence) feels like kage because the interface carries the character. Installer-style transparent output: progress steps, inline `[y/N]` confirms, plain-language "what happened / what it touched", "✓ local" markers. Characteristic→behavior map locked (Transparent=show every step; Controlled=inline confirm before any action; Aware=report state; Local=mark what stays local; Broker=show routing; Adoptable=show next command; Modular=composes + inspectable). Transparent-vs-Silent tension resolved by CONTEXT: verbose on explicit commands, quiet as daemon (surfaces via status / peripheral notice). Engineering polish deferred to Stage 1. | Session 12 |
 | 79 | **Layer 1 v1 scope is terminal-first (Session 12).** v1 Layer 1 = CLI + typed `okiro` + MCP-server-IN + terminal status/doctor/notices. Menu bar, global hotkey, voice/LiveKit, Übersicht HUD DEFERRED to v1.5 — each is a different front-end onto the same CLI core (build core once, wrap later; Modular characteristic). Matches "basic elements first" deployment philosophy + engineer-credential primary work-audience (CLI ergonomics = the credential). | Session 12 |
 | 80 | **Layer 1 daemon sequencing: on-demand v0, daemon added when ambient features land (Session 12).** v0 = launch-on-demand (kage runs, answers, exits — simplest, debuggable, zero idle cost). Daemon added LATER when ambient features exist (Librarian, shadow runs, okiro morning briefing, Layer 3a watchers). Code architected so daemon drops in cleanly (per #22 architect-for-3-years). Long-term vision stays always-on; build sequences into it — a daemon only earns its keep once background work exists. Also sidesteps the launchd-daemon TCC wrinkle (manual grants + signing) since a terminal-launched process inherits Terminal's TCC identity. | Session 12 |
+| 81 | **Substrate swap: extend Odysseus, retire OpenJarvis (Session 13).** kage's substrate is now PewDiePie's **Odysseus** (MIT) — *extended*, not forked; kage lives in its OWN repo as a headless engine. **Supersedes #7 (fork OJ), #4 (OJ audit → Odysseus audit), #26 (OJ + SKILL.md substrate), #43 (inherit OJ tool architecture → inherit Odysseus's: tool_execution + MCP gateway + opencode agent + `llm_call_with_fallback`).** OpenJarvis retired, kept only as a design reference (EventBus, scanners, local-teacher fallback). Full analysis: docs/odysseus-deep-dive.md + docs/odysseus-reconciliation.md. | Session 13 |
+| 82 | **Interface: headless broker (Session 13).** kage = headless engine (CLI + `okiro` + MCP-server-OUT) in its own repo; Odysseus is a *consumed client/arm*, never kage's face. Preserves Silent/Invisible; keeps "my project" clean. Resolves the headless-vs-UI open question. | Session 13 |
+| 83 | **Permissions + MCP-IN trust (Session 13).** #77 macOS-native model KEPT for local access (Odysseus web auth doesn't apply). MCP-server-IN trust boundary: external clients (Odysseus etc.) are localhost-only + token-authenticated + subject to partition (3b) + disclosure (3e), and **READ-ONLY by default** — they read kage's memory, cannot write. kage is the brain: writes are permission-gated, kage-authored (write-wall #16). | Session 13 |
+| 84 | **Memory format: markdown source-of-truth confirmed vs Odysseus (Session 13).** Keep #70 markdown-file-per-memory as the ONE source of truth; ChromaDB + SQLite + hash-chain audit are DERIVED, rebuildable (not a second memory). Principle: **one brain, one truth** — Odysseus does NOT keep a competing store; it delegates memory reads to kage. Two synced stores rejected (drift/confusion). | Session 13 |
+| 85 | **Retrieval/storage backend: FAISS → ChromaDB (Session 13).** Adopt **ChromaDB** as the derived vector index (Odysseus default; native metadata filtering fits the 3b partition wall) — **supersedes #72 (FAISS) and the 5C/FAISS portion of #49/#71.** **Granite Embedding 311M R2 (#50) stays the target** (swappable behind the derived index, benchmark-confirmed). kage's 3c smarts (RRF + bge-reranker-v2-m3 + LightRAG split, #49/#51) stay as a BUILD layer on top of Chroma. Adapt-later: swap the backend when something better appears; markdown truth survives. | Session 13 |
+| 86 | **Routing ACCOUNT dimension built in v1 (Session 13).** Extend Odysseus's (vendor, model) dispatch to kage's (VENDOR, ACCOUNT, MODEL) tuple (#61) in v1 — unlocks per-account cost ceilings (#66) + per-account failure cascade (#67). | Session 13 |
+| 87 | **Internal agents kept as kage's own (Session 13).** Librarian + opt-in Monitor remain kage's headless internal agents (tied to the partition/state machine Odysseus lacks); external/general agents (incl. Odysseus's workspace agent) via MCP (#14). Librarian's periodic run MAY be triggered by Odysseus's cron scheduler (reuse plumbing, keep logic). | Session 13 |
+| 88 | **Agent sandbox built in v1 (Session 13).** Build the Docker execution sandbox (#2) in v1 from the start — Odysseus ships an *unsandboxed* agent (its own admitted threat-model gap), so kage adds the containment it lacks; pairs with Safety Copilot (#65). (User chose security-first over phasing to v1.5.) | Session 13 |
+| 89 | **Local serving: Ollama-direct, Cookbook optional (Session 13).** kage talks to a local OpenAI-compatible endpoint (Ollama) directly for its own inference (Qwen3 14B Q4, #1) — independent of whether Odysseus runs. Odysseus's Cookbook is an OPTIONAL model-management convenience, not a dependency. | Session 13 |
+| 90 | **Portfolio + spec retarget (Session 13).** kage = its OWN repo (primary portfolio) + *opportunistic* upstream PRs to **Odysseus** for shared improvements (e.g. the sandbox, bug fixes) — never the moat (3a/3b/3e). **Supersedes #9** (PRs to OJ). **#26 SKILL.md/AGENTS.md loader DEFERRED** — use Odysseus's MCP + skills near-term; revisit only if cross-tool interop demands it. | Session 13 |
 
 ---
 
@@ -1858,6 +1874,23 @@ Items deliberately set aside — either deferred to a later cycle, conditional o
 - Lock the milestone-0 command set (init/test/status/doctor)
 - User writes test cases for the local-vs-cloud benchmark (possibly via skills)
 - Then: continue Layer 1 (first-run report, status/doctor output, interactive-session direction) OR move to Layer 6/7
+
+### Session 13 — 2026-06-03 (Odysseus substrate reconciliation)
+
+**Trigger:** PewDiePie released **Odysseus** (github.com/pewdiepie-archdaemon/odysseus, MIT) — a self-hosted, local-first AI workspace overlapping much of kage's feature surface (34k★ in days). Deep-dived it (cloned to /tmp/odysseus), then reconciled all 80 prior decisions against it.
+
+**Done:**
+- Two new docs: [odysseus-deep-dive.md](odysseus-deep-dive.md) (architecture, request lifecycle, extensibility, shortcomings) + [odysseus-reconciliation.md](odysseus-reconciliation.md) (all 80 decisions classified KEEP / BUILD / DONATED / RECONCILE).
+- Confirmed kage's moat (3a / 3b / 3e) is ABSENT in Odysseus; commodity layers (3c/3d/4/5) are donated. **Nothing of kage's was dropped** — capabilities preserved, sources swapped; two items (account routing, sandbox) pulled INTO v1.
+- Walked the 12-item RECONCILE watch-list one-by-one → 10 new decisions **#81–#90**.
+
+**Locked (#81–#90):** see §7. Headlines: extend Odysseus / retire OJ (#81); headless broker (#82); macOS-native perms + read-only MCP-IN clients (#83); markdown source-of-truth, one brain (#84); FAISS→ChromaDB, Granite stays (#85); account routing in v1 (#86); keep Librarian/Monitor (#87); Docker sandbox in v1 (#88); Ollama-direct serving (#89); own repo + PRs to Odysseus, defer SKILL.md loader (#90).
+
+**Principle reinforced:** adopt-don't-switch / add-don't-drop (the Adaptable characteristic). This was an *adoption*, not a replacement.
+
+**Build path:** build the moat (3a/3b/3e) as a headless engine in kage's OWN repo first, validated by `kage test` (local-vs-cloud benchmark, no UI needed); Odysseus integration (splice 3e into its `llm_core` dispatch chokepoint; adopt serving/UI) is the *wrap* phase. Matches #79 (build core once, wrap later).
+
+**Open / next:** (a) propagate inline annotations into layer-body prose — Layer 3c (#49) and Layer 5 (#70-72) still say FAISS in their detailed text; superseded by #85, to be edited in a follow-up pass. (b) Resume Layer 1 milestone-0 command set (#79). (c) Layers 6, 7, 2-detail remain. Prior substrate open-questions (fork-vs-extend, repo organization, OJ engagement) now RESOLVED by #81/#82/#90.
 
 ### Session 4 — 2026-05-23 (brainstorm integration + new principles)
 

@@ -1,6 +1,8 @@
 # kage — Architecture & Project Status
 
-> **Living document.** Updated every session as scope/status changes. Open this at the start of any session to orient.
+> ⚠️ **SUPERSEDED — Session-1 legacy (2026-05-21).** The Mermaid diagram and "Fork OpenJarvis" / FAISS / Antigravity framing below are **OUTDATED** (they predate the Odysseus swap #81 and 13 sessions of decisions). **Current truth:** [blueprint.md](blueprint.md) §4 (architecture; Odysseus substrate, own-vs-donated layers) + [cycle-1-pitch.md](cycle-1-pitch.md) (v0.1). New diagrams use ASCII, not Mermaid.
+>
+> **Living document.** Updated every session as scope/status changes.
 >
 > **Status legend:** 🟢 done · 🟡 in progress · ⚪ planned · 🔵 exploring · ❓ undecided
 

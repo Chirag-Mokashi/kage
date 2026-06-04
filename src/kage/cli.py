@@ -318,5 +318,88 @@ def forget(
     typer.echo(f"  ✓ forgotten   [{mem_id}]")
 
 
+@app.command()
+def status() -> None:
+    """Show what kage holds and where it lives."""
+    _require_init()
+
+    conn = _connect()
+    try:
+        total = conn.execute("SELECT count(*) FROM memories").fetchone()[0]
+        by_proj = conn.execute(
+            "SELECT COALESCE(project, '(no project)') AS p, count(*) AS c "
+            "FROM memories GROUP BY p ORDER BY c DESC, p"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    try:
+        version = json.loads(CONFIG_PATH.read_text()).get("version", "?")
+    except (OSError, ValueError):
+        version = "?"
+    db_kb = DB_PATH.stat().st_size / 1024 if DB_PATH.exists() else 0.0
+
+    typer.echo("\nkage status")
+    typer.echo(f"  store    {_disp(KAGE_HOME)}   (config v{version})")
+    typer.echo(f"  memory   {total} note(s) across {len(by_proj)} project(s)")
+    for p, c in by_proj:
+        typer.echo(f"             {c:>4}  {p}")
+    typer.echo(f"  index    {_disp(DB_PATH)}   ({db_kb:.0f} KB)")
+    typer.echo("  ✓ everything local — nothing has left this Mac\n")
+
+
+@app.command()
+def doctor() -> None:
+    """Check kage's setup and flag anything broken (with how to fix it)."""
+    checks: list[tuple[bool, str, str]] = []  # (ok, label, fix-hint)
+
+    store_ok = KAGE_HOME.exists() and MEMORY_DIR.exists() and INDEX_DIR.exists()
+    checks.append((store_ok, "store layout (~/.kage)", "run: kage init"))
+
+    try:
+        json.loads(CONFIG_PATH.read_text())
+        cfg_ok = True
+    except (OSError, ValueError):
+        cfg_ok = False
+    checks.append((cfg_ok, "config.json readable", "run: kage init"))
+
+    db_ok, idx_count = False, 0
+    if DB_PATH.exists():
+        try:
+            conn = _connect()
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table','view')"
+            )}
+            db_ok = {"memories", "memory_fts"} <= tables
+            if db_ok:
+                idx_count = conn.execute("SELECT count(*) FROM memories").fetchone()[0]
+            conn.close()
+        except sqlite3.Error:
+            db_ok = False
+    checks.append((db_ok, "database + schema", "run: kage init"))
+
+    md_count = len(list(MEMORY_DIR.glob("*.md"))) if MEMORY_DIR.exists() else 0
+    consistent = db_ok and md_count == idx_count
+    checks.append((
+        consistent,
+        f"markdown ↔ index consistent ({md_count} files / {idx_count} rows)",
+        "index drifted from the markdown — a `kage reindex` is the planned fix",
+    ))
+
+    typer.echo("\nkage doctor — checking your setup\n")
+    all_ok = True
+    for ok, label, fix in checks:
+        typer.echo(f"  {'✓' if ok else '✗'} {label}")
+        if not ok:
+            typer.echo(f"      → {fix}")
+        all_ok = all_ok and ok
+
+    if all_ok:
+        typer.echo("\n✓ kage looks healthy.\n")
+    else:
+        typer.echo("\n✗ some checks failed — see fixes above.\n")
+        raise typer.Exit(code=1)
+
+
 if __name__ == "__main__":
     app()

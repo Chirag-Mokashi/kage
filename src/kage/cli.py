@@ -11,6 +11,7 @@ import datetime as _dt
 import json
 import secrets
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import typer
@@ -123,6 +124,16 @@ def _new_id() -> str:
     return f"{_dt.datetime.now():%Y%m%dT%H%M%S}-{secrets.token_hex(3)}"
 
 
+def _read_body(rel_path: str) -> str:
+    """Read a memory's body from its markdown file (source of truth), minus frontmatter."""
+    text = (KAGE_HOME / rel_path).read_text()
+    if text.startswith("---"):
+        close = text.find("\n---", 3)
+        if close != -1:
+            text = text[close + 4 :]
+    return text.strip()
+
+
 @app.command()
 def remember(
     text: str = typer.Argument(..., help="The note to remember."),
@@ -164,11 +175,50 @@ def remember(
     typer.echo(f"  ✓ saved   {_disp(md_path)}   [{mem_id}]   (local)")
 
 
+@app.command(name="list")
+def list_(
+    project: str = typer.Option(None, "--project", "-p", help="Limit to a project."),
+    limit: int = typer.Option(20, "--limit", "-n", help="Max to show."),
+) -> None:
+    """List what kage has saved (most recent first) — so you can see before you search."""
+    _require_init()
+
+    sql = "SELECT id, project, created_at, content_path FROM memories"
+    params: list = []
+    if project:
+        sql += " WHERE project = ?"
+        params.append(project)
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+
+    conn = _connect()
+    try:
+        rows = conn.execute(sql, params).fetchall()
+        total = conn.execute("SELECT count(*) FROM memories").fetchone()[0]
+    finally:
+        conn.close()
+
+    if not rows:
+        where = f"  (project: {project})" if project else ""
+        typer.echo(f'Nothing saved yet.{where}   Add one:  kage remember "..."')
+        raise typer.Exit()
+
+    shown = f" (showing {len(rows)} of {total})" if len(rows) < total else ""
+    typer.echo(f"\n{total} note(s){shown}:\n")
+    for mem_id, proj, created, path in rows:
+        preview = _read_body(path).replace("\n", " ")
+        if len(preview) > 70:
+            preview = preview[:70] + "…"
+        typer.echo(f"  [{proj or 'no-project'}]  {preview}")
+        typer.echo(f"     {created[:16].replace('T', ' ')}   {mem_id}\n")
+
+
 @app.command()
 def recall(
     query: str = typer.Argument(..., help="What to search for."),
     project: str = typer.Option(None, "--project", "-p", help="Limit to a project (the partition wall)."),
     limit: int = typer.Option(5, "--limit", "-n", help="Max results."),
+    pipe: bool = typer.Option(False, "--pipe", help="Copy the matched notes to the clipboard (paste into your AI)."),
 ) -> None:
     """Search your memory (full-text) and surface the best matches."""
     _require_init()
@@ -203,10 +253,69 @@ def recall(
         typer.echo("No matches." + (f"  (project: {project})" if project else ""))
         raise typer.Exit()
 
+    if pipe:
+        blocks = [
+            f"## [{proj or 'no-project'}] {created}\n{_read_body(path)}"
+            for _id, proj, created, path, _snip in rows
+        ]
+        payload = f'# Context from kage (query: "{query}")\n\n' + "\n\n".join(blocks) + "\n"
+        try:
+            subprocess.run(["pbcopy"], input=payload.encode(), check=True)
+            typer.echo(
+                f"✓ copied {len(rows)} note(s) to clipboard ({len(payload)} chars). "
+                "Paste into your AI, then add your question."
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            typer.echo(payload)  # no pbcopy available — print it so you can copy manually
+        raise typer.Exit()
+
     typer.echo(f"\n{len(rows)} match(es):\n")
     for mem_id, proj, created, path, snip in rows:
         typer.echo(f"  • [{proj or 'no-project'}] {snip}")
         typer.echo(f"    {created}   {_disp(KAGE_HOME / path)}   [{mem_id}]\n")
+
+
+@app.command()
+def forget(
+    ident: str = typer.Argument(..., help="The note's id or a unique prefix (see `kage list`)."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirm prompt."),
+) -> None:
+    """Delete a saved note — its markdown file and its index rows. Asks first."""
+    _require_init()
+
+    conn = _connect()
+    try:
+        matches = conn.execute(
+            "SELECT id, project, content_path FROM memories WHERE id = ? OR id LIKE ?",
+            (ident, ident + "%"),
+        ).fetchall()
+
+        if not matches:
+            typer.echo(f"No note matches '{ident}'.  (see: kage list)", err=True)
+            raise typer.Exit(code=1)
+        if len(matches) > 1:
+            typer.echo(f"'{ident}' matches {len(matches)} notes — be more specific:", err=True)
+            for mid, proj, _ in matches:
+                typer.echo(f"  {mid}  [{proj or 'no-project'}]")
+            raise typer.Exit(code=1)
+
+        mem_id, proj, path = matches[0]
+        body = _read_body(path)
+        preview = (body[:70] + "…") if len(body) > 70 else body
+        typer.echo(f'\n  [{proj or "no-project"}] {preview}')
+        typer.echo(f"  {mem_id}")
+        if not yes and not typer.confirm("Forget this note? This permanently deletes it.", default=False):
+            typer.echo("Kept — nothing deleted.")
+            raise typer.Exit()
+
+        (KAGE_HOME / path).unlink(missing_ok=True)  # remove the source of truth
+        conn.execute("DELETE FROM memories WHERE id = ?", (mem_id,))
+        conn.execute("DELETE FROM memory_fts WHERE id = ?", (mem_id,))  # and the index
+        conn.commit()
+    finally:
+        conn.close()
+
+    typer.echo(f"  ✓ forgotten   [{mem_id}]")
 
 
 if __name__ == "__main__":

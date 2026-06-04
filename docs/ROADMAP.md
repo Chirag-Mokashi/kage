@@ -1,5 +1,7 @@
 # kage — Roadmap
 
+> ⚠️ **SUPERSEDED — Session-1 legacy (2026-05-21).** Everything below predates the Odysseus substrate swap (#81) and the thin-slice pivot (#104). Its "Fork OpenJarvis," FAISS, Antigravity, and 7-cycle plan are **OUTDATED**. **Current truth:** [blueprint.md](blueprint.md) (all decisions) + [cycle-1-pitch.md](cycle-1-pitch.md) (the real Cycle 1 = v0.1 thin slice). This file will be rewritten when v0.1 ships and the real cadence is known.
+>
 > **Living document.** This is the working plan, not a contract. Updated at the end of each cycle based on what we learned. The full vision goes to v1.0; the *path* there is iterative.
 >
 > **Cadence:** Shape Up cycles, ~2 weeks each. Each cycle has a Pitch (written before) and a Retrospective (written after).

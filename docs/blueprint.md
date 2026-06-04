@@ -177,10 +177,10 @@ The cloud tools stay. The devices stay. kage makes them work together as arms of
 **Supporting differentiators (shared with prior art but absent from current personal-AI products):**
 
 ```
-   4. Local-first execution + cross-tool brokering    ◐ rare combination
-   5. Context engine + multi-vendor router as ONE     ◐ no shipped product
-   6. Per-query dynamic context assembly              ◐ vs. static buckets
-   7. Identity-aware selective disclosure             ◐ enterprise pattern
+   5. Local-first execution + cross-tool brokering    ◐ rare combination
+   6. Context engine + multi-vendor router as ONE     ◐ no shipped product
+   7. Per-query dynamic context assembly              ◐ vs. static buckets
+   8. Identity-aware selective disclosure             ◐ enterprise pattern
                                                         applied to personal
 ```
 
@@ -382,24 +382,24 @@ Note: this principle **supersedes** the earlier "Correction-Driven Personalizati
 
 ### Layer 3a — Active Context Detection ★
 
-**Status:** Designed and locked. v1 scope clear.
+**Status:** FULLY LOCKED (Session 14 — editor signal dropped, per-invocation resolution clarified, #103). v1 scope clear.
 
-**v1 detection logic — priority cascade (6 levels):**
+**v1 detection logic — priority cascade (5 levels; re-derived PER-INVOCATION each command, no watcher — #103):**
 For each query, kage resolves both `active_project` and `active_identity` by trying in order:
   1. Explicit flag (`--project X --identity Y`)
-  2. Editor file path (`~/Projects/X/…`)
-  3. Active calendar event (macOS Calendar API)
-  4. Terminal cwd
-  5. Sticky last-active (state, derived from prior resolution — not a signal)
-  6. Fallback to "personal" identity, no project
+  2. Active calendar event (macOS Calendar API)
+  3. Terminal cwd
+  4. Sticky last-active (state, derived from prior resolution — not a signal)
+  5. Fallback to "personal" identity, no project
 
-**v1 signals (4 sources — inputs to the cascade):**
+**v1 signals (3 sources — inputs to the cascade):**
 - Explicit CLI flag (user-driven)
-- Editor file path (via small editor plugin)
 - Active calendar event (via macOS Calendar API)
 - Terminal cwd (via shell hook)
 
-Note: Sticky last-active is **state**, not a signal — it's the previous cascade resolution carried forward. The fallback at rank 6 is the floor when no signal resolves.
+*(Editor-file-path signal DROPPED from v1 per #103 — revisit post-v1; it needs an editor plugin + likely the daemon, which tensions with terminal-first #79 / on-demand #80.)*
+
+Note: Sticky last-active is **state**, not a signal — it's the previous cascade resolution carried forward. The fallback at rank 5 is the floor when no signal resolves.
 
 **Setup / Bootstrap (first-run wizard) — aligned with Self-Discovery Principle (Locked Principle #13):**
 1. Detect Google accounts on machine (Chirag has 4)
@@ -415,7 +415,7 @@ Note: Sticky last-active is **state**, not a signal — it's the previous cascad
 - NEU identity ← {mokashi.ch@neu, research-email@}
 - Memory tagged by (project, identity); ingestion auto-resolves source → identity
 
-**Automation Pattern A in v1:** Reactive context-switching watches the 4 signals; auto-flips active (project, identity); shows status pill.
+**Automation Pattern A in v0/v1 (#103):** the cascade is re-derived PER-INVOCATION on each command (no watcher). Reactive watching / auto-flip across the 3 signals is deferred to the daemon era (#80); v0 surfaces the resolved (project, identity) in the status / context bar.
 
 **Automation Patterns B/C/D/E shapes (deferred to v2, but v1 design accommodates):**
 - B (unified aggregation): data model uses identity_id not account_id
@@ -625,7 +625,7 @@ pending  ─►  tagged  ─►  indexed  ─►  analyzed
                             ▼            ▼
                        retrievable   retrievable
                        via BM25 +    via graph,
-                       FAISS         entities, etc.
+                       ChromaDB      entities, etc.
 ```
 
 A memory becomes **retrievable** as soon as it's `indexed`. Graph-retrievable when `analyzed`. Layer 3c uses whatever's available at query time.
@@ -636,7 +636,7 @@ A memory becomes **retrievable** as soon as it's `indexed`. Graph-retrievable wh
 
 **Cosmos Q5 validation (Session 4):** The hybrid sync-cheap / async-expensive split matches the "production compromise" pattern Cosmos identified across shipped systems. Specifically:
 - **Validates kage's wall save** (Layer 3b decision #16) against ChatGPT's anti-pattern: 96% of ChatGPT memories are system-created unilaterally; 28% contain GDPR-defined personal data; persisted *interpretations*, not transcripts. kage explicitly inverts this.
-- **Structurally aligned with Claude Code's pattern**: hybrid loading, plain-text auditable artifacts, no mandatory pre-indexing for everything. kage extends with FAISS+BM25 retrieval.
+- **Structurally aligned with Claude Code's pattern**: hybrid loading, plain-text auditable artifacts, no mandatory pre-indexing for everything. kage extends with ChromaDB+BM25 retrieval.
 - **Matches "Pattern C — eager indexing + lifecycle ops"** in the sync column: embeddings + BM25 tokens computed at save time; lifecycle ops (deprecate/retag/forget) supported.
 - **No structural changes to PROPOSED ingest pipeline.** Hybrid sync/async is the right call.
 
@@ -1146,7 +1146,7 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 
 **Status:** Designed and locked (directional). Session 11. Validated against Cosmos Q M (Claude/ChatGPT opacity, MemX, vstash, Miteski "memory as metabolism," Foundation Agents survey, MIRIX typed schema, Letta/MemGPT, Cognee, Obsidian/Notion PKM patterns).
 
-> **⚠ Partially superseded by #85 (Session 13):** the **vector index is now ChromaDB, not FAISS** (Odysseus's store; native metadata filtering fits the 3b partition wall). Every "FAISS" below now denotes **ChromaDB (the derived vector index)**; the IndexFlatIP / budget details describe the role Chroma fills at personal scale. The **markdown source-of-truth (5A) is unchanged and reconfirmed** (#84) — one brain, one truth; Odysseus delegates memory to kage.
+> **Note (#85 / #99):** the vector index is **ChromaDB** (derived). The 3b partition wall executes in **SQLite** (#99), NOT in Chroma — Chroma is a dumb, swappable vector index that searches over SQLite-filtered candidates. Markdown (5A) remains the source of truth (#84); one brain, one truth.
 
 **Role in pipeline:** PERSISTENCE substrate. All layers above operate logically on memories; Layer 5 is where they physically live. The read path feeds Layer 3c; the write path is fed by Layer 3b ingest (#28).
 
@@ -1165,7 +1165,7 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
    │   ├── kage.db               ← 5B: SQLite (metadata +
    │   │                           partition + FTS5 + audit +
    │   │                           schema version)
-   │   └── vector.faiss          ← 5C: FAISS (IndexFlatIP,
+   │   └── chroma/               ← 5C: ChromaDB (vector index,
    │                               Granite 768d, derived)
    └── config/
        ├── accounts.toml         (Layer 4 #61)
@@ -1186,10 +1186,10 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 - DERIVED from 5A; fully regenerable. Validated by MemX (FTS5 1100× speedup, <90ms at 100K) [7.1], vstash (20.9ms at 50K) [8.1]
 
 **5C — VECTOR INDEX (decision #72; backend FAISS → ChromaDB per #85, Session 13):**
-- FAISS `IndexFlatIP` for v1 (exact search — zero accuracy loss at ≤100K; ~300MB at 100K×768d; upgrade to IVF/HNSW only beyond ~500K vectors, which personal scale won't hit for years)
+- ChromaDB collection for v1 (HNSW index; at personal scale ≤100K vectors quality is effectively exact; ~0.3-0.5GB at 100K×768d; revisit index tuning only beyond ~500K vectors, which personal scale won't hit for years)
 - Granite Embedding 311M R2, 768d (#50)
-- Incremental add/remove via IndexIDMap; full rebuild ONLY on embedding-model swap
-- Persist to `vector.faiss`, load at startup (<1s), checkpoint after async ingest batches + on shutdown
+- Incremental add/delete via Chroma collection ops (upsert / delete by ID); full rebuild ONLY on embedding-model swap
+- Persisted by Chroma under `~/.kage/indexes/chroma/`; loads at startup; written after async ingest batches
 - docid→vectorid mapping in SQLite (5B)
 - DERIVED from 5A; embedding model version recorded so kage knows when reindex is needed
 
@@ -1198,16 +1198,16 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
    Qwen3-14B Q4_K_M       ~10 GB
    Granite Embedding 311M  ~0.5-1 GB
    bge-reranker-v2-m3      ~0.5 GB
-   FAISS (100K × 768d)     ~0.3 GB
+   ChromaDB (100K × 768d)  ~0.3-0.5 GB
    SQLite (metadata+FTS5)  ~0.1-0.5 GB
    OS + overhead           ~4-6 GB
    ─────────────────────────────────
    Total                   ~16-18 GB  → fits with headroom
 ```
 
-**Read path:** SQLite pre-filter (project AND identity AND state → candidate docids) → FTS5 BM25 + FAISS dense over candidates → RRF fusion → bge-reranker (Layer 3c) → fetch winning content from markdown (5A).
+**Read path:** SQLite pre-filter (project AND identity AND state → candidate docids; the partition WALL lives here, #99) → FTS5 BM25 + ChromaDB dense over the allowed candidates → RRF fusion → bge-reranker (Layer 3c) → fetch winning content from markdown (5A).
 
-**Write path (#28 hybrid):** SYNC: write markdown (5A) → insert SQLite rows (5B) → return success. ASYNC: embed via Granite → add to FAISS (5C) → update FTS5 + docid map (5B). Crash-safe: if async fails, memory still findable via SQLite metadata + manual reindex.
+**Write path (#28 hybrid):** SYNC: write markdown (5A) → insert SQLite rows (5B) → return success. ASYNC: embed via Granite → add to ChromaDB (5C) → update FTS5 + docid map (5B). Crash-safe: if async fails, memory still findable via SQLite metadata + manual reindex.
 
 **Retention (decision #73):**
 - scoped/baseline (committed): NEVER auto-expire (echoes #58 — old-but-relevant must survive)
@@ -1225,10 +1225,10 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 - Schema version stamped in 5A frontmatter + 5B table
 - Old memories readable FOREVER; additive changes use default-on-read (no migration)
 - Structural changes use versioned idempotent migrations (vstash pattern), gated by Safety Copilot (#65 Tier-3: backup-verify before run)
-- Markdown-source-of-truth makes migration safe: migrate authoritative files, regenerate SQLite+FAISS from them (no index/content drift). Git-trackable = reviewable diff + rollback
-- Embedding model change → full FAISS reindex (per 5C)
+- Markdown-source-of-truth makes migration safe: migrate authoritative files, regenerate SQLite+ChromaDB from them (no index/content drift). Git-trackable = reviewable diff + rollback
+- Embedding model change → full ChromaDB reindex (per 5C)
 
-**Novelty framing (decision #76):** Claude/ChatGPT/Gemini storage internals are OPAQUE (Cosmos Q M found no public substrate disclosure). kage's hybrid (files-authoritative + SQLite-index + FAISS-derived) matches MemX + vstash reference designs — the two closest production analogs. Honest framing per #53/#60/#69 precedent: the storage pattern is well-trodden; kage's contribution is the COMPOSITION (typed schema #46 + partition matrix #18 + tri-mode-ready interface + derived-index discipline) at personal scale. Tri-mode storage as user choice is the one genuinely novel element (Q M Q8).
+**Novelty framing (decision #76):** Claude/ChatGPT/Gemini storage internals are OPAQUE (Cosmos Q M found no public substrate disclosure). kage's hybrid (files-authoritative + SQLite-index + ChromaDB-derived) matches MemX + vstash reference designs — the two closest production analogs. Honest framing per #53/#60/#69 precedent: the storage pattern is well-trodden; kage's contribution is the COMPOSITION (typed schema #46 + partition matrix #18 + tri-mode-ready interface + derived-index discipline) at personal scale. Tri-mode storage as user choice is the one genuinely novel element (Q M Q8).
 
 **Deferred to Stage 1 engineering:**
 - FTS5 tokenizer config + BM25 k1/b tuning (QuackIR [14.1] flags hard-coded defaults to plan around)
@@ -1290,7 +1290,7 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 | 12 | Layer-by-layer planning workflow: each round = one layer, refine until locked | Session 1 |
 | 13 | Stage 0 (now) = blueprint planning · Stage 1 (later) = implementation engineering | Session 1 |
 | 14 | Internal agents architecture: Option C (hybrid — Librarian + opt-in Monitor inside, external via MCP) | Session 1 |
-| 15 | Layer 3a: 4 signals, 6-level priority cascade (calendar event ranked between editor file path and terminal cwd; sticky is state not signal), bootstrap wizard, many-to-one identity model, 7 privacy principles | Session 1 |
+| 15 | Layer 3a: 4 signals, 6-level priority cascade (calendar event ranked between editor file path and terminal cwd; sticky is state not signal), bootstrap wizard, many-to-one identity model, 7 privacy principles | Session 1 | *(SUPERSEDED by #103: editor-file-path signal DROPPED → 3 signals / 5-level cascade; per-invocation in v0.)*
 | 16 | Layer 3b save philosophy: **wall, not firehose** — nothing enters memory unless explicitly saved. Background scraping = opt-in v2 only. | Session 2, 2026-05-21 |
 | 17 | Layer 3b write path: **2 flows only** — Flow 1 (direct save: CLI/voice/menu bar/hotkey) + Flow 2 (session inbox markdown-file batch review). | Session 2 |
 | 18 | Layer 3b tag schema: `projects[]` (can be empty) + `identities[≥1]` + `state ∈ {scoped, baseline, pending}`. | Session 2 |
@@ -1360,7 +1360,7 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 | 82 | **Interface: headless broker (Session 13).** kage = headless engine (CLI + `okiro` + MCP-server-OUT) in its own repo; Odysseus is a *consumed client/arm*, never kage's face. Preserves Silent/Invisible; keeps "my project" clean. Resolves the headless-vs-UI open question. | Session 13 |
 | 83 | **Permissions + MCP-IN trust (Session 13).** #77 macOS-native model KEPT for local access (Odysseus web auth doesn't apply). MCP-server-IN trust boundary: external clients (Odysseus etc.) are localhost-only + token-authenticated + subject to partition (3b) + disclosure (3e), and **READ-ONLY by default** — they read kage's memory, cannot write. kage is the brain: writes are permission-gated, kage-authored (write-wall #16). | Session 13 |
 | 84 | **Memory format: markdown source-of-truth confirmed vs Odysseus (Session 13).** Keep #70 markdown-file-per-memory as the ONE source of truth; ChromaDB + SQLite + hash-chain audit are DERIVED, rebuildable (not a second memory). Principle: **one brain, one truth** — Odysseus does NOT keep a competing store; it delegates memory reads to kage. Two synced stores rejected (drift/confusion). | Session 13 |
-| 85 | **Retrieval/storage backend: FAISS → ChromaDB (Session 13).** Adopt **ChromaDB** as the derived vector index (Odysseus default; native metadata filtering fits the 3b partition wall) — **supersedes #72 (FAISS) and the 5C/FAISS portion of #49/#71.** **Granite Embedding 311M R2 (#50) stays the target** (swappable behind the derived index, benchmark-confirmed). kage's 3c smarts (RRF + bge-reranker-v2-m3 + LightRAG split, #49/#51) stay as a BUILD layer on top of Chroma. Adapt-later: swap the backend when something better appears; markdown truth survives. | Session 13 |
+| 85 | **Retrieval/storage backend: FAISS → ChromaDB (Session 13).** Adopt **ChromaDB** as the derived vector index (Odysseus default + persistence + good-enough vector search; the 3b partition wall stays in **SQLite** per #99, NOT in Chroma) — **supersedes #72 (FAISS) and the 5C/FAISS portion of #49/#71.** **Granite Embedding 311M R2 (#50) stays the target** (swappable behind the derived index, benchmark-confirmed). kage's 3c smarts (RRF + bge-reranker-v2-m3 + LightRAG split, #49/#51) stay as a BUILD layer on top of Chroma. Adapt-later: swap the backend when something better appears; markdown truth survives. | Session 13 |
 | 86 | **Routing ACCOUNT dimension built in v1 (Session 13).** Extend Odysseus's (vendor, model) dispatch to kage's (VENDOR, ACCOUNT, MODEL) tuple (#61) in v1 — unlocks per-account cost ceilings (#66) + per-account failure cascade (#67). | Session 13 |
 | 87 | **Internal agents kept as kage's own (Session 13).** Librarian + opt-in Monitor remain kage's headless internal agents (tied to the partition/state machine Odysseus lacks); external/general agents (incl. Odysseus's workspace agent) via MCP (#14). Librarian's periodic run MAY be triggered by Odysseus's cron scheduler (reuse plumbing, keep logic). | Session 13 |
 | 88 | **Agent sandbox built in v1 (Session 13).** Build the Docker execution sandbox (#2) in v1 from the start — Odysseus ships an *unsandboxed* agent (its own admitted threat-model gap), so kage adds the containment it lacks; pairs with Safety Copilot (#65). (User chose security-first over phasing to v1.5.) | Session 13 |
@@ -1374,6 +1374,12 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 | 96 | **Layer 1 `kage init` scope at milestone-0 (Session 14).** init = minimal scaffold + transparent report: create `~/.kage/` (config, memory dirs by type, `sessions/`, indexes for SQLite + Chroma), probe the environment, and report what it set up with "✓ local" markers (#78 installer-style character). The identity-grouping / project-pinning bootstrap wizard (Layer 3a #15/#35) is DEFERRED until Layer 3a lands — keeps milestone-0 a clean testable baseline. | Session 14 |
 | 97 | **Layer 1 status / doctor shape (Session 14).** `kage status` (state snapshot, Aware/Transparent) reports: **active project · identity** (3a), **memory stats** (counts by type #46 + partition), **routing config + connected MCP servers** (Layer 4). `kage doctor` (health + actionable fixes — brew/flutter-doctor convention) checks: **macOS TCC permissions** (granted vs missing + grant command, #77), **MCP reachability + disk**, **config + schema integrity** (markdown↔index content-hash consistency #71), **local stack reachable** (Ollama, Chroma, SQLite, Granite embedding + reranker). Field-level output deferred to Stage 1. | Session 14 |
 | 98 | **`kage test` harness design (Session 14).** Local-vs-cloud benchmark answering "is local (Qwen3-14B) good enough per task class?" — data sets graduation thresholds (#68), not guesses (test-first principle). Per case: run the SAME input through kage's internal pipeline on LOCAL (Qwen3/Ollama) and CLOUD, score per judging method. Case schema: `{id, class (#62), prompt, context[], judge, reference?, why}`. **Judging = BLEND** — automated (shadow-agreement / LLM-judge) on every case + human spot-check on a sample (Testing Protocol #30 + #68 blended signal); Odysseus **Compare mode** reusable as the human-review UI. **Metrics v1 = quality (headline) + privacy (% stayed local)**; latency + cost deferred (cheap to add — both models already run per case). **First classes = chat (likely graduates local) + reasoning (likely stays cloud)** — a contrasting pair to validate the methodology before expanding. Chirag authors the actual cases. **Refinement (Session 14):** `kage test` runs a SUITE (many cases/class, easy→hard) so the DISTRIBUTION sets thresholds — not one case; grading is DIRECTIONAL (rubric / shadow-agreement / human spot-check), never exact-match. v0/milestone-0 ships a small SEED suite to validate the methodology; scaling to ~1000 cases stored in a **markdown corpus kage reads directly** (which ALSO exercises its file-access path, echoing markdown-memory #70) is explicitly POST-v0. Output seeds the #68 reputation table. | Session 14 |
+| 99 | **Partition wall executes in SQLite, not the vector store (Session 14, audit C2).** Resolves the #71↔#85 conflict the fresh-eyes audit caught: the identity/project/state filter (the moat invariant) runs as the **SQLite pre-filter** (#71) producing candidate IDs; the vector store (ChromaDB) searches only that allowed set and stays a DUMB, swappable index. **Corrects #85's rationale** — Chroma is adopted for substrate-default + persistence + good-enough vector search, NOT for native metadata filtering. Why: the "never-leaks" identity wall is most auditable/unit-testable as plain SQL, and a filter-unaware vector store preserves swappability (adapt-later). | Session 14 |
+| 100 | **Audit log trimmed to plain append-only for v1 (Session 14, audit S4; amends #57/#71).** v1 ships a plain, queryable, append-only audit log (satisfies Transparent). The Ed25519 signatures + SHA-256 per-identity hash chain are DEMOTED to a documented v2 item, triggered only if multi-device/shared use ever happens. Rationale: single-user local = no tamper adversary; crypto tamper-evidence defends a threat that doesn't exist in v1. Design + rationale preserved as a future showcase — don't build now (complete-over-fast). | Session 14 |
+| 101 | **3e sensitivity cascade trimmed for v1 (Session 14, audit S5; amends #57 Stage 3).** v1 ships **Tier A only** (Presidio/regex — emails, keys, cards, etc.). Tier B (local NER) + Tier C (local 14B-redactor) are DEMOTED to conditional, switched on only if `kage test` privacy metrics show real leakage. Rationale: the save-wall (#16) already curates everything in memory, so the un-curated-PII premise (imported from enterprise RAG) is weak; don't run a 14B pass on the dispatch hot path until data justifies it. | Session 14 |
+| 102 | **`kage test` staged + shadow-all confirmed (Session 14, audit S6/M4; refines #95/#98, #61).** S6: milestone-0 `kage test` = **raw-model** local-vs-cloud on the seed cases (Qwen3 vs Claude; NO kage pipeline yet — explicitly does NOT exercise the moat). The full-pipeline benchmark + smoke + invariant + integration tests come online incrementally as Layers 3a-3e/4 get built (later milestones); `kage test` grows with the system. M4: **shadow-ALL queries CONFIRMED** (kept over the shadow-sample alternative) — the ~2× local compute on 24GB is explicitly accepted per #61 Session-10 ("no shortcuts"). | Session 14 |
+| 103 | **Layer 3a refined + 3a/3b promoted to FULL LOCK (Session 14, audit S1/S2/S3).** S2: the **editor-file-path signal is DROPPED from v1** (revisit post-v1 — it needs a plugin + likely the daemon); v1 cascade = explicit flag → active calendar event → terminal cwd → sticky-last-active → fallback (3 live signals). S3: **3a resolves the cascade PER-INVOCATION in v0** (re-derived each command; no watcher) — "reactive watching / auto-flip" reserved for the daemon era (#80); user-visible behavior unchanged. S1: with these closed, **Layers 3a and 3b are now FULLY LOCKED** (no longer "directional"), clearing the build-moat-first path. | Session 14 |
+| 104 | **PIVOT — ship a thin v0.1 slice FIRST; blueprint = roadmap (Session 14, after the adversarial red-team).** Verdict that triggered it: 14 sessions + 103 decisions + 0 code = the planning had become the procrastination. Decision: STOP locking, BUILD. **v0.1 = standalone local CLI** — `init` / `remember` / `recall` / `status` / `doctor` + recall→Claude (clipboard); markdown-SoT (#70) + SQLite FTS5/BM25 (#71); **project tags only**. DEFERRED until daily use justifies them: identity dimension, ChromaDB/semantic search, Layer 3e, Layer 4 routing / local Qwen, agents, sandbox, daemon, MCP, REPL, the benchmark corpus, **and Odysseus** (v0.1 is standalone — doesn't need the substrate yet). Pitch → `docs/cycle-1-pitch.md`. **Two intentional deviations:** (a) `remember`/`recall` brought INTO v0.1 (vs #95's milestone-1) — they're the actual value; (b) v0.1 `kage test` = unit + invariant tests, NOT the #102 local-vs-cloud benchmark (no routing / local model in v0.1). Rationale: project-changing surprises come from reality, not planning; build the stable core, defer the volatile/moat, let usage decide. Full blueprint stays the roadmap; moat added when earned. | Session 14 |
 
 ---
 

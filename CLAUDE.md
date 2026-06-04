@@ -2,7 +2,7 @@
 
 *Entry point for any Claude Code session in this repo. Lightweight orientation only — the canonical planning state lives in [docs/blueprint.md](docs/blueprint.md).*
 
-*Last updated: 2026-05-22*
+*Last updated: 2026-06-04 (Session 14)*
 
 ---
 
@@ -26,7 +26,7 @@
 
 **What kage is NOT:**
 - Not a Claude replacement
-- Not "yet another personal AI" (OpenJarvis already does that)
+- Not "yet another personal AI" (that workspace layer is Odysseus's job; kage is the broker above it)
 - Not an aspirational version of me / a proxy / a substitute for the human self
 - Not a home automation hub or device manager
 - Not cloud-dependent
@@ -56,27 +56,28 @@ Every design decision must be checked against this list. Operational definitions
 
 Stage 1 (implementation) begins only when the Stage 0 blueprint is locked end-to-end and a Cycle 1 pitch is written.
 
-Progress: Layers 3a + 3b locked. Layer 3c in PROPOSED state. ~5 layers still to design.
+Progress: Layers 1 (designed), 2 (arch), 3a–3e, 4, 5 locked. Substrate = Odysseus (extend, own repo). Remaining: Layer 6 (Learning), Layer 7 (MCP-out), Layer 2 detail + the Cycle 1 pitch.
 
 ## Canonical Docs (where the real planning lives)
 
 | File | What it is |
 |---|---|
 | [docs/blueprint.md](docs/blueprint.md) | **Read this for substantive context.** The detailed planning state. North Star, 7-layer architecture, locked decisions, session log, all open questions. Self-contained. |
-| [docs/architecture.md](docs/architecture.md) | Living visual system map with status overlay (Mermaid — legacy from Session 1; new diagrams use ASCII per memory preference) |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | Cycle-by-cycle execution plan |
+| [docs/cycle-1-pitch.md](docs/cycle-1-pitch.md) | **The live Cycle 1** — v0.1 thin-slice pitch (what we build first). |
+| [docs/architecture.md](docs/architecture.md) | ⚠️ LEGACY (Session 1) — superseded by blueprint.md §4 (Odysseus substrate). See banner in file. |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | ⚠️ LEGACY (Session 1) — superseded by cycle-1-pitch.md + blueprint.md. See banner in file. |
 | [docs/competitor-flowcharts.md](docs/competitor-flowcharts.md) | Engine-level comparisons with prior art |
 
 For a fresh Claude session: **start by reading docs/blueprint.md.** It contains the current state of everything.
 
 ## Strategic Anchors (stable across sessions)
 
-- **Build approach:** Fork Stanford SAIL's OpenJarvis (Apache-2.0). Stay close to upstream. OJ is the substrate; kage is the broker layer above it.
+- **Build approach:** EXTEND PewDiePie's Odysseus (MIT) as the substrate, in kage's OWN repo (NOT a fork). kage = the headless broker layer above it. (OpenJarvis retired as substrate Session 13; kept only as a design reference.)
 - **Dual goal:** Ship kage AND learn industry SDLC by mimicking real-team practice.
 - **SDLC starter pack:** Shape Up cycles · GitHub Flow · ADRs · Conventional Commits · README/ROADMAP/CHANGELOG · GitHub Actions CI · pre-commit · semver.
-- **Local stack:** Qwen3 14B Q4_K_M via Ollama, Docker sandbox.
-- **Cloud relationships:** Claude (reasoning), Perplexity (research), Gemini (Workspace), Antigravity (IDE), Cosmos (deep research).
-- **Repo:** github.com/Chirag-Mokashi/kage — private, fork of OpenJarvis (planned, not yet executed).
+- **Local stack:** Qwen3 14B Q4_K_M via Ollama (direct), Docker sandbox, ChromaDB vector index (derived — markdown files are the memory source of truth).
+- **Cloud relationships:** Claude (reasoning), Perplexity (research), Gemini (Workspace), Cosmos (deep research). (Antigravity rejected as substrate #26 — optional client only.)
+- **Repo:** github.com/Chirag-Mokashi/kage — kage's OWN repo (live on GitHub); extends Odysseus (MIT), not a fork.
 
 ## Operating Rules
 

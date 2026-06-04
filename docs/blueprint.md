@@ -6,7 +6,7 @@
 > **Purpose of this file:** Single source of truth for the kage project state.
 > Open this at the start of any session to re-enter with full context.
 >
-> *Last updated: 2026-06-03, Session 13 (Odysseus substrate reconciliation). **NOTE: substrate changed OpenJarvis → Odysseus (extend, not fork); see §4 + decisions #81–#90.***
+> *Last updated: 2026-06-04, Session 14 (Layer 1 interface DESIGNED — #91–#98). Substrate = Odysseus (extend, not fork); see §4 + #81–#90.*
 >
 > *Companion docs:*
 > - [architecture.md](architecture.md) — visual system map
@@ -14,6 +14,7 @@
 > - [competitor-flowcharts.md](competitor-flowcharts.md) — engine comparisons
 > - [odysseus-deep-dive.md](odysseus-deep-dive.md) — substrate internals (Session 13)
 > - [odysseus-reconciliation.md](odysseus-reconciliation.md) — all 80 decisions × Odysseus (Session 13)
+> - [kage-test-seed.md](kage-test-seed.md) — kage test seed cases (Session 14)
 
 ---
 
@@ -338,7 +339,7 @@ Note: this principle **supersedes** the earlier "Correction-Driven Personalizati
 
 ### Layer 1 — Trigger / Interface
 
-**Status:** IN DESIGN (Session 12, 2026-06-03). Foundational decisions locked (#77-80); command-set + first-run report + interactive-session design still open (resume tomorrow). Cosmos Q O (interactive-session CLI patterns + OpenJarvis) fired, results pending.
+**Status:** DESIGNED (Session 14, 2026-06-04). Foundational decisions (#77-80) + interactive-session / milestone-0 design (#91-98) locked. Remaining: Chirag authors the `kage test` seed cases (chat + reasoning), then Layer 1 is fully locked.
 
 **What Layer 1 is:** the human-and-tool-facing surface. Two inbound directions: human (CLI, later menu-bar/hotkey/voice) and tools (MCP server IN — external tools query kage's memory; distinct from Layer 7 MCP server OUT).
 
@@ -358,13 +359,18 @@ Note: this principle **supersedes** the earlier "Correction-Driven Personalizati
 - TCC inheritance: a CLI launched from Terminal inherits Terminal's TCC identity, so gated-API prompts fire attributed to the terminal app, interactively. The daemon wrinkle (manual grants + signing/notarization) only bites a standalone launchd daemon — another reason on-demand-first (#80) is cleaner for v0.
 - Capability tiering across versions: v1 BROKER (memory, read email/calendar, route) → v1.5 MEDIATOR begins (manipulate calendar, send email, open apps, installs) → v2 full MEDIATOR (camera, mic, screenshots, deep OS control). Matches locked BROKER→MEDIATOR nesting; scary permissions earned incrementally.
 
-**Open (resume tomorrow):**
-- Command set: milestone-0 candidate = `init` + `test` + `status` + `doctor` (functional verbs store/retrieve/route exist as INTERNAL functions the test suite drives; `remember`/`recall`/`ask` exposed at milestone-1 human-review per Testing Protocol). `okiro` = one-line stub in v0 (keyword preserved; real version deferred to daemon/briefing era). NOT yet locked.
-- First-Run Discovery Report (probe → report findings → per-capability permission request) — designed, not locked.
-- `kage status` / `kage doctor` introspection output — designed, not locked.
-- Interactive-session (REPL, Claude-Code-like) as the DIRECTION beyond milestone-0 — awaiting Cosmos Q O.
-- MCP-server-IN scope (read-only? which memory types? auth) — not yet designed.
-- `kage test` scope: one-word command running the bundled Testing-Protocol suite; first concrete goal is benchmarking local-vs-cloud competitiveness. User authors test cases (possibly via available skills).
+**Interactive session + milestone-0 — DESIGNED (Session 14, #91–#98):**
+
+- **One engine, multiple surfaces (#91):** a single core loop; one-shot CLI, the interactive REPL, and MCP-in/out are all thin surfaces over it (Claude Code `queryLoop`/`QueryEngine` pattern). Build the engine once; wrap it. Odysseus has no CLI, so kage's interactive surface is wholly kage's own.
+- **Milestone-0 set LOCKED (#95):** `init` · `test` · `status` · `doctor` (one-shot). store/retrieve/route stay INTERNAL (test-suite-driven); `remember`/`recall`/`ask` at milestone-1; `okiro` = v0 stub.
+- **`kage init` (#96):** minimal scaffold + transparent report — create `~/.kage/` (config, memory-by-type, `sessions/`, SQLite+Chroma indexes), probe env, report with "✓ local" markers. The 3a identity/project bootstrap wizard is deferred to when Layer 3a lands.
+- **`status` / `doctor` (#97):** `status` = state snapshot (active project·identity · memory stats · routing+MCP). `doctor` = health + actionable fixes (TCC perms · MCP/disk · config+schema integrity · local stack reachable). brew/flutter-doctor convention.
+- **Interactive REPL (#92):** dual-dispatch — `/cmd` = deterministic, non-LLM, structured result; else NL → engine loop. Slash set: `/project /identity` (Layer 3a control plane) · `/model /account` (Layer 4) · `/mcp /recall` · `/help /clear /compact /status`.
+- **Context bar (#93):** active project·identity · model·account · tokens·cost · local/cloud+disclosure. Aware + Transparent made visible without a GUI.
+- **Session persistence (#94):** append-only JSONL transcripts; `kage --continue` replays to resume; transcripts SEPARATE from markdown memory (#70/#84); don't auto-restore permissions on resume (#65).
+- **`kage test` harness (#98):** local-vs-cloud benchmark; data sets graduation thresholds (#68). A SUITE (many cases/class, easy→hard); DIRECTIONAL grading (rubric / shadow-agreement / human spot-check), never exact-match; metrics v1 = quality + privacy. First classes = chat (daily-activity accuracy, time/place/tool aware) + reasoning (comprehension + reasoned options). v0 = small SEED suite → [kage-test-seed.md](kage-test-seed.md); scaling to a ~1000-case markdown corpus (which also exercises file-access) is POST-v0.
+
+**Remaining for Layer 1:** Chirag authors the `kage test` seed cases. Then Layer 1 is fully locked. The interactive REPL builds as the surface *after* milestone-0.
 
 ### Layer 2 — Internal Helper Agents
 
@@ -1360,6 +1366,14 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 | 88 | **Agent sandbox built in v1 (Session 13).** Build the Docker execution sandbox (#2) in v1 from the start — Odysseus ships an *unsandboxed* agent (its own admitted threat-model gap), so kage adds the containment it lacks; pairs with Safety Copilot (#65). (User chose security-first over phasing to v1.5.) | Session 13 |
 | 89 | **Local serving: Ollama-direct, Cookbook optional (Session 13).** kage talks to a local OpenAI-compatible endpoint (Ollama) directly for its own inference (Qwen3 14B Q4, #1) — independent of whether Odysseus runs. Odysseus's Cookbook is an OPTIONAL model-management convenience, not a dependency. | Session 13 |
 | 90 | **Portfolio + spec retarget (Session 13).** kage = its OWN repo (primary portfolio) + *opportunistic* upstream PRs to **Odysseus** for shared improvements (e.g. the sandbox, bug fixes) — never the moat (3a/3b/3e). **Supersedes #9** (PRs to OJ). **#26 SKILL.md/AGENTS.md loader DEFERRED** — use Odysseus's MCP + skills near-term; revisit only if cross-tool interop demands it. | Session 13 |
+| 91 | **Layer 1 architecture: one headless engine, multiple surfaces (Session 14).** A single core engine loop; one-shot CLI, the interactive REPL, and MCP-server in/out are all thin SURFACES over it (Claude Code `queryLoop()` / `QueryEngine` pattern, ArXiv 2604.14228). Milestone-0 ships one-shot `init/test/status/doctor` over the engine; the interactive REPL is the NEXT surface (not deferred to v1.5). Odysseus provides NO CLI (it's a web app) → kage's entire interactive surface is kage's own design. Validates #79/#82. | Session 14 |
+| 92 | **Layer 1 interactive REPL: dual-dispatch + slash-command control plane (Session 14).** `/`-prefixed input = deterministic, synchronous, non-LLM command (structured result, no token burn); everything else = NL → engine loop (OPENDEV pattern, ArXiv 2603.05344). v1 slash set: **/project /identity** (override Layer 3a active context — the wedge's control plane), **/model /account** (Layer 4 override), **/mcp /recall** (manage MCP in/out; query memory inline), **/help /clear /compact /status** (session + discoverability). Deterministic commands are directly unit-testable (Testing Protocol #30). | Session 14 |
+| 93 | **Layer 1 context bar: Aware + Transparent made visible (Session 14).** Persistent bar in the interactive session shows: **active project · identity** (Layer 3a — the wedge visible), **model · account** (Layer 4 routing transparency), **tokens · cost** (running totals, persisted across `--continue`), and a **local/cloud + disclosure marker** (✓local per #78 + what Layer 3e is sending). Makes broker state legible without a GUI. | Session 14 |
+| 94 | **Layer 1 session persistence: append-only JSONL transcripts, replay-resume, separate from memory (Session 14).** Each session logged as append-only JSONL (one turn / tool-call per line); `kage --continue` replays the transcript to resume. Transcripts live separately (`~/.kage/sessions/`) from the durable markdown memory (#70/#84) — ephemeral chat ≠ curated facts; select bits promoted into memory via the save-wall (#16). Do NOT auto-restore permissions on resume (#65 safety). Doubles as the record/replay test fixture for Testing Protocol #30 / `kage test`. Pattern from Claude Code (ArXiv 2604.14228). | Session 14 |
+| 95 | **Layer 1 milestone-0 command set LOCKED (Session 14).** Four one-shot commands as the testable baseline: `init` / `test` / `status` / `doctor`, all over the engine (#91). store/retrieve/route stay INTERNAL functions driven by the test suite; `remember` / `recall` / `ask` exposed at milestone-1 (the human-review step of the Testing Protocol #30); `okiro` = one-line stub in v0. Finalizes the Session-12 narrowing. | Session 14 |
+| 96 | **Layer 1 `kage init` scope at milestone-0 (Session 14).** init = minimal scaffold + transparent report: create `~/.kage/` (config, memory dirs by type, `sessions/`, indexes for SQLite + Chroma), probe the environment, and report what it set up with "✓ local" markers (#78 installer-style character). The identity-grouping / project-pinning bootstrap wizard (Layer 3a #15/#35) is DEFERRED until Layer 3a lands — keeps milestone-0 a clean testable baseline. | Session 14 |
+| 97 | **Layer 1 status / doctor shape (Session 14).** `kage status` (state snapshot, Aware/Transparent) reports: **active project · identity** (3a), **memory stats** (counts by type #46 + partition), **routing config + connected MCP servers** (Layer 4). `kage doctor` (health + actionable fixes — brew/flutter-doctor convention) checks: **macOS TCC permissions** (granted vs missing + grant command, #77), **MCP reachability + disk**, **config + schema integrity** (markdown↔index content-hash consistency #71), **local stack reachable** (Ollama, Chroma, SQLite, Granite embedding + reranker). Field-level output deferred to Stage 1. | Session 14 |
+| 98 | **`kage test` harness design (Session 14).** Local-vs-cloud benchmark answering "is local (Qwen3-14B) good enough per task class?" — data sets graduation thresholds (#68), not guesses (test-first principle). Per case: run the SAME input through kage's internal pipeline on LOCAL (Qwen3/Ollama) and CLOUD, score per judging method. Case schema: `{id, class (#62), prompt, context[], judge, reference?, why}`. **Judging = BLEND** — automated (shadow-agreement / LLM-judge) on every case + human spot-check on a sample (Testing Protocol #30 + #68 blended signal); Odysseus **Compare mode** reusable as the human-review UI. **Metrics v1 = quality (headline) + privacy (% stayed local)**; latency + cost deferred (cheap to add — both models already run per case). **First classes = chat (likely graduates local) + reasoning (likely stays cloud)** — a contrasting pair to validate the methodology before expanding. Chirag authors the actual cases. **Refinement (Session 14):** `kage test` runs a SUITE (many cases/class, easy→hard) so the DISTRIBUTION sets thresholds — not one case; grading is DIRECTIONAL (rubric / shadow-agreement / human spot-check), never exact-match. v0/milestone-0 ships a small SEED suite to validate the methodology; scaling to ~1000 cases stored in a **markdown corpus kage reads directly** (which ALSO exercises its file-access path, echoing markdown-memory #70) is explicitly POST-v0. Output seeds the #68 reputation table. | Session 14 |
 
 ---
 
@@ -1374,7 +1388,7 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 5. ✓ **Layer 5 — Memory storage** — LOCKED Session 11 (#70-76)
 6. **Layer 6 — Learning T1** (preferences + entities + implicit feedback) (owns reputation table #68)
 7. **Layer 7 — MCP server out** (endpoints, schema, auth)
-8. ◐ **Layer 1 — Trigger / Interface** — IN DESIGN Session 12 (#77-80 locked: permission model, CLI-character, terminal-first scope, daemon sequencing). **resume tomorrow:** command set, first-run report, interactive-session (Cosmos Q O pending)
+8. ✓ **Layer 1 — Trigger / Interface** — DESIGNED Session 14 (#77-80 + #91-98: engine-surfaces, REPL + slash, context bar, JSONL persistence, milestone-0 init/test/status/doctor, status/doctor shape, kage test harness). Supersedes the detailed Layer-1 open items below. Remaining: Chirag authors the kage test seed cases, then fully locked.
 9. **Layer 2 — Helper agents detail** (Librarian responsibilities, Monitor scope)
 
 ### Pending — cross-cutting
@@ -1891,6 +1905,26 @@ Items deliberately set aside — either deferred to a later cycle, conditional o
 **Build path:** build the moat (3a/3b/3e) as a headless engine in kage's OWN repo first, validated by `kage test` (local-vs-cloud benchmark, no UI needed); Odysseus integration (splice 3e into its `llm_core` dispatch chokepoint; adopt serving/UI) is the *wrap* phase. Matches #79 (build core once, wrap later).
 
 **Open / next:** (a) propagate inline annotations into layer-body prose — Layer 3c (#49) and Layer 5 (#70-72) still say FAISS in their detailed text; superseded by #85, to be edited in a follow-up pass. (b) Resume Layer 1 milestone-0 command set (#79). (c) Layers 6, 7, 2-detail remain. Prior substrate open-questions (fork-vs-extend, repo organization, OJ engagement) now RESOLVED by #81/#82/#90.
+
+### Session 14 — 2026-06-04 (Layer 1 interface — DESIGNED)
+
+**Done:** Completed Layer 1's design. Processed Cosmos Q O (interactive-session CLI patterns) — its OpenJarvis premise was pre-Session-13 and moot (Odysseus is the substrate, and it's a web app with no CLI, so kage's interactive surface is wholly its own). Locked eight decisions (#91–#98) and scaffolded the `kage test` harness.
+
+**Locked (#91–#98):**
+- #91 one headless engine, multiple surfaces (Claude Code pattern; validates #79/#82)
+- #92 interactive REPL = dual-dispatch (`/cmd` deterministic · else NL) + slash set /project /identity /model /account /mcp /recall /help /clear /compact /status
+- #93 context bar: project·identity · model·account · tokens·cost · local/cloud+disclosure
+- #94 append-only JSONL transcripts, replay-resume, SEPARATE from memory; no perm-restore on resume
+- #95 milestone-0 set LOCKED: init / test / status / doctor (one-shot)
+- #96 kage init = minimal transparent scaffold (3a bootstrap deferred)
+- #97 status = state snapshot · doctor = health checks + fixes (brew/flutter-doctor convention)
+- #98 kage test harness: suite, directional grading (rubric/shadow-agreement/human), metrics = quality+privacy, chat+reasoning first; v0 seed + ~1000-case markdown corpus (also a file-access test) post-v0
+
+**Test design refined (Chirag):** chat = daily-activity ACCURACY (time/place/tool aware; judged on facts, not tone); reasoning = COMPREHENSION + reasoned options (understand requirements from context → valid, justified options). Seed suite written → [kage-test-seed.md](kage-test-seed.md) as a living capture doc (the harness that runs it is Stage 1).
+
+**Remaining for Layer 1:** Chirag authors the kage test seed cases. Then Layer 1 fully locked. Interactive REPL builds as the surface after milestone-0.
+
+**Next session:** Chirag's test cases; then Layer 6 (Learning) or Layer 7 (MCP server out).
 
 ### Session 4 — 2026-05-23 (brainstorm integration + new principles)
 

@@ -209,6 +209,19 @@ def _post_json(url: str, payload: dict, headers: dict | None = None, timeout: in
         return json.loads(resp.read())
 
 
+def _ollama_status(cfg: dict, model: str) -> tuple[bool, str]:
+    """Is Ollama reachable and the model pulled? (advisory — only `ask` needs it)."""
+    url = cfg.get("ollama_url", "http://localhost:11434") + "/api/tags"
+    try:
+        with urllib.request.urlopen(url, timeout=4) as resp:
+            names = {m.get("name", "") for m in json.loads(resp.read()).get("models", [])}
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        return False, "Ollama not reachable"
+    if model in names:
+        return True, f"Ollama up, {model} ready"
+    return False, f"Ollama up, but {model} not pulled"
+
+
 @app.command()
 def remember(
     text: str = typer.Argument(..., help="The note to remember."),
@@ -480,6 +493,8 @@ def status() -> None:
     for p, c in by_proj:
         typer.echo(f"             {c:>4}  {p}")
     typer.echo(f"  index    {_disp(DB_PATH)}   ({db_kb:.0f} KB)")
+    _cfg = _config()
+    typer.echo(f"  model    {_cfg.get('model', 'qwen3:14b')} local · {_cfg.get('cloud_model', 'claude-sonnet-4-6')} via --cloud")
     free_gb = shutil.disk_usage(KAGE_HOME).free / 1e9
     typer.echo(f"  disk     {free_gb:.0f} GB free")
     typer.echo("  ✓ everything local — nothing has left this Mac\n")
@@ -533,6 +548,14 @@ def doctor() -> None:
         if not ok:
             typer.echo(f"      → {fix}")
         all_ok = all_ok and ok
+
+    # Advisory — Ollama is needed only for `kage ask` (local); NOT a hard failure.
+    cfg = _config()
+    model = cfg.get("model", "qwen3:14b")
+    ok_ollama, detail = _ollama_status(cfg, model)
+    typer.echo(f"  {'✓' if ok_ollama else '⚠'} local model: {detail}")
+    if not ok_ollama:
+        typer.echo(f"      → for `kage ask`: start Ollama (`ollama serve`) + `ollama pull {model}`")
 
     if all_ok:
         typer.echo("\n✓ kage looks healthy.\n")

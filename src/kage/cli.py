@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import os
 import secrets
 import shutil
 import sqlite3
@@ -24,7 +25,7 @@ app = typer.Typer(
 )
 
 # ── Layout ────────────────────────────────────────────────────────────────
-KAGE_HOME = Path.home() / ".kage"
+KAGE_HOME = Path(os.environ.get("KAGE_HOME") or Path.home() / ".kage")  # override for relocation/tests
 MEMORY_DIR = KAGE_HOME / "memory"          # 5A: markdown source of truth (#70)
 INDEX_DIR = KAGE_HOME / "indexes"
 DB_PATH = INDEX_DIR / "kage.db"            # 5B: derived SQLite index (#71)

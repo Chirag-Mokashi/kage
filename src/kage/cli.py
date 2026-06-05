@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import secrets
+import shutil
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -345,6 +346,8 @@ def status() -> None:
     for p, c in by_proj:
         typer.echo(f"             {c:>4}  {p}")
     typer.echo(f"  index    {_disp(DB_PATH)}   ({db_kb:.0f} KB)")
+    free_gb = shutil.disk_usage(KAGE_HOME).free / 1e9
+    typer.echo(f"  disk     {free_gb:.0f} GB free")
     typer.echo("  ✓ everything local — nothing has left this Mac\n")
 
 
@@ -385,6 +388,9 @@ def doctor() -> None:
         f"markdown ↔ index consistent ({md_count} files / {idx_count} rows)",
         "index drifted from the markdown — a `kage reindex` is the planned fix",
     ))
+
+    free_gb = shutil.disk_usage(KAGE_HOME if KAGE_HOME.exists() else Path.home()).free / 1e9
+    checks.append((free_gb >= 1.0, f"disk space ({free_gb:.1f} GB free)", "low disk — free up space"))
 
     typer.echo("\nkage doctor — checking your setup\n")
     all_ok = True

@@ -136,6 +136,29 @@ def _read_body(rel_path: str) -> str:
     return text.strip()
 
 
+def _save(text: str, project: str | None, source: str | None = None) -> str:
+    """Write a memory (markdown source-of-truth #70) + index it (#71). Returns its id."""
+    mem_id = _new_id()
+    created = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    rel_path = f"memory/{mem_id}.md"
+    front = f"---\nid: {mem_id}\nproject: {project or ''}\ncreated_at: {created}\n"
+    if source:
+        front += f"source: {source}\n"
+    (KAGE_HOME / rel_path).write_text(front + "---\n\n" + text.rstrip() + "\n")
+
+    conn = _connect()
+    try:
+        conn.execute(
+            "INSERT INTO memories (id, content_path, project, created_at) VALUES (?, ?, ?, ?)",
+            (mem_id, rel_path, project, created),
+        )
+        conn.execute("INSERT INTO memory_fts (id, body) VALUES (?, ?)", (mem_id, text))
+        conn.commit()
+    finally:
+        conn.close()
+    return mem_id
+
+
 @app.command()
 def remember(
     text: str = typer.Argument(..., help="The note to remember."),
@@ -152,29 +175,49 @@ def remember(
         typer.echo("Discarded — nothing saved.")
         raise typer.Exit()
 
-    mem_id = _new_id()
-    created = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
-    rel_path = f"memory/{mem_id}.md"
-    md_path = KAGE_HOME / rel_path
+    mem_id = _save(text, project)
+    typer.echo(f"  ✓ saved   {_disp(KAGE_HOME / f'memory/{mem_id}.md')}   [{mem_id}]   (local)")
 
-    # Markdown is the source of truth (#70): frontmatter + body.
-    md_path.write_text(
-        f"---\nid: {mem_id}\nproject: {project or ''}\ncreated_at: {created}\n---\n\n{text}\n"
+
+@app.command(name="import")
+def import_(
+    folder: Path = typer.Argument(..., help="Folder of .md/.txt files to bulk-add (recursive)."),
+    project: str = typer.Option(None, "--project", "-p", help="Tag all imported notes (default: the folder name)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be imported; write nothing."),
+) -> None:
+    """Bulk-add the .md/.txt files in a folder (curated by which folder you point at)."""
+    _require_init()
+
+    folder = folder.expanduser()
+    if not folder.is_dir():
+        typer.echo(f"Not a folder: {folder}", err=True)
+        raise typer.Exit(code=1)
+
+    files = sorted(
+        p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in {".md", ".txt"}
     )
+    proj = project or folder.name
 
-    # Derived index (#71): metadata row + FTS body.
-    conn = _connect()
-    try:
-        conn.execute(
-            "INSERT INTO memories (id, content_path, project, created_at) VALUES (?, ?, ?, ?)",
-            (mem_id, rel_path, project, created),
-        )
-        conn.execute("INSERT INTO memory_fts (id, body) VALUES (?, ?)", (mem_id, text))
-        conn.commit()
-    finally:
-        conn.close()
+    if dry_run:
+        typer.echo(f"\nDry run — would import {len(files)} file(s) into project '{proj}':")
+        for p in files:
+            typer.echo(f"  • {p.relative_to(folder)}")
+        typer.echo("\n(no changes made)")
+        raise typer.Exit()
 
-    typer.echo(f"  ✓ saved   {_disp(md_path)}   [{mem_id}]   (local)")
+    if not files:
+        typer.echo(f"No .md/.txt files found in {folder}")
+        raise typer.Exit()
+
+    imported = 0
+    for p in files:
+        body = p.read_text(errors="replace").strip()
+        if not body:
+            continue
+        _save(body, proj, source=str(p))
+        imported += 1
+
+    typer.echo(f"  ✓ imported {imported} note(s) into project '{proj}'   (local)")
 
 
 @app.command(name="list")

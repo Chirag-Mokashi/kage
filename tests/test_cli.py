@@ -106,3 +106,18 @@ def test_doctor_detects_drift(home):
     r = run(["doctor"], home)
     assert r.returncode == 1          # unhealthy
     assert "consistent" in r.stdout   # the consistency check is the one that fails
+
+
+def test_import_folder(home, tmp_path):
+    notes = tmp_path / "notes"
+    (notes / "sub").mkdir(parents=True)
+    (notes / "a.md").write_text("alpha note about cats")
+    (notes / "sub" / "b.txt").write_text("beta note about dogs")
+    (notes / "skip.png").write_bytes(b"\x00")  # non-text -> must be skipped
+
+    r = run(["import", str(notes), "-p", "imported"], home)
+    assert r.returncode == 0 and "imported 2" in r.stdout  # .md + .txt only
+
+    listed = run(["list", "-p", "imported"], home).stdout
+    assert "alpha" in listed and "beta" in listed
+    assert "cats" in run(["recall", "cats", "-p", "imported"], home).stdout

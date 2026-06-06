@@ -16,9 +16,14 @@ import sqlite3
 import subprocess
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import typer
+
+class OllamaUnavailable(Exception):
+    """Raised when Ollama is unreachable or times out."""
+
 
 app = typer.Typer(
     help="kage — your local context broker. Your notes, surfaced into your AI, on your machine.",
@@ -32,6 +37,7 @@ MEMORY_DIR = KAGE_HOME / "memory"          # 5A: markdown source of truth (#70)
 INDEX_DIR = KAGE_HOME / "indexes"
 DB_PATH = INDEX_DIR / "kage.db"            # 5B: derived SQLite index (#71)
 CONFIG_PATH = KAGE_HOME / "config.json"
+CHROMA_DIR  = KAGE_HOME / "chroma"
 
 # v0.1 schema: memories + an FTS5 full-text index for `recall`.
 # Partition filtering (the wall) lives in SQL per #99; v0.1 = single project tag.
@@ -40,7 +46,8 @@ CREATE TABLE IF NOT EXISTS memories (
     id           TEXT PRIMARY KEY,
     content_path TEXT NOT NULL,
     project      TEXT,
-    created_at   TEXT NOT NULL
+    created_at   TEXT NOT NULL,
+    needs_embed  INTEGER NOT NULL DEFAULT 1
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(id UNINDEXED, body);
 """
@@ -67,7 +74,7 @@ def init() -> None:
     created: list[Path] = []
     existed: list[Path] = []
 
-    for d in (KAGE_HOME, MEMORY_DIR, INDEX_DIR):
+    for d in (KAGE_HOME, MEMORY_DIR, INDEX_DIR, CHROMA_DIR):
         if d.exists():
             existed.append(d)
         else:
@@ -84,6 +91,8 @@ def init() -> None:
                     "created_at": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
                     "memory_dir": "memory",
                     "db_path": "indexes/kage.db",
+                    "embeddings": True,
+                    "embed_model": "nomic-embed-text",
                 },
                 indent=2,
             )
@@ -92,10 +101,15 @@ def init() -> None:
         created.append(CONFIG_PATH)
 
     db_is_new = not DB_PATH.exists()
-    conn = sqlite3.connect(DB_PATH)
+    conn = _connect()
     try:
         conn.executescript(_SCHEMA)
         conn.commit()
+        try:
+            conn.execute("ALTER TABLE memories ADD COLUMN needs_embed INTEGER NOT NULL DEFAULT 1")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists in an existing DB
     finally:
         conn.close()
     (created if db_is_new else existed).append(DB_PATH)
@@ -120,7 +134,9 @@ def _require_init() -> None:
 
 
 def _connect() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
 
 
 def _new_id() -> str:
@@ -138,7 +154,7 @@ def _read_body(rel_path: str) -> str:
     return text.strip()
 
 
-def _save(text: str, project: str | None, source: str | None = None) -> str:
+def _save(text: str, project: str | None, source: str | None = None, embed: bool = True) -> str:
     """Write a memory (markdown source-of-truth #70) + index it (#71). Returns its id."""
     mem_id = _new_id()
     created = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
@@ -158,10 +174,29 @@ def _save(text: str, project: str | None, source: str | None = None) -> str:
         conn.commit()
     finally:
         conn.close()
+
+    if embed:
+        try:
+            vec = _embed(text)
+            coll = _get_chroma()
+            coll.add(
+                ids=[mem_id],
+                embeddings=[vec],
+                metadatas=[{"project": project or "", "created_at": created, "content_path": rel_path}],
+            )
+            conn2 = _connect()
+            try:
+                conn2.execute("UPDATE memories SET needs_embed=0 WHERE id=?", (mem_id,))
+                conn2.commit()
+            finally:
+                conn2.close()
+        except OllamaUnavailable:
+            pass  # needs_embed=1 (default) — kage reindex will pick it up
+
     return mem_id
 
 
-def _search(query: str, project: str | None, limit: int, any_terms: bool = False):
+def _search_fts(query: str, project: str | None, limit: int, any_terms: bool = False):
     """Full-text search within the partition wall (#99). Rows: (id, project, created_at, content_path, snippet).
 
     any_terms=True ORs the terms (lenient — for natural-language questions in `ask`);
@@ -191,6 +226,44 @@ def _search(query: str, project: str | None, limit: int, any_terms: bool = False
         conn.close()
 
 
+def _search(query: str, project: str | None, limit: int, any_terms: bool = False):
+    """Hybrid FTS5 + vector search; falls back to FTS5 when embeddings are off or Ollama is down."""
+    if not any(t for t in query.split() if t):
+        return []
+    cfg = _config()
+    if not cfg.get("embeddings", True):
+        return _search_fts(query, project, limit, any_terms)
+
+    def run_fts():
+        return _search_fts(query, project, limit * 2, any_terms)
+
+    def run_vec():
+        return _search_vec(_embed(query), project, limit * 2)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        fts_future = executor.submit(run_fts)
+        vec_future = executor.submit(run_vec)
+        fts_rows = fts_future.result()
+        try:
+            vec_rows = vec_future.result()
+        except OllamaUnavailable:
+            return fts_rows[:limit]
+
+    fused = _rrf_fuse(fts_rows, vec_rows)[:limit]
+    fts_ids = {row[0] for row in fts_rows}
+    result = []
+    for row in fused:
+        if row[0] not in fts_ids:
+            try:
+                body = _read_body(row[3]).replace("\n", " ")
+                excerpt = (body[:70] + "…") if len(body) > 70 else body
+            except OSError:
+                excerpt = ""
+            row = (*row[:4], excerpt)
+        result.append(row)
+    return result
+
+
 def _config() -> dict:
     try:
         return json.loads(CONFIG_PATH.read_text())
@@ -207,6 +280,78 @@ def _post_json(url: str, payload: dict, headers: dict | None = None, timeout: in
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
+
+
+def _rrf_fuse(fts_rows: list, vec_rows: list, k: int = 60) -> list:
+    """Merge FTS5 and vector candidates via Reciprocal Rank Fusion; caller slices to limit."""
+    fts_n, vec_n = len(fts_rows), len(vec_rows)
+    fts_rank = {row[0]: i for i, row in enumerate(fts_rows)}
+    vec_rank = {row[0]: i for i, row in enumerate(vec_rows)}
+    rows_by_id = {row[0]: row for row in (*vec_rows, *fts_rows)}  # fts last → fts row wins for shared IDs
+
+    scores: dict[str, float] = {}
+    for mem_id in rows_by_id:
+        r_fts = fts_rank.get(mem_id, fts_n)   # missing → large rank penalty
+        r_vec = vec_rank.get(mem_id, vec_n)
+        scores[mem_id] = 1.0 / (k + r_fts) + 1.0 / (k + r_vec)
+
+    return [rows_by_id[mid] for mid in sorted(scores, key=scores.__getitem__, reverse=True)]
+
+
+def _embed(text: str) -> list[float]:
+    """Embed text via Ollama /api/embed; raises OllamaUnavailable on failure."""
+    cfg = _config()
+    model = cfg.get("embed_model", "nomic-embed-text")
+    url = cfg.get("ollama_url", "http://localhost:11434") + "/api/embed"
+    try:
+        out = _post_json(url, {"model": model, "input": text[:6000]}, timeout=10)
+        return out["embeddings"][0]
+    except urllib.error.HTTPError as e:
+        if e.code == 400:
+            raise OllamaUnavailable(f"embed input too long for model (HTTP 400)") from e
+        raise OllamaUnavailable(str(e)) from e
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise OllamaUnavailable(str(e)) from e
+    except (KeyError, IndexError) as e:
+        raise OllamaUnavailable(f"unexpected embed response: {e}") from e
+
+
+def _get_chroma():
+    import chromadb
+    cfg = _config()
+    embed_model = cfg.get("embed_model", "nomic-embed-text")
+    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    collection = client.get_or_create_collection(name="memories", metadata={"embed_model": embed_model})
+    stored_model = (collection.metadata or {}).get("embed_model")
+    if stored_model is not None and stored_model != embed_model:
+        typer.echo(
+            f"  ⚠ embed model changed ({stored_model} → {embed_model}) — run: kage reindex --force",
+            err=True,
+        )
+        raise OllamaUnavailable("embed model mismatch — run: kage reindex --force")
+    return collection
+
+
+def _search_vec(query_vec: list[float], project: str | None, limit: int) -> list:
+    collection = _get_chroma()
+    count = collection.count()
+    if count == 0:
+        return []
+    n = min(limit, count)
+    where = {"project": project} if project else None
+    results = collection.query(
+        query_embeddings=[query_vec],
+        n_results=n,
+        where=where,
+        include=["metadatas", "distances"],
+    )
+    ids = results["ids"][0]
+    metadatas = results["metadatas"][0]
+    distances = results["distances"][0]
+    return [
+        (mid, meta.get("project"), meta.get("created_at"), meta.get("content_path"), dist)
+        for mid, meta, dist in zip(ids, metadatas, distances)
+    ]
 
 
 def _ollama_status(cfg: dict, model: str) -> tuple[bool, str]:
@@ -277,10 +422,70 @@ def import_(
         body = p.read_text(errors="replace").strip()
         if not body:
             continue
-        _save(body, proj, source=str(p))
+        _save(body, proj, source=str(p), embed=False)
         imported += 1
 
     typer.echo(f"  ✓ imported {imported} note(s) into project '{proj}'   (local)")
+    typer.echo("  → run: kage reindex to enable semantic search")
+
+
+@app.command()
+def reindex(
+    force: bool = typer.Option(False, "--force", help="Re-embed all notes, not just unembedded ones."),
+) -> None:
+    """Embed all notes not yet in the vector index (or all notes with --force)."""
+    _require_init()
+
+    conn = _connect()
+    try:
+        if force:
+            rows = conn.execute(
+                "SELECT id, content_path, project, created_at FROM memories"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, content_path, project, created_at FROM memories WHERE needs_embed=1"
+            ).fetchall()
+    finally:
+        conn.close()
+
+    total = len(rows)
+    if total == 0:
+        typer.echo("  ✓ nothing to reindex")
+        return
+
+    try:
+        coll = _get_chroma()
+    except OllamaUnavailable:
+        typer.echo("  ✗ start Ollama first: ollama serve", err=True)
+        raise typer.Exit(code=1)
+
+    for n, (mem_id, rel_path, project, created_at) in enumerate(rows, 1):
+        typer.echo(f"  [{n}/{total}] {mem_id}")
+        try:
+            body = _read_body(rel_path)
+            vec = _embed(body)
+        except OllamaUnavailable:
+            typer.echo("  ✗ start Ollama first: ollama serve", err=True)
+            raise typer.Exit(code=1)
+        except OSError:
+            typer.echo(f"  ⚠ missing file, skipping: {rel_path}", err=True)
+            continue
+
+        meta = {"project": project or "", "created_at": created_at or "", "content_path": rel_path}
+        if force:
+            coll.upsert(ids=[mem_id], embeddings=[vec], metadatas=[meta])
+        else:
+            coll.add(ids=[mem_id], embeddings=[vec], metadatas=[meta])
+
+        conn2 = _connect()
+        try:
+            conn2.execute("UPDATE memories SET needs_embed=0 WHERE id=?", (mem_id,))
+            conn2.commit()
+        finally:
+            conn2.close()
+
+    typer.echo(f"  ✓ reindexed {total} note(s)")
 
 
 @app.command(name="list")
@@ -463,6 +668,11 @@ def forget(
     finally:
         conn.close()
 
+    try:
+        _get_chroma().delete(ids=[mem_id])
+    except OllamaUnavailable:
+        typer.echo("  ⚠ vector index not updated — run: kage reindex", err=True)
+
     typer.echo(f"  ✓ forgotten   [{mem_id}]")
 
 
@@ -549,8 +759,29 @@ def doctor() -> None:
             typer.echo(f"      → {fix}")
         all_ok = all_ok and ok
 
-    # Advisory — Ollama is needed only for `kage ask` (local); NOT a hard failure.
+    # Advisory — unembedded notes (⚠ warning, not a hard failure).
+    if db_ok:
+        try:
+            conn = _connect()
+            pending = conn.execute("SELECT COUNT(*) FROM memories WHERE needs_embed=1").fetchone()[0]
+            conn.close()
+            if pending > 0:
+                typer.echo(f"  ⚠ {pending} note(s) not yet embedded → run: kage reindex")
+        except sqlite3.Error:
+            pass
+
+    # Advisory — embedding model mismatch between config and ChromaDB collection.
     cfg = _config()
+    config_model = cfg.get("embed_model", "nomic-embed-text")
+    try:
+        coll = _get_chroma()
+        stored_model = (coll.metadata or {}).get("embed_model")
+        if stored_model is not None and stored_model != config_model:
+            typer.echo(f"  ✗ embedding model changed ({stored_model} → {config_model}) → run: kage reindex --force")
+    except OllamaUnavailable:
+        pass  # _get_chroma raises on mismatch — warning already printed by _get_chroma
+
+    # Advisory — Ollama is needed only for `kage ask` (local); NOT a hard failure.
     model = cfg.get("model", "qwen3:14b")
     ok_ollama, detail = _ollama_status(cfg, model)
     typer.echo(f"  {'✓' if ok_ollama else '⚠'} local model: {detail}")

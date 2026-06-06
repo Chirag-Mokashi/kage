@@ -14,6 +14,8 @@ import secrets
 import shutil
 import sqlite3
 import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import typer
@@ -136,6 +138,90 @@ def _read_body(rel_path: str) -> str:
     return text.strip()
 
 
+def _save(text: str, project: str | None, source: str | None = None) -> str:
+    """Write a memory (markdown source-of-truth #70) + index it (#71). Returns its id."""
+    mem_id = _new_id()
+    created = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    rel_path = f"memory/{mem_id}.md"
+    front = f"---\nid: {mem_id}\nproject: {project or ''}\ncreated_at: {created}\n"
+    if source:
+        front += f"source: {source}\n"
+    (KAGE_HOME / rel_path).write_text(front + "---\n\n" + text.rstrip() + "\n")
+
+    conn = _connect()
+    try:
+        conn.execute(
+            "INSERT INTO memories (id, content_path, project, created_at) VALUES (?, ?, ?, ?)",
+            (mem_id, rel_path, project, created),
+        )
+        conn.execute("INSERT INTO memory_fts (id, body) VALUES (?, ?)", (mem_id, text))
+        conn.commit()
+    finally:
+        conn.close()
+    return mem_id
+
+
+def _search(query: str, project: str | None, limit: int, any_terms: bool = False):
+    """Full-text search within the partition wall (#99). Rows: (id, project, created_at, content_path, snippet).
+
+    any_terms=True ORs the terms (lenient — for natural-language questions in `ask`);
+    default ANDs them (precise keyword search — for `recall`).
+    """
+    terms = [t for t in query.split() if t]
+    if not terms:
+        return []
+    joiner = " OR " if any_terms else " "
+    match = joiner.join('"' + t.replace('"', '""') + '"' for t in terms)
+    sql = (
+        "SELECT m.id, m.project, m.created_at, m.content_path, "
+        "snippet(memory_fts, 1, '[', ']', ' … ', 12) AS snip "
+        "FROM memory_fts JOIN memories m ON m.id = memory_fts.id "
+        "WHERE memory_fts MATCH ? "
+    )
+    params: list = [match]
+    if project:  # the partition wall lives in SQL (#99)
+        sql += "AND m.project = ? "
+        params.append(project)
+    sql += "ORDER BY rank LIMIT ?"
+    params.append(limit)
+    conn = _connect()
+    try:
+        return conn.execute(sql, params).fetchall()
+    finally:
+        conn.close()
+
+
+def _config() -> dict:
+    try:
+        return json.loads(CONFIG_PATH.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _post_json(url: str, payload: dict, headers: dict | None = None, timeout: int = 120) -> dict:
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json", **(headers or {})},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def _ollama_status(cfg: dict, model: str) -> tuple[bool, str]:
+    """Is Ollama reachable and the model pulled? (advisory — only `ask` needs it)."""
+    url = cfg.get("ollama_url", "http://localhost:11434") + "/api/tags"
+    try:
+        with urllib.request.urlopen(url, timeout=4) as resp:
+            names = {m.get("name", "") for m in json.loads(resp.read()).get("models", [])}
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        return False, "Ollama not reachable"
+    if model in names:
+        return True, f"Ollama up, {model} ready"
+    return False, f"Ollama up, but {model} not pulled"
+
+
 @app.command()
 def remember(
     text: str = typer.Argument(..., help="The note to remember."),
@@ -152,29 +238,49 @@ def remember(
         typer.echo("Discarded — nothing saved.")
         raise typer.Exit()
 
-    mem_id = _new_id()
-    created = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
-    rel_path = f"memory/{mem_id}.md"
-    md_path = KAGE_HOME / rel_path
+    mem_id = _save(text, project)
+    typer.echo(f"  ✓ saved   {_disp(KAGE_HOME / f'memory/{mem_id}.md')}   [{mem_id}]   (local)")
 
-    # Markdown is the source of truth (#70): frontmatter + body.
-    md_path.write_text(
-        f"---\nid: {mem_id}\nproject: {project or ''}\ncreated_at: {created}\n---\n\n{text}\n"
+
+@app.command(name="import")
+def import_(
+    folder: Path = typer.Argument(..., help="Folder of .md/.txt files to bulk-add (recursive)."),
+    project: str = typer.Option(None, "--project", "-p", help="Tag all imported notes (default: the folder name)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be imported; write nothing."),
+) -> None:
+    """Bulk-add the .md/.txt files in a folder (curated by which folder you point at)."""
+    _require_init()
+
+    folder = folder.expanduser()
+    if not folder.is_dir():
+        typer.echo(f"Not a folder: {folder}", err=True)
+        raise typer.Exit(code=1)
+
+    files = sorted(
+        p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in {".md", ".txt"}
     )
+    proj = project or folder.name
 
-    # Derived index (#71): metadata row + FTS body.
-    conn = _connect()
-    try:
-        conn.execute(
-            "INSERT INTO memories (id, content_path, project, created_at) VALUES (?, ?, ?, ?)",
-            (mem_id, rel_path, project, created),
-        )
-        conn.execute("INSERT INTO memory_fts (id, body) VALUES (?, ?)", (mem_id, text))
-        conn.commit()
-    finally:
-        conn.close()
+    if dry_run:
+        typer.echo(f"\nDry run — would import {len(files)} file(s) into project '{proj}':")
+        for p in files:
+            typer.echo(f"  • {p.relative_to(folder)}")
+        typer.echo("\n(no changes made)")
+        raise typer.Exit()
 
-    typer.echo(f"  ✓ saved   {_disp(md_path)}   [{mem_id}]   (local)")
+    if not files:
+        typer.echo(f"No .md/.txt files found in {folder}")
+        raise typer.Exit()
+
+    imported = 0
+    for p in files:
+        body = p.read_text(errors="replace").strip()
+        if not body:
+            continue
+        _save(body, proj, source=str(p))
+        imported += 1
+
+    typer.echo(f"  ✓ imported {imported} note(s) into project '{proj}'   (local)")
 
 
 @app.command(name="list")
@@ -225,31 +331,10 @@ def recall(
     """Search your memory (full-text) and surface the best matches."""
     _require_init()
 
-    terms = [t for t in query.split() if t]
-    if not terms:
+    if not query.split():
         typer.echo("Empty query.", err=True)
         raise typer.Exit(code=1)
-    # Quote each term so FTS5 operators in user input can't break the query (AND across terms).
-    match = " ".join('"' + t.replace('"', '""') + '"' for t in terms)
-
-    sql = (
-        "SELECT m.id, m.project, m.created_at, m.content_path, "
-        "snippet(memory_fts, 1, '[', ']', ' … ', 12) AS snip "
-        "FROM memory_fts JOIN memories m ON m.id = memory_fts.id "
-        "WHERE memory_fts MATCH ? "
-    )
-    params: list = [match]
-    if project:  # the partition wall lives in SQL (#99)
-        sql += "AND m.project = ? "
-        params.append(project)
-    sql += "ORDER BY rank LIMIT ?"
-    params.append(limit)
-
-    conn = _connect()
-    try:
-        rows = conn.execute(sql, params).fetchall()
-    finally:
-        conn.close()
+    rows = _search(query, project, limit)
 
     if not rows:
         typer.echo("No matches." + (f"  (project: {project})" if project else ""))
@@ -275,6 +360,67 @@ def recall(
     for mem_id, proj, created, path, snip in rows:
         typer.echo(f"  • [{proj or 'no-project'}] {snip}")
         typer.echo(f"    {created}   {_disp(KAGE_HOME / path)}   [{mem_id}]\n")
+
+
+@app.command()
+def ask(
+    question: str = typer.Argument(..., help="Your question."),
+    project: str = typer.Option(None, "--project", "-p", help="Limit context to a project."),
+    cloud: bool = typer.Option(False, "--cloud", help="Use Claude (Anthropic) instead of the local model."),
+    think: bool = typer.Option(False, "--think", help="Let the local model reason first (slower, deeper)."),
+    limit: int = typer.Option(5, "--limit", "-n", help="How many notes to pull as context."),
+) -> None:
+    """Answer a question using your recalled notes — local model by default, --cloud for Claude."""
+    _require_init()
+
+    rows = _search(question, project, limit, any_terms=True)
+    context = "\n\n".join(f"- {_read_body(path)}" for _id, _p, _c, path, _s in rows) or "(no relevant notes found)"
+    system = (
+        "You are kage, the user's local personal assistant. Answer the question. "
+        "Use CONTEXT (the user's own saved notes) when relevant; if it doesn't cover the "
+        "question, answer from general knowledge and say so briefly. Be concise."
+    )
+    cfg = _config()
+    thinking = ""
+
+    if cloud:
+        key = os.environ.get("ANTHROPIC_API_KEY")
+        if not key:
+            typer.echo("--cloud needs ANTHROPIC_API_KEY in your environment.", err=True)
+            raise typer.Exit(code=1)
+        model = cfg.get("cloud_model", "claude-sonnet-4-6")
+        typer.echo(f"· asking {model} ({len(rows)} note(s) as context)…\n")
+        try:
+            out = _post_json(
+                "https://api.anthropic.com/v1/messages",
+                {
+                    "model": model,
+                    "max_tokens": 1024,
+                    "system": system,
+                    "messages": [{"role": "user", "content": f"CONTEXT:\n{context}\n\nQUESTION: {question}"}],
+                },
+                headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
+            )
+            answer = out["content"][0]["text"].strip()
+        except (urllib.error.URLError, KeyError, IndexError, TimeoutError) as e:
+            typer.echo(f"Cloud request failed: {e}", err=True)
+            raise typer.Exit(code=1)
+    else:
+        model = cfg.get("model", "qwen3:14b")
+        url = cfg.get("ollama_url", "http://localhost:11434") + "/api/generate"
+        typer.echo(f"· asking {model} ({len(rows)} note(s) as context)…\n")
+        prompt = f"{system}\n\nCONTEXT (the user's notes):\n{context}\n\nQUESTION: {question}"
+        try:
+            out = _post_json(url, {"model": model, "prompt": prompt, "stream": False, "think": think})
+        except urllib.error.URLError:
+            typer.echo("Can't reach the local model. Is Ollama running? (`ollama serve`) — or use --cloud.", err=True)
+            raise typer.Exit(code=1)
+        answer = out.get("response", "").strip()
+        thinking = out.get("thinking", "").strip() if think else ""
+
+    if thinking:
+        typer.echo(f"[thinking]\n{thinking}\n")
+    typer.echo(answer or "(no answer returned)")
 
 
 @app.command()
@@ -347,6 +493,8 @@ def status() -> None:
     for p, c in by_proj:
         typer.echo(f"             {c:>4}  {p}")
     typer.echo(f"  index    {_disp(DB_PATH)}   ({db_kb:.0f} KB)")
+    _cfg = _config()
+    typer.echo(f"  model    {_cfg.get('model', 'qwen3:14b')} local · {_cfg.get('cloud_model', 'claude-sonnet-4-6')} via --cloud")
     free_gb = shutil.disk_usage(KAGE_HOME).free / 1e9
     typer.echo(f"  disk     {free_gb:.0f} GB free")
     typer.echo("  ✓ everything local — nothing has left this Mac\n")
@@ -400,6 +548,14 @@ def doctor() -> None:
         if not ok:
             typer.echo(f"      → {fix}")
         all_ok = all_ok and ok
+
+    # Advisory — Ollama is needed only for `kage ask` (local); NOT a hard failure.
+    cfg = _config()
+    model = cfg.get("model", "qwen3:14b")
+    ok_ollama, detail = _ollama_status(cfg, model)
+    typer.echo(f"  {'✓' if ok_ollama else '⚠'} local model: {detail}")
+    if not ok_ollama:
+        typer.echo(f"      → for `kage ask`: start Ollama (`ollama serve`) + `ollama pull {model}`")
 
     if all_ok:
         typer.echo("\n✓ kage looks healthy.\n")

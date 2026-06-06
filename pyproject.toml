@@ -5,6 +5,7 @@ description = "Local-first personal context broker — your notes, surfaced into
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "chromadb>=1.5.9",
     "typer>=0.12",
 ]
 

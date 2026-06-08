@@ -16,9 +16,14 @@ import sqlite3
 import subprocess
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import typer
+
+class OllamaUnavailable(Exception):
+    """Raised when Ollama is unreachable or times out."""
+
 
 app = typer.Typer(
     help="kage — your local context broker. Your notes, surfaced into your AI, on your machine.",
@@ -32,17 +37,28 @@ MEMORY_DIR = KAGE_HOME / "memory"          # 5A: markdown source of truth (#70)
 INDEX_DIR = KAGE_HOME / "indexes"
 DB_PATH = INDEX_DIR / "kage.db"            # 5B: derived SQLite index (#71)
 CONFIG_PATH = KAGE_HOME / "config.json"
+CHROMA_DIR  = KAGE_HOME / "chroma"
 
 # v0.1 schema: memories + an FTS5 full-text index for `recall`.
 # Partition filtering (the wall) lives in SQL per #99; v0.1 = single project tag.
+# v0.4 adds: chunks table for semantic chunking (char offsets into memory files).
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS memories (
     id           TEXT PRIMARY KEY,
     content_path TEXT NOT NULL,
     project      TEXT,
-    created_at   TEXT NOT NULL
+    created_at   TEXT NOT NULL,
+    needs_embed  INTEGER NOT NULL DEFAULT 1
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(id UNINDEXED, body);
+CREATE TABLE IF NOT EXISTS chunks (
+    id            TEXT PRIMARY KEY,
+    note_id       TEXT NOT NULL,
+    section_title TEXT NOT NULL DEFAULT '',
+    char_start    INTEGER NOT NULL,
+    char_end      INTEGER NOT NULL,
+    needs_embed   INTEGER NOT NULL DEFAULT 1
+);
 """
 
 
@@ -67,7 +83,7 @@ def init() -> None:
     created: list[Path] = []
     existed: list[Path] = []
 
-    for d in (KAGE_HOME, MEMORY_DIR, INDEX_DIR):
+    for d in (KAGE_HOME, MEMORY_DIR, INDEX_DIR, CHROMA_DIR):
         if d.exists():
             existed.append(d)
         else:
@@ -84,6 +100,8 @@ def init() -> None:
                     "created_at": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
                     "memory_dir": "memory",
                     "db_path": "indexes/kage.db",
+                    "embeddings": True,
+                    "embed_model": "nomic-embed-text",
                 },
                 indent=2,
             )
@@ -92,10 +110,15 @@ def init() -> None:
         created.append(CONFIG_PATH)
 
     db_is_new = not DB_PATH.exists()
-    conn = sqlite3.connect(DB_PATH)
+    conn = _connect()
     try:
         conn.executescript(_SCHEMA)
         conn.commit()
+        try:
+            conn.execute("ALTER TABLE memories ADD COLUMN needs_embed INTEGER NOT NULL DEFAULT 1")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists in an existing DB
     finally:
         conn.close()
     (created if db_is_new else existed).append(DB_PATH)
@@ -120,7 +143,9 @@ def _require_init() -> None:
 
 
 def _connect() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
 
 
 def _new_id() -> str:
@@ -138,7 +163,51 @@ def _read_body(rel_path: str) -> str:
     return text.strip()
 
 
-def _save(text: str, project: str | None, source: str | None = None) -> str:
+def _chunk_note(body: str) -> list[dict]:
+    """Split a note body into sections on ## / ### headers; return char-offset chunks."""
+    chunks = []
+    lines = body.splitlines()
+    prev_header_pos = -1
+
+    for i, line in enumerate(lines):
+        if line.startswith("## ") or line.startswith("### "):
+            if prev_header_pos != -1:
+                char_start = sum(len(l) + 1 for l in lines[: prev_header_pos + 1])
+                char_end = min(sum(len(l) + 1 for l in lines[:i]), len(body))
+                if char_end - char_start >= 100:
+                    chunks.append({
+                        "title": lines[prev_header_pos].lstrip("#").strip(),
+                        "char_start": char_start,
+                        "char_end": char_end,
+                    })
+            prev_header_pos = i
+
+    if prev_header_pos != -1:
+        char_start = sum(len(l) + 1 for l in lines[: prev_header_pos + 1])
+        char_end = len(body)
+        if char_end - char_start >= 100:
+            chunks.append({
+                "title": lines[prev_header_pos].lstrip("#").strip(),
+                "char_start": char_start,
+                "char_end": char_end,
+            })
+
+    if not chunks:
+        return [{"title": "", "char_start": 0, "char_end": len(body)}]
+
+    return chunks
+
+
+def _read_section(content_path: str, char_start: int, char_end: int) -> str:
+    """Return the body slice [char_start:char_end] from a note; empty string on read error."""
+    try:
+        body = _read_body(content_path)
+        return body[char_start:char_end]
+    except OSError:
+        return ""
+
+
+def _save(text: str, project: str | None, source: str | None = None, embed: bool = True) -> str:
     """Write a memory (markdown source-of-truth #70) + index it (#71). Returns its id."""
     mem_id = _new_id()
     created = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
@@ -148,6 +217,10 @@ def _save(text: str, project: str | None, source: str | None = None) -> str:
         front += f"source: {source}\n"
     (KAGE_HOME / rel_path).write_text(front + "---\n\n" + text.rstrip() + "\n")
 
+    body = text.strip()
+    chunks = _chunk_note(body)
+    chunk_ids = [f"{mem_id}_c{i}" for i in range(len(chunks))]
+
     conn = _connect()
     try:
         conn.execute(
@@ -155,13 +228,52 @@ def _save(text: str, project: str | None, source: str | None = None) -> str:
             (mem_id, rel_path, project, created),
         )
         conn.execute("INSERT INTO memory_fts (id, body) VALUES (?, ?)", (mem_id, text))
+        for i, chunk in enumerate(chunks):
+            conn.execute(
+                "INSERT INTO chunks (id, note_id, section_title, char_start, char_end, needs_embed) "
+                "VALUES (?, ?, ?, ?, ?, 1)",
+                (chunk_ids[i], mem_id, chunk["title"], chunk["char_start"], chunk["char_end"]),
+            )
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
+
+    if embed:
+        for i, chunk in enumerate(chunks):
+            chunk_id = chunk_ids[i]
+            chunk_text = body[chunk["char_start"]:chunk["char_end"]]
+            try:
+                vec = _embed(chunk_text)
+                coll = _get_chroma()
+                coll.add(
+                    ids=[chunk_id],
+                    embeddings=[vec],
+                    metadatas=[{
+                        "note_id": mem_id,
+                        "project": project or "",
+                        "created_at": created,
+                        "content_path": rel_path,
+                        "section_title": chunk["title"],
+                        "char_start": chunk["char_start"],
+                        "char_end": chunk["char_end"],
+                    }],
+                )
+                conn2 = _connect()
+                try:
+                    conn2.execute("UPDATE chunks SET needs_embed=0 WHERE id=?", (chunk_id,))
+                    conn2.commit()
+                finally:
+                    conn2.close()
+            except OllamaUnavailable:
+                pass  # needs_embed=1 stays — kage reindex will pick it up
+
     return mem_id
 
 
-def _search(query: str, project: str | None, limit: int, any_terms: bool = False):
+def _search_fts(query: str, project: str | None, limit: int, any_terms: bool = False):
     """Full-text search within the partition wall (#99). Rows: (id, project, created_at, content_path, snippet).
 
     any_terms=True ORs the terms (lenient — for natural-language questions in `ask`);
@@ -191,6 +303,51 @@ def _search(query: str, project: str | None, limit: int, any_terms: bool = False
         conn.close()
 
 
+def _search(query: str, project: str | None, limit: int, any_terms: bool = False):
+    """Hybrid FTS5 + vector search; falls back to FTS5 when embeddings are off or Ollama is down."""
+    if not any(t for t in query.split() if t):
+        return []
+    cfg = _config()
+    if not cfg.get("embeddings", True):
+        return [(*row, None, None, None) for row in _search_fts(query, project, limit, any_terms)]
+
+    def run_fts():
+        return _search_fts(query, project, limit * 2, any_terms)
+
+    def run_vec():
+        return _search_vec(_embed(query), project, limit * 2)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        fts_future = executor.submit(run_fts)
+        vec_future = executor.submit(run_vec)
+        fts_rows = fts_future.result()
+        try:
+            vec_rows = vec_future.result()
+        except OllamaUnavailable:
+            return [(*row, None, None, None) for row in fts_rows[:limit]]
+
+    fused = _rrf_fuse(fts_rows, vec_rows)[:limit]
+    fts_ids = {row[0] for row in fts_rows}
+    vec_by_id = {row[0]: row for row in vec_rows}
+    result = []
+    for row in fused:
+        if row[0] not in fts_ids:
+            # vec-only row: replace float score with readable excerpt, keep section fields
+            try:
+                body = _read_body(row[3]).replace("\n", " ")
+                excerpt = (body[:70] + "…") if len(body) > 70 else body
+            except OSError:
+                excerpt = ""
+            row = (row[0], row[1], row[2], row[3], excerpt, row[5], row[6], row[7])
+        else:
+            # fts row: merge section fields from vec row if available, else pad with None
+            vec_row = vec_by_id.get(row[0])
+            section = (vec_row[5], vec_row[6], vec_row[7]) if vec_row else (None, None, None)
+            row = (*row, *section)
+        result.append(row)
+    return result
+
+
 def _config() -> dict:
     try:
         return json.loads(CONFIG_PATH.read_text())
@@ -207,6 +364,108 @@ def _post_json(url: str, payload: dict, headers: dict | None = None, timeout: in
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
+
+
+def _rrf_fuse(fts_rows: list, vec_rows: list, k: int = 60) -> list:
+    """Merge FTS5 and vector candidates via Reciprocal Rank Fusion; caller slices to limit."""
+    fts_n, vec_n = len(fts_rows), len(vec_rows)
+    fts_rank = {row[0]: i for i, row in enumerate(fts_rows)}
+    vec_rank = {row[0]: i for i, row in enumerate(vec_rows)}
+    rows_by_id = {row[0]: row for row in (*vec_rows, *fts_rows)}  # fts last → fts row wins for shared IDs
+
+    scores: dict[str, float] = {}
+    for mem_id in rows_by_id:
+        r_fts = fts_rank.get(mem_id, fts_n)   # missing → large rank penalty
+        r_vec = vec_rank.get(mem_id, vec_n)
+        scores[mem_id] = 1.0 / (k + r_fts) + 1.0 / (k + r_vec)
+
+    return [rows_by_id[mid] for mid in sorted(scores, key=scores.__getitem__, reverse=True)]
+
+
+def _embed(text: str) -> list[float]:
+    """Embed text via Ollama /api/embed; raises OllamaUnavailable on failure."""
+    cfg = _config()
+    model = cfg.get("embed_model", "nomic-embed-text")
+    url = cfg.get("ollama_url", "http://localhost:11434") + "/api/embed"
+    try:
+        out = _post_json(url, {"model": model, "input": text[:6000]}, timeout=10)
+        return out["embeddings"][0]
+    except urllib.error.HTTPError as e:
+        if e.code == 400:
+            raise OllamaUnavailable(f"embed input too long for model (HTTP 400)") from e
+        raise OllamaUnavailable(str(e)) from e
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise OllamaUnavailable(str(e)) from e
+    except (KeyError, IndexError) as e:
+        raise OllamaUnavailable(f"unexpected embed response: {e}") from e
+
+
+def _get_chroma():
+    import chromadb
+    cfg = _config()
+    embed_model = cfg.get("embed_model", "nomic-embed-text")
+    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    collection = client.get_or_create_collection(
+        name="chunks",
+        metadata={"embed_model": embed_model, "schema_version": "4"},
+    )
+    stored_model = (collection.metadata or {}).get("embed_model")
+    stored_schema = (collection.metadata or {}).get("schema_version")
+    if stored_model is not None and stored_model != embed_model:
+        typer.echo(
+            f"  ⚠ embed model changed ({stored_model} → {embed_model}) — run: kage reindex --force",
+            err=True,
+        )
+        raise OllamaUnavailable("embed model mismatch — run: kage reindex --force")
+    if stored_schema is None or stored_schema != "4":
+        typer.echo(
+            f"  ⚠ schema version mismatch (v{stored_schema or 'unknown'} → v4) — run: kage reindex --force",
+            err=True,
+        )
+        raise OllamaUnavailable("schema version mismatch — run: kage reindex --force")
+    return collection
+
+
+def _search_vec(query_vec: list[float], project: str | None, limit: int) -> list:
+    collection = _get_chroma()
+    if project:
+        count = len(collection.get(where={"project": project}, include=[])["ids"])
+    else:
+        count = collection.count()
+    if count == 0:
+        return []
+    n_results = min(limit, count)
+    where = {"project": project} if project else None
+    results = collection.query(
+        query_embeddings=[query_vec],
+        n_results=n_results,
+        where=where,
+        include=["metadatas", "distances"],
+    )
+    ids = results["ids"][0]
+    metadatas = results["metadatas"][0]
+    distances = results["distances"][0]
+
+    # Deduplicate by note_id; keep best chunk (lowest distance = highest similarity) per note
+    note_best: dict[str, tuple] = {}
+    for mid, meta, dist in zip(ids, metadatas, distances):
+        note_id = meta.get("note_id")
+        if note_id not in note_best or dist < note_best[note_id][0]:
+            note_best[note_id] = (dist, meta)
+
+    return [
+        (
+            note_id,
+            meta.get("project"),
+            meta.get("created_at"),
+            meta.get("content_path"),
+            dist,
+            meta.get("section_title"),
+            meta.get("char_start"),
+            meta.get("char_end"),
+        )
+        for note_id, (dist, meta) in note_best.items()
+    ]
 
 
 def _ollama_status(cfg: dict, model: str) -> tuple[bool, str]:
@@ -277,10 +536,159 @@ def import_(
         body = p.read_text(errors="replace").strip()
         if not body:
             continue
-        _save(body, proj, source=str(p))
+        _save(body, proj, source=str(p), embed=False)
         imported += 1
 
     typer.echo(f"  ✓ imported {imported} note(s) into project '{proj}'   (local)")
+    typer.echo("  → run: kage reindex to enable semantic search")
+
+
+@app.command()
+def reindex(
+    force: bool = typer.Option(False, "--force", help="Rechunk and re-embed all notes from scratch."),
+) -> None:
+    """Embed pending chunks (or rechunk + re-embed everything with --force)."""
+    _require_init()
+
+    if force:
+        import chromadb as _chromadb
+        client = _chromadb.PersistentClient(path=str(CHROMA_DIR))
+        try:
+            client.delete_collection("chunks")
+        except Exception:
+            pass
+
+        conn = _connect()
+        try:
+            conn.execute("DELETE FROM chunks")
+            conn.commit()
+            note_rows = conn.execute(
+                "SELECT id, content_path, project, created_at FROM memories"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        total = len(note_rows)
+        if total == 0:
+            typer.echo("  ✓ nothing to reindex")
+            return
+
+        try:
+            coll = _get_chroma()
+        except OllamaUnavailable:
+            typer.echo("  ✗ start Ollama first: ollama serve", err=True)
+            raise typer.Exit(code=1)
+
+        for n, (mem_id, rel_path, project, created_at) in enumerate(note_rows, 1):
+            typer.echo(f"  [{n}/{total}] {mem_id}")
+            try:
+                body = _read_body(rel_path)
+            except OSError:
+                typer.echo(f"  ⚠ missing file, skipping: {rel_path}", err=True)
+                continue
+
+            chunks = _chunk_note(body)
+            chunk_ids = [f"{mem_id}_c{i}" for i in range(len(chunks))]
+
+            conn = _connect()
+            try:
+                for i, chunk in enumerate(chunks):
+                    conn.execute(
+                        "INSERT INTO chunks (id, note_id, section_title, char_start, char_end, needs_embed) "
+                        "VALUES (?, ?, ?, ?, ?, 1)",
+                        (chunk_ids[i], mem_id, chunk["title"], chunk["char_start"], chunk["char_end"]),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+            for i, chunk in enumerate(chunks):
+                chunk_text = body[chunk["char_start"]:chunk["char_end"]]
+                try:
+                    vec = _embed(chunk_text)
+                except OllamaUnavailable:
+                    typer.echo("  ✗ start Ollama first: ollama serve", err=True)
+                    raise typer.Exit(code=1)
+                coll.add(
+                    ids=[chunk_ids[i]],
+                    embeddings=[vec],
+                    metadatas=[{
+                        "note_id": mem_id,
+                        "project": project or "",
+                        "created_at": created_at or "",
+                        "content_path": rel_path,
+                        "section_title": chunk["title"],
+                        "char_start": chunk["char_start"],
+                        "char_end": chunk["char_end"],
+                    }],
+                )
+                conn2 = _connect()
+                try:
+                    conn2.execute("UPDATE chunks SET needs_embed=0 WHERE id=?", (chunk_ids[i],))
+                    conn2.commit()
+                finally:
+                    conn2.close()
+
+        typer.echo(f"  ✓ reindexed {total} note(s)")
+
+    else:
+        conn = _connect()
+        try:
+            pending = conn.execute(
+                "SELECT c.id, c.note_id, c.char_start, c.char_end, "
+                "m.content_path, m.project, m.created_at, c.section_title "
+                "FROM chunks c JOIN memories m ON m.id = c.note_id "
+                "WHERE c.needs_embed = 1"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        total = len(pending)
+        if total == 0:
+            typer.echo("  ✓ nothing to reindex")
+            return
+
+        try:
+            coll = _get_chroma()
+        except OllamaUnavailable:
+            typer.echo("  ✗ start Ollama first: ollama serve", err=True)
+            raise typer.Exit(code=1)
+
+        for n, (chunk_id, note_id, char_start, char_end, rel_path, project, created_at, section_title) in enumerate(pending, 1):
+            typer.echo(f"  [{n}/{total}] {chunk_id}")
+            chunk_text = _read_section(rel_path, char_start, char_end)
+            if not chunk_text:
+                typer.echo(f"  ⚠ empty section, skipping: {rel_path}", err=True)
+                continue
+            try:
+                vec = _embed(chunk_text)
+            except OllamaUnavailable:
+                typer.echo("  ✗ start Ollama first: ollama serve", err=True)
+                raise typer.Exit(code=1)
+            coll.add(
+                ids=[chunk_id],
+                embeddings=[vec],
+                metadatas=[{
+                    "note_id": note_id,
+                    "project": project or "",
+                    "created_at": created_at or "",
+                    "content_path": rel_path,
+                    "section_title": section_title or "",
+                    "char_start": char_start,
+                    "char_end": char_end,
+                }],
+            )
+            conn2 = _connect()
+            try:
+                conn2.execute("UPDATE chunks SET needs_embed=0 WHERE id=?", (chunk_id,))
+                conn2.commit()
+            finally:
+                conn2.close()
+
+        typer.echo(f"  ✓ reindexed {total} chunk(s)")
 
 
 @app.command(name="list")
@@ -343,7 +751,7 @@ def recall(
     if pipe:
         blocks = [
             f"## [{proj or 'no-project'}] {created}\n{_read_body(path)}"
-            for _id, proj, created, path, _snip in rows
+            for _id, proj, created, path, _snip, *_ in rows
         ]
         payload = f'# Context from kage (query: "{query}")\n\n' + "\n\n".join(blocks) + "\n"
         try:
@@ -357,7 +765,7 @@ def recall(
         raise typer.Exit()
 
     typer.echo(f"\n{len(rows)} match(es):\n")
-    for mem_id, proj, created, path, snip in rows:
+    for mem_id, proj, created, path, snip, *_ in rows:
         typer.echo(f"  • [{proj or 'no-project'}] {snip}")
         typer.echo(f"    {created}   {_disp(KAGE_HOME / path)}   [{mem_id}]\n")
 
@@ -369,16 +777,34 @@ def ask(
     cloud: bool = typer.Option(False, "--cloud", help="Use Claude (Anthropic) instead of the local model."),
     think: bool = typer.Option(False, "--think", help="Let the local model reason first (slower, deeper)."),
     limit: int = typer.Option(5, "--limit", "-n", help="How many notes to pull as context."),
+    no_sources: bool = typer.Option(False, "--no-sources", help="Suppress the Sources block."),
 ) -> None:
     """Answer a question using your recalled notes — local model by default, --cloud for Claude."""
     _require_init()
 
     rows = _search(question, project, limit, any_terms=True)
-    context = "\n\n".join(f"- {_read_body(path)}" for _id, _p, _c, path, _s in rows) or "(no relevant notes found)"
+
+    context_parts = []
+    sources = []
+    for note_id, proj, created, path, snip, section_title, char_start, char_end in rows:
+        if char_start is not None and char_end is not None:
+            text = _read_section(path, char_start, char_end)
+        else:
+            try:
+                text = _read_body(path)
+            except OSError:
+                text = ""
+        if text:
+            context_parts.append(f"[{note_id}] {text}")
+            sources.append((note_id, path, section_title))
+    context = "\n\n".join(context_parts) or "(no relevant notes found)"
+
     system = (
-        "You are kage, the user's local personal assistant. Answer the question. "
-        "Use CONTEXT (the user's own saved notes) when relevant; if it doesn't cover the "
-        "question, answer from general knowledge and say so briefly. Be concise."
+        "You are kage, the user's personal memory assistant. "
+        "Answer ONLY using the CONTEXT below — the user's own saved notes. "
+        "If the answer is not in the context, say exactly: "
+        "'I don't know — nothing in your notes covers this.' "
+        "Do not use general knowledge. Be concise."
     )
     cfg = _config()
     thinking = ""
@@ -422,6 +848,12 @@ def ask(
         typer.echo(f"[thinking]\n{thinking}\n")
     typer.echo(answer or "(no answer returned)")
 
+    if not no_sources and sources:
+        typer.echo("\nSources:")
+        for note_id, path, section_title in sources:
+            label = f"§ {section_title}" if section_title else _disp(KAGE_HOME / path)
+            typer.echo(f"  • {note_id}  {label}")
+
 
 @app.command()
 def forget(
@@ -457,11 +889,21 @@ def forget(
             raise typer.Exit()
 
         (KAGE_HOME / path).unlink(missing_ok=True)  # remove the source of truth
+        chunk_ids = [row[0] for row in conn.execute(
+            "SELECT id FROM chunks WHERE note_id = ?", (mem_id,)
+        ).fetchall()]
+        conn.execute("DELETE FROM chunks WHERE note_id = ?", (mem_id,))
         conn.execute("DELETE FROM memories WHERE id = ?", (mem_id,))
         conn.execute("DELETE FROM memory_fts WHERE id = ?", (mem_id,))  # and the index
         conn.commit()
     finally:
         conn.close()
+
+    if chunk_ids:
+        try:
+            _get_chroma().delete(ids=chunk_ids)
+        except OllamaUnavailable:
+            typer.echo("  ⚠ vector index not updated — run: kage reindex", err=True)
 
     typer.echo(f"  ✓ forgotten   [{mem_id}]")
 
@@ -549,8 +991,31 @@ def doctor() -> None:
             typer.echo(f"      → {fix}")
         all_ok = all_ok and ok
 
-    # Advisory — Ollama is needed only for `kage ask` (local); NOT a hard failure.
+    # Advisory — unembedded chunks (⚠ warning, not a hard failure).
+    if db_ok:
+        try:
+            conn = _connect()
+            pending = conn.execute("SELECT COUNT(*) FROM chunks WHERE needs_embed=1").fetchone()[0]
+            conn.close()
+            if pending > 0:
+                typer.echo(f"  ⚠ {pending} chunk(s) not yet embedded → run: kage reindex")
+        except sqlite3.Error:
+            pass
+
+    # Advisory — embedding model mismatch between config and ChromaDB collection.
     cfg = _config()
+    config_model = cfg.get("embed_model", "nomic-embed-text")
+    try:
+        coll = _get_chroma()
+        stored_model = (coll.metadata or {}).get("embed_model")
+        stored_schema = (coll.metadata or {}).get("schema_version", "?")
+        typer.echo(f"  ✓ vector index  schema v{stored_schema}  embed model: {stored_model or config_model}")
+        if stored_model is not None and stored_model != config_model:
+            typer.echo(f"  ✗ embedding model changed ({stored_model} → {config_model}) → run: kage reindex --force")
+    except OllamaUnavailable:
+        pass  # _get_chroma raises on mismatch — warning already printed by _get_chroma
+
+    # Advisory — Ollama is needed only for `kage ask` (local); NOT a hard failure.
     model = cfg.get("model", "qwen3:14b")
     ok_ollama, detail = _ollama_status(cfg, model)
     typer.echo(f"  {'✓' if ok_ollama else '⚠'} local model: {detail}")

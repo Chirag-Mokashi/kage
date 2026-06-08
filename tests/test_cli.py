@@ -142,7 +142,7 @@ def test_doctor_warns_on_pending_embeddings(monkeypatch, tmp_path):
 
     result = r.invoke(cli.app, ["doctor"])
     assert result.exit_code == 0
-    assert "2 note(s) not yet embedded" in result.output
+    assert "chunk(s) not yet embedded" in result.output
 
 
 def test_doctor_warns_on_embed_model_mismatch(monkeypatch, tmp_path):
@@ -216,7 +216,9 @@ def test_import_skips_embedding(monkeypatch, tmp_path):
     assert result.exit_code == 0
 
     conn = sqlite3.connect(str(home / "indexes" / "kage.db"))
-    rows = conn.execute("SELECT needs_embed FROM memories WHERE project='bulk'").fetchall()
+    rows = conn.execute(
+        "SELECT c.needs_embed FROM chunks c JOIN memories m ON m.id = c.note_id WHERE m.project='bulk'"
+    ).fetchall()
     conn.close()
     assert len(rows) == 2
     assert all(row[0] == 1 for row in rows)
@@ -317,7 +319,8 @@ def test_search_hybrid_fuses_both_results(monkeypatch):
     monkeypatch.setattr(cli, "_config", lambda: {"embeddings": True})
     monkeypatch.setattr(cli, "_search_fts", lambda *a, **kw: [("A", "p", "t", "a.md", "snip")])
     monkeypatch.setattr(cli, "_embed", lambda *a, **kw: [0.1, 0.2])
-    monkeypatch.setattr(cli, "_search_vec", lambda *a, **kw: [("B", "p", "t", "b.md", 0.9)])
+    monkeypatch.setattr(cli, "_search_vec", lambda *a, **kw: [("B", "p", "t", "b.md", 0.9, "", 0, 10)])
+    monkeypatch.setattr(cli, "_read_body", lambda *a, **kw: "body")
     result = cli._search("hello", "p", 5)
     ids = [r[0] for r in result]
     assert "A" in ids
@@ -327,14 +330,18 @@ def test_search_hybrid_fuses_both_results(monkeypatch):
 # ── _search_vec (Step 5) ────────────────────────────────────────────────────
 
 def test_search_vec_returns_correct_shape(monkeypatch):
+    # v0.4: rows are 8-tuples (note_id, project, created_at, path, score, title, cs, ce)
     class FakeCollection:
         def count(self): return 2
+        def get(self, where=None, include=None): return {"ids": ["n1_c0", "n2_c0"]}
         def query(self, **kwargs):
             return {
-                "ids": [["id1", "id2"]],
+                "ids": [["n1_c0", "n2_c0"]],
                 "metadatas": [[
-                    {"project": "p", "created_at": "t", "content_path": "c.md"},
-                    {"project": "p", "created_at": "t", "content_path": "d.md"},
+                    {"note_id": "n1", "project": "p", "created_at": "t", "content_path": "c.md",
+                     "section_title": "", "char_start": 0, "char_end": 10},
+                    {"note_id": "n2", "project": "p", "created_at": "t", "content_path": "d.md",
+                     "section_title": "", "char_start": 0, "char_end": 10},
                 ]],
                 "distances": [[0.1, 0.2]],
             }
@@ -342,7 +349,7 @@ def test_search_vec_returns_correct_shape(monkeypatch):
     monkeypatch.setattr(cli, "_get_chroma", lambda: FakeCollection())
     result = cli._search_vec([0.1, 0.2], "p", 5)
     assert len(result) == 2
-    assert len(result[0]) == 5   # (id, project, created_at, content_path, score)
+    assert len(result[0]) == 8   # 8-tuple: (note_id, project, created_at, path, score, title, cs, ce)
 
 
 def test_search_vec_applies_project_filter(monkeypatch):
@@ -350,9 +357,13 @@ def test_search_vec_applies_project_filter(monkeypatch):
 
     class FakeCollection:
         def count(self): return 1
+        def get(self, where=None, include=None): return {"ids": ["n1_c0"]}
         def query(self, **kwargs):
             captured["where"] = kwargs.get("where")
-            return {"ids": [["id1"]], "metadatas": [[{"project": "projA", "created_at": "t", "content_path": "c.md"}]], "distances": [[0.1]]}
+            return {"ids": [["n1_c0"]], "metadatas": [[
+                {"note_id": "n1", "project": "projA", "created_at": "t", "content_path": "c.md",
+                 "section_title": "", "char_start": 0, "char_end": 10}
+            ]], "distances": [[0.1]]}
 
     monkeypatch.setattr(cli, "_get_chroma", lambda: FakeCollection())
     cli._search_vec([0.1], "projA", 5)
@@ -362,6 +373,7 @@ def test_search_vec_applies_project_filter(monkeypatch):
 def test_search_vec_returns_empty_on_empty_collection(monkeypatch):
     class FakeCollection:
         def count(self): return 0
+        def get(self, where=None, include=None): return {"ids": []}
 
     monkeypatch.setattr(cli, "_get_chroma", lambda: FakeCollection())
     assert cli._search_vec([0.1], "p", 5) == []
@@ -372,9 +384,13 @@ def test_search_vec_no_where_when_project_is_none(monkeypatch):
 
     class FakeCollection:
         def count(self): return 1
+        def get(self, where=None, include=None): return {"ids": ["n1_c0"]}
         def query(self, **kwargs):
             captured["where"] = kwargs.get("where")
-            return {"ids": [["id1"]], "metadatas": [[{"project": None, "created_at": "t", "content_path": "c.md"}]], "distances": [[0.1]]}
+            return {"ids": [["n1_c0"]], "metadatas": [[
+                {"note_id": "n1", "project": None, "created_at": "t", "content_path": "c.md",
+                 "section_title": "", "char_start": 0, "char_end": 10}
+            ]], "distances": [[0.1]]}
 
     monkeypatch.setattr(cli, "_get_chroma", lambda: FakeCollection())
     cli._search_vec([0.1], None, 5)
@@ -385,7 +401,7 @@ def test_search_vec_no_where_when_project_is_none(monkeypatch):
 
 def test_get_chroma_returns_collection(monkeypatch):
     class FakeCollection:
-        metadata = {"embed_model": "nomic-embed-text"}
+        metadata = {"embed_model": "nomic-embed-text", "schema_version": "4"}
 
     class FakePersistentClient:
         def __init__(self, path):
@@ -395,7 +411,7 @@ def test_get_chroma_returns_collection(monkeypatch):
 
     monkeypatch.setattr(chromadb, "PersistentClient", FakePersistentClient)
     result = cli._get_chroma()
-    assert result.metadata == {"embed_model": "nomic-embed-text"}
+    assert result.metadata["embed_model"] == "nomic-embed-text"
 
 
 def test_get_chroma_raises_on_model_mismatch(monkeypatch):
@@ -475,6 +491,196 @@ def test_init_creates_needs_embed_column(tmp_path):
     assert "needs_embed" in cols
 
 
+def test_chunks_table_created_on_init(tmp_path):
+    h = tmp_path / ".kage"
+    run(["init"], h)
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(chunks)")]
+    conn.close()
+    assert cols == ["id", "note_id", "section_title", "char_start", "char_end", "needs_embed"]
+
+
+def test_chunks_table_created_on_existing_db(tmp_path):
+    h = tmp_path / ".kage"
+    (h / "indexes").mkdir(parents=True)
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    conn.executescript("""
+        CREATE TABLE memories (
+            id TEXT PRIMARY KEY, content_path TEXT NOT NULL,
+            project TEXT, created_at TEXT NOT NULL, needs_embed INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE VIRTUAL TABLE memory_fts USING fts5(id UNINDEXED, body);
+    """)
+    conn.close()
+    assert run(["init"], h).returncode == 0
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(chunks)")]
+    conn.close()
+    assert "id" in cols and "char_start" in cols
+
+
+# ── _chunk_note (Step 2) ────────────────────────────────────────────────────
+
+def test_chunk_note_splits_on_h2():
+    section_one = "x" * 110
+    section_two = "y" * 110
+    body = f"## Section One\n{section_one}\n\n## Section Two\n{section_two}"
+    result = cli._chunk_note(body)
+    assert len(result) == 2
+    assert result[0]["title"] == "Section One"
+    assert result[1]["title"] == "Section Two"
+
+
+def test_chunk_note_splits_on_h3():
+    section_one = "a" * 110
+    section_two = "b" * 110
+    body = f"### Header One\n{section_one}\n\n### Header Two\n{section_two}"
+    result = cli._chunk_note(body)
+    assert len(result) == 2
+    assert result[0]["title"] == "Header One"
+    assert result[1]["title"] == "Header Two"
+
+
+def test_chunk_note_skips_short_chunks():
+    body = "## Too Short\nThis is too short to be a chunk."
+    result = cli._chunk_note(body)
+    assert len(result) == 1
+    assert result[0]["title"] == ""
+
+
+def test_chunk_note_fallback_no_headers():
+    body = "This is a body with no headers at all."
+    result = cli._chunk_note(body)
+    assert result == [{"title": "", "char_start": 0, "char_end": len(body)}]
+
+
+def test_chunk_note_fallback_all_short():
+    body = "## First\nToo short.\n\n## Second\nAlso too short."
+    result = cli._chunk_note(body)
+    assert result == [{"title": "", "char_start": 0, "char_end": len(body)}]
+
+
+def test_chunk_note_char_offsets_are_correct():
+    section_one = "x" * 110
+    section_two = "y" * 110
+    body = f"## First\n{section_one}\n\n## Second\n{section_two}"
+    result = cli._chunk_note(body)
+    assert len(result) == 2
+    # char_end for first chunk points to the start of "## Second", so the
+    # slice includes the trailing "\n\n" separator — strip for comparison
+    assert body[result[0]["char_start"]:result[0]["char_end"]].strip() == section_one
+    assert body[result[1]["char_start"]:result[1]["char_end"]].strip() == section_two
+
+
+def test_chunk_note_char_end_does_not_exceed_body():
+    body = "## Section\n" + "x" * 110  # no trailing newline
+    result = cli._chunk_note(body)
+    assert all(chunk["char_end"] <= len(body) for chunk in result)
+
+
+# ── _read_section (Step 3) ──────────────────────────────────────────────────
+
+def test_read_section_returns_correct_slice(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "KAGE_HOME", tmp_path)
+    (tmp_path / "memory").mkdir()
+    (tmp_path / "memory" / "note.md").write_text("This is the body of the note.")
+    result = cli._read_section("memory/note.md", 5, 15)
+    assert result == "is the bod"
+
+
+def test_read_section_with_frontmatter_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "KAGE_HOME", tmp_path)
+    (tmp_path / "memory").mkdir()
+    (tmp_path / "memory" / "note.md").write_text(
+        "---\ntitle: Test Note\n---\nThis is the body of the note."
+    )
+    # _read_body strips frontmatter + strips whitespace → body = "This is the body of the note."
+    result = cli._read_section("memory/note.md", 5, 15)
+    assert result == "is the bod"
+
+
+def test_read_section_returns_empty_on_missing_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "KAGE_HOME", tmp_path)
+    result = cli._read_section("memory/nonexistent.md", 0, 10)
+    assert result == ""
+
+
+def test_read_section_full_body_slice(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "KAGE_HOME", tmp_path)
+    (tmp_path / "memory").mkdir()
+    body = "This is the body of the note."
+    (tmp_path / "memory" / "note.md").write_text(body)
+    result = cli._read_section("memory/note.md", 0, len(body))
+    assert result == body
+
+
+# ── _get_chroma (Step 4) ────────────────────────────────────────────────────
+
+def _fake_chroma_client(metadata):
+    """Return a fake chromadb client whose collection has the given metadata."""
+    coll = type("Coll", (), {"metadata": metadata, "add": lambda *a, **kw: None})()
+    return type("Client", (), {"get_or_create_collection": lambda self, **kw: coll})()
+
+
+def test_get_chroma_returns_collection_on_fresh_db(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "CHROMA_DIR", tmp_path / "chroma")
+    monkeypatch.setattr(cli, "_config", lambda: {"embed_model": "nomic-embed-text"})
+    import chromadb
+    monkeypatch.setattr(chromadb, "PersistentClient", lambda path: _fake_chroma_client(
+        {"embed_model": "nomic-embed-text", "schema_version": "4"}
+    ))
+    result = cli._get_chroma()
+    assert result is not None
+
+
+def test_get_chroma_raises_on_embed_model_mismatch(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "CHROMA_DIR", tmp_path / "chroma")
+    monkeypatch.setattr(cli, "_config", lambda: {"embed_model": "nomic-embed-text"})
+    import chromadb
+    monkeypatch.setattr(chromadb, "PersistentClient", lambda path: _fake_chroma_client(
+        {"embed_model": "old-model", "schema_version": "4"}
+    ))
+    with pytest.raises(cli.OllamaUnavailable):
+        cli._get_chroma()
+
+
+def test_get_chroma_raises_on_missing_schema_version(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "CHROMA_DIR", tmp_path / "chroma")
+    monkeypatch.setattr(cli, "_config", lambda: {"embed_model": "nomic-embed-text"})
+    import chromadb
+    monkeypatch.setattr(chromadb, "PersistentClient", lambda path: _fake_chroma_client(
+        {"embed_model": "nomic-embed-text"}  # no schema_version key
+    ))
+    with pytest.raises(cli.OllamaUnavailable):
+        cli._get_chroma()
+
+
+def test_get_chroma_raises_on_wrong_schema_version(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "CHROMA_DIR", tmp_path / "chroma")
+    monkeypatch.setattr(cli, "_config", lambda: {"embed_model": "nomic-embed-text"})
+    import chromadb
+    monkeypatch.setattr(chromadb, "PersistentClient", lambda path: _fake_chroma_client(
+        {"embed_model": "nomic-embed-text", "schema_version": "3"}
+    ))
+    with pytest.raises(cli.OllamaUnavailable):
+        cli._get_chroma()
+
+
+def test_get_chroma_banner_printed_before_raise(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(cli, "CHROMA_DIR", tmp_path / "chroma")
+    monkeypatch.setattr(cli, "_config", lambda: {"embed_model": "nomic-embed-text"})
+    import chromadb
+    monkeypatch.setattr(chromadb, "PersistentClient", lambda path: _fake_chroma_client(
+        {"embed_model": "nomic-embed-text"}  # missing schema_version
+    ))
+    try:
+        cli._get_chroma()
+    except cli.OllamaUnavailable:
+        pass
+    captured = capsys.readouterr()
+    assert "schema version mismatch" in captured.err
+
+
 def test_wal_mode_enabled(tmp_path):
     h = tmp_path / ".kage"
     run(["init"], h)
@@ -501,11 +707,12 @@ def test_save_sets_needs_embed_to_0_when_ollama_up(monkeypatch, tmp_path):
         "delete": lambda self, **kw: None,
     })()
     monkeypatch.setattr(cli, "_get_chroma", lambda: fake_coll)
-    cli._save("some note", "test")
+    mem_id = cli._save("some note", "test")
     conn = sqlite3.connect(h / "indexes" / "kage.db")
-    result = conn.execute("SELECT needs_embed FROM memories LIMIT 1").fetchone()
+    # v0.4: embed status lives in chunks.needs_embed, not memories.needs_embed
+    vals = [r[0] for r in conn.execute("SELECT needs_embed FROM chunks WHERE note_id=?", (mem_id,)).fetchall()]
     conn.close()
-    assert result[0] == 0
+    assert all(v == 0 for v in vals)
 
 
 def test_save_sets_needs_embed_to_1_when_ollama_down(monkeypatch, tmp_path):
@@ -519,9 +726,9 @@ def test_save_sets_needs_embed_to_1_when_ollama_down(monkeypatch, tmp_path):
     CliRunner().invoke(cli.app, ["init"])
     def embed_down(*a, **kw): raise cli.OllamaUnavailable("down")
     monkeypatch.setattr(cli, "_embed", embed_down)
-    cli._save("some note", "test")
+    mem_id = cli._save("some note", "test")
     conn = sqlite3.connect(h / "indexes" / "kage.db")
-    result = conn.execute("SELECT needs_embed FROM memories LIMIT 1").fetchone()
+    result = conn.execute("SELECT needs_embed FROM chunks WHERE note_id=?", (mem_id,)).fetchone()
     conn.close()
     assert result[0] == 1
 
@@ -545,6 +752,220 @@ def test_init_migration_adds_needs_embed_to_existing_db(tmp_path):
     assert "needs_embed" in cols
 
 
+# ── _save chunks (Step 5) ───────────────────────────────────────────────────
+
+def _save_home(monkeypatch, tmp_path):
+    """Isolated in-process kage home for _save chunk tests."""
+    h = tmp_path / ".kage"
+    for attr, val in {
+        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+    }.items():
+        monkeypatch.setattr(cli, attr, val)
+    CliRunner().invoke(cli.app, ["init"])
+    return h
+
+
+def test_save_inserts_chunks_into_db(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    mem_id = cli._save("## Intro\n" + "x" * 110, "proj")
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    rows = conn.execute("SELECT * FROM chunks WHERE note_id=?", (mem_id,)).fetchall()
+    conn.close()
+    assert len(rows) >= 1
+
+
+def test_save_chunk_ids_follow_scheme(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    mem_id = cli._save("## Intro\n" + "x" * 110, "proj")
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    ids = [r[0] for r in conn.execute("SELECT id FROM chunks WHERE note_id=?", (mem_id,)).fetchall()]
+    conn.close()
+    for cid in ids:
+        assert cid.startswith(f"{mem_id}_c")
+        assert cid[len(f"{mem_id}_c"):].isdigit()
+
+
+def test_save_sets_chunk_needs_embed_0_when_ollama_up(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: [0.1, 0.2])
+    fake_coll = type("C", (), {"add": lambda self, **kw: None})()
+    monkeypatch.setattr(cli, "_get_chroma", lambda: fake_coll)
+    mem_id = cli._save("## Intro\n" + "x" * 110, "proj")
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    vals = [r[0] for r in conn.execute("SELECT needs_embed FROM chunks WHERE note_id=?", (mem_id,)).fetchall()]
+    conn.close()
+    assert all(v == 0 for v in vals)
+
+
+def test_save_sets_chunk_needs_embed_1_when_ollama_down(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    def embed_down(*a, **kw): raise cli.OllamaUnavailable("down")
+    monkeypatch.setattr(cli, "_embed", embed_down)
+    mem_id = cli._save("## Intro\n" + "x" * 110, "proj")
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    vals = [r[0] for r in conn.execute("SELECT needs_embed FROM chunks WHERE note_id=?", (mem_id,)).fetchall()]
+    conn.close()
+    assert all(v == 1 for v in vals)
+
+
+def test_save_chunk_transaction_rolls_back_on_failure(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    # Return a chunk with char_start=None — violates NOT NULL, causes INSERT to fail mid-transaction
+    monkeypatch.setattr(cli, "_chunk_note", lambda body: [{"title": "", "char_start": None, "char_end": None}])
+    with pytest.raises(Exception):
+        cli._save("some text", "proj")
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    chunk_rows = conn.execute("SELECT * FROM chunks").fetchall()
+    mem_rows = conn.execute("SELECT * FROM memories").fetchall()
+    conn.close()
+    assert len(chunk_rows) == 0
+    assert len(mem_rows) == 0  # rollback covers memories INSERT too
+
+
+# ── forget chunks (Step 8) ──────────────────────────────────────────────────
+
+def test_forget_deletes_chunks_from_sqlite(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    def embed_down(*a, **kw): raise cli.OllamaUnavailable("down")
+    monkeypatch.setattr(cli, "_embed", embed_down)
+    mem_id = cli._save("## Intro\n" + "x" * 110, "proj")
+
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    assert conn.execute("SELECT COUNT(*) FROM chunks WHERE note_id=?", (mem_id,)).fetchone()[0] >= 1
+    conn.close()
+
+    CliRunner().invoke(cli.app, ["forget", mem_id, "--yes"])
+
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    remaining = conn.execute("SELECT COUNT(*) FROM chunks WHERE note_id=?", (mem_id,)).fetchone()[0]
+    conn.close()
+    assert remaining == 0
+
+
+def test_forget_deletes_chunks_from_chromadb(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    def embed_down(*a, **kw): raise cli.OllamaUnavailable("down")
+    monkeypatch.setattr(cli, "_embed", embed_down)
+    mem_id = cli._save("## Intro\n" + "x" * 110, "proj")
+
+    # Collect expected chunk IDs from DB before forget
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    expected_ids = [r[0] for r in conn.execute("SELECT id FROM chunks WHERE note_id=?", (mem_id,)).fetchall()]
+    conn.close()
+    assert expected_ids  # sanity check
+
+    deleted = []
+    fake_coll = type("C", (), {"delete": lambda self, ids=None: deleted.extend(ids or [])})()
+    monkeypatch.setattr(cli, "_get_chroma", lambda: fake_coll)
+
+    CliRunner().invoke(cli.app, ["forget", mem_id, "--yes"])
+
+    assert sorted(deleted) == sorted(expected_ids)   # chunk IDs, not note ID
+
+
+def test_forget_does_not_pass_note_id_to_chromadb(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    def embed_down(*a, **kw): raise cli.OllamaUnavailable("down")
+    monkeypatch.setattr(cli, "_embed", embed_down)
+    mem_id = cli._save("## Intro\n" + "x" * 110, "proj")
+
+    deleted = []
+    fake_coll = type("C", (), {"delete": lambda self, ids=None: deleted.extend(ids or [])})()
+    monkeypatch.setattr(cli, "_get_chroma", lambda: fake_coll)
+
+    CliRunner().invoke(cli.app, ["forget", mem_id, "--yes"])
+
+    assert mem_id not in deleted          # note ID must NOT be passed to ChromaDB
+    assert all("_c" in cid for cid in deleted)  # all deleted IDs are chunk IDs
+
+
+# ── _search_vec (Step 7) ────────────────────────────────────────────────────
+
+def _fake_vec_coll(ids, metadatas, distances, project_ids=None, total_count=None):
+    """Build a fake ChromaDB collection for _search_vec tests."""
+    _project_ids = project_ids
+    _total = total_count if total_count is not None else len(ids)
+
+    class Coll:
+        def count(self): return _total
+        def get(self, where=None, include=None):
+            return {"ids": _project_ids if _project_ids is not None else ids}
+        def query(self, query_embeddings=None, n_results=None, where=None, include=None):
+            return {"ids": [ids], "metadatas": [metadatas], "distances": [distances]}
+
+    return Coll()
+
+
+def test_search_vec_returns_empty_when_no_docs(monkeypatch):
+    monkeypatch.setattr(cli, "_get_chroma", lambda: _fake_vec_coll([], [], [], total_count=0))
+    assert cli._search_vec([0.1, 0.2], None, 10) == []
+
+
+def test_search_vec_returns_8_tuples(monkeypatch):
+    meta = {"note_id": "n1", "project": "proj", "created_at": "t", "content_path": "p.md",
+            "section_title": "Intro", "char_start": 0, "char_end": 100}
+    monkeypatch.setattr(cli, "_get_chroma", lambda: _fake_vec_coll(["n1_c0"], [meta], [0.1]))
+    result = cli._search_vec([0.1], None, 10)
+    assert len(result) == 1
+    assert len(result[0]) == 8
+    note_id, proj, created, path, score, title, cs, ce = result[0]
+    assert note_id == "n1"
+    assert proj == "proj"
+    assert score == 0.1
+    assert title == "Intro"
+    assert cs == 0 and ce == 100
+
+
+def test_search_vec_deduplicates_chunks_by_note(monkeypatch):
+    # Two chunks from same note — lower distance (0.1) wins
+    meta = {"note_id": "n1", "project": "p", "created_at": "t", "content_path": "f.md",
+            "section_title": "A", "char_start": 0, "char_end": 50}
+    meta2 = {**meta, "section_title": "B", "char_start": 50, "char_end": 100}
+    monkeypatch.setattr(cli, "_get_chroma", lambda: _fake_vec_coll(
+        ["n1_c0", "n1_c1"], [meta, meta2], [0.1, 0.3]
+    ))
+    result = cli._search_vec([0.1], None, 10)
+    assert len(result) == 1
+    assert result[0][4] == 0.1   # lower distance kept
+    assert result[0][5] == "A"   # section from best chunk
+
+
+def test_search_vec_two_notes_both_returned(monkeypatch):
+    # Two chunks from different notes — both survive deduplication
+    meta_a = {"note_id": "n1", "project": "p", "created_at": "t", "content_path": "a.md",
+              "section_title": "A", "char_start": 0, "char_end": 50}
+    meta_b = {"note_id": "n2", "project": "p", "created_at": "t", "content_path": "b.md",
+              "section_title": "B", "char_start": 0, "char_end": 50}
+    monkeypatch.setattr(cli, "_get_chroma", lambda: _fake_vec_coll(
+        ["n1_c0", "n2_c0"], [meta_a, meta_b], [0.1, 0.2]
+    ))
+    result = cli._search_vec([0.1], None, 10)
+    assert len(result) == 2
+
+
+def test_search_vec_per_project_count_uses_get_not_count(monkeypatch):
+    # count() returns 10, but per-project get() returns only 1 id
+    # → n_results passed to query must be 1 (min(limit, 1)), not 10
+    meta = {"note_id": "n1", "project": "proj", "created_at": "t", "content_path": "f.md",
+            "section_title": "", "char_start": 0, "char_end": 50}
+    queried_n = []
+
+    class Coll:
+        def count(self): return 10
+        def get(self, where=None, include=None): return {"ids": ["n1_c0"]}
+        def query(self, query_embeddings=None, n_results=None, where=None, include=None):
+            queried_n.append(n_results)
+            return {"ids": [["n1_c0"]], "metadatas": [[meta]], "distances": [[0.1]]}
+
+    monkeypatch.setattr(cli, "_get_chroma", lambda: Coll())
+    cli._search_vec([0.1], "proj", 10)
+    assert queried_n[0] == 1   # capped at per-project count, not total count
+
+
 # ── reindex (Step 9) ────────────────────────────────────────────────────────
 
 def _reindex_home(monkeypatch, tmp_path):
@@ -562,7 +983,7 @@ def _reindex_home(monkeypatch, tmp_path):
 
 
 def test_reindex_embeds_pending_notes(monkeypatch, tmp_path):
-    """reindex must embed all needs_embed=1 notes and set needs_embed=0."""
+    """reindex must embed all chunks with needs_embed=1 and set needs_embed=0."""
     h, r = _reindex_home(monkeypatch, tmp_path)
 
     added = []
@@ -572,7 +993,7 @@ def test_reindex_embeds_pending_notes(monkeypatch, tmp_path):
         "count": lambda self: 0,
         "query": lambda self, **kw: {"ids": [[]], "metadatas": [[]], "distances": [[]]},
         "delete": lambda self, **kw: None,
-        "metadata": {"embed_model": "nomic-embed-text"},
+        "metadata": {"embed_model": "nomic-embed-text", "schema_version": "4"},
     })()
     monkeypatch.setattr(cli, "_embed", lambda *a, **kw: [0.1, 0.2])
     monkeypatch.setattr(cli, "_get_chroma", lambda: fake_coll)
@@ -581,14 +1002,14 @@ def test_reindex_embeds_pending_notes(monkeypatch, tmp_path):
     cli._save("note two", "proj", embed=False)
 
     conn = sqlite3.connect(h / "indexes" / "kage.db")
-    assert conn.execute("SELECT COUNT(*) FROM memories WHERE needs_embed=1").fetchone()[0] == 2
+    assert conn.execute("SELECT COUNT(*) FROM chunks WHERE needs_embed=1").fetchone()[0] == 2
     conn.close()
 
     result = r.invoke(cli.app, ["reindex"])
     assert result.exit_code == 0
 
     conn = sqlite3.connect(h / "indexes" / "kage.db")
-    assert conn.execute("SELECT COUNT(*) FROM memories WHERE needs_embed=1").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM chunks WHERE needs_embed=1").fetchone()[0] == 0
     conn.close()
     assert len(added) == 2
 
@@ -603,7 +1024,7 @@ def test_reindex_idempotent(monkeypatch, tmp_path):
         "count": lambda self: 0,
         "query": lambda self, **kw: {"ids": [[]], "metadatas": [[]], "distances": [[]]},
         "delete": lambda self, **kw: None,
-        "metadata": {"embed_model": "nomic-embed-text"},
+        "metadata": {"embed_model": "nomic-embed-text", "schema_version": "4"},
     })()
     monkeypatch.setattr(cli, "_embed", lambda *a, **kw: [0.1, 0.2])
     monkeypatch.setattr(cli, "_get_chroma", lambda: fake_coll)
@@ -616,32 +1037,43 @@ def test_reindex_idempotent(monkeypatch, tmp_path):
     assert "nothing to reindex" in result.output
 
 
-def test_reindex_force_reembeds_all(monkeypatch, tmp_path):
-    """reindex --force must upsert ALL notes, not just needs_embed=1."""
+def test_reindex_force_clears_and_rechunks(monkeypatch, tmp_path):
+    """reindex --force must nuke old chunks, rechunk all notes, re-embed everything."""
     h, r = _reindex_home(monkeypatch, tmp_path)
 
-    upserted = []
+    added = []
     fake_coll = type("C", (), {
-        "add": lambda self, **kw: None,
-        "upsert": lambda self, **kw: upserted.extend(kw["ids"]),
-        "count": lambda self: 1,
+        "add": lambda self, **kw: added.extend(kw["ids"]),
+        "upsert": lambda self, **kw: None,
+        "count": lambda self: 0,
         "query": lambda self, **kw: {"ids": [[]], "metadatas": [[]], "distances": [[]]},
         "delete": lambda self, **kw: None,
-        "metadata": {"embed_model": "nomic-embed-text"},
+        "metadata": {"embed_model": "nomic-embed-text", "schema_version": "4"},
     })()
     monkeypatch.setattr(cli, "_embed", lambda *a, **kw: [0.1, 0.2])
     monkeypatch.setattr(cli, "_get_chroma", lambda: fake_coll)
 
-    # save with embed=True path mocked → needs_embed=0
     cli._save("already embedded note", "proj")
 
-    conn = sqlite3.connect(h / "indexes" / "kage.db")
-    assert conn.execute("SELECT COUNT(*) FROM memories WHERE needs_embed=0").fetchone()[0] == 1
-    conn.close()
-
+    # force wipes chunks table then rechunks
     result = r.invoke(cli.app, ["reindex", "--force"])
+    assert result.exit_code == 0, result.output
+
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    chunk_count = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+    pending = conn.execute("SELECT COUNT(*) FROM chunks WHERE needs_embed=1").fetchone()[0]
+    conn.close()
+    assert chunk_count >= 1       # rechunked
+    assert pending == 0           # all re-embedded
+    assert len(added) >= 1        # chunk IDs passed to coll.add
+
+
+def test_reindex_nothing_to_reindex_exits_cleanly(monkeypatch, tmp_path):
+    """reindex on empty DB must exit 0 and report nothing to do."""
+    _, r = _reindex_home(monkeypatch, tmp_path)
+    result = r.invoke(cli.app, ["reindex"])
     assert result.exit_code == 0
-    assert len(upserted) == 1
+    assert "nothing to reindex" in result.output
 
 
 def test_reindex_exits_on_ollama_down(monkeypatch, tmp_path):
@@ -684,16 +1116,20 @@ def test_vec_search_respects_project_partition(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "CONFIG_PATH", config_path)
 
     client = chromadb.PersistentClient(path=str(chroma_dir))
-    coll = client.get_or_create_collection("memories", metadata={"embed_model": "nomic-embed-text"})
-    coll.add(
-        ids=["note-A"],
-        embeddings=[[1.0, 0.0, 0.0]],
-        metadatas=[{"project": "projA", "created_at": "t", "content_path": "memory/note-A.md"}],
+    coll = client.get_or_create_collection(
+        "chunks", metadata={"embed_model": "nomic-embed-text", "schema_version": "4"}
     )
     coll.add(
-        ids=["note-B"],
+        ids=["note-A_c0"],
+        embeddings=[[1.0, 0.0, 0.0]],
+        metadatas=[{"note_id": "note-A", "project": "projA", "created_at": "t",
+                    "content_path": "memory/note-A.md", "section_title": "", "char_start": 0, "char_end": 10}],
+    )
+    coll.add(
+        ids=["note-B_c0"],
         embeddings=[[0.0, 1.0, 0.0]],
-        metadatas=[{"project": "projB", "created_at": "t", "content_path": "memory/note-B.md"}],
+        metadatas=[{"note_id": "note-B", "project": "projB", "created_at": "t",
+                    "content_path": "memory/note-B.md", "section_title": "", "char_start": 0, "char_end": 10}],
     )
 
     result = cli._search_vec([1.0, 0.0, 0.0], "projA", 5)
@@ -740,7 +1176,8 @@ def test_forget_deletes_vector_index(monkeypatch, tmp_path):
     deleted_ids.clear()  # reset — only care about delete from forget, not save
     result = r.invoke(cli.app, ["forget", mem_id, "--yes"])
     assert result.exit_code == 0
-    assert mem_id in deleted_ids   # vector must be removed
+    # Step 8: forget deletes chunk IDs (e.g. mem_id_c0), not the note ID itself
+    assert any(cid.startswith(mem_id) for cid in deleted_ids)
 
 
 def test_forget_warns_if_ollama_down(monkeypatch, tmp_path):
@@ -783,7 +1220,7 @@ def test_search_hybrid_snippet_for_vec_only_results(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli, "_search_fts", lambda *a, **kw: [])  # FTS returns nothing
     monkeypatch.setattr(cli, "_search_vec", lambda *a, **kw: [
-        ("note-A", "proj", "t", "memory/note-A.md", 0.95)  # float score — vec-only result
+        ("note-A", "proj", "t", "memory/note-A.md", 0.95, "", 0, 100)  # 8-tuple vec row
     ])
     monkeypatch.setattr(cli, "_embed", lambda *a, **kw: [0.1])
 
@@ -807,7 +1244,7 @@ def test_search_handles_missing_markdown_during_snippet_gen(monkeypatch, tmp_pat
 
     monkeypatch.setattr(cli, "_search_fts", lambda *a, **kw: [])
     monkeypatch.setattr(cli, "_search_vec", lambda *a, **kw: [
-        ("note-X", "proj", "t", "memory/note-X.md", 0.9)  # markdown does NOT exist
+        ("note-X", "proj", "t", "memory/note-X.md", 0.9, "", 0, 100)  # markdown does NOT exist
     ])
     monkeypatch.setattr(cli, "_embed", lambda *a, **kw: [0.1])
 
@@ -832,9 +1269,9 @@ def test_search_hybrid_limit_applies_after_fusion(monkeypatch, tmp_path):
     ]
     monkeypatch.setattr(cli, "_search_fts", lambda *a, **kw: shared)
     monkeypatch.setattr(cli, "_search_vec", lambda *a, **kw: [
-        ("A", "p", "t", "a.md", 0.9),
-        ("B", "p", "t", "b.md", 0.8),
-        ("C", "p", "t", "c.md", 0.7),
+        ("A", "p", "t", "a.md", 0.9, "", 0, 10),
+        ("B", "p", "t", "b.md", 0.8, "", 0, 10),
+        ("C", "p", "t", "c.md", 0.7, "", 0, 10),
     ])
     monkeypatch.setattr(cli, "_embed", lambda *a, **kw: [0.1])
 
@@ -867,34 +1304,35 @@ def test_reindex_skips_missing_markdown_file(monkeypatch, tmp_path):
 
     result = r.invoke(cli.app, ["reindex"])
     assert result.exit_code == 0
-    assert "missing file" in result.output  # warning printed
-    assert mem_id not in added_ids          # ChromaDB.add must NOT be called for orphan
+    # v0.4: _read_section catches OSError and returns "" → "empty section" warning
+    assert "skipping" in result.output     # warning printed
+    assert not added_ids                   # ChromaDB.add must NOT be called for orphan
 
 
-def test_reindex_force_uses_upsert_not_add(monkeypatch, tmp_path):
-    """reindex --force must call upsert(), not add() — duplicate IDs would error on add."""
+def test_reindex_force_uses_add_on_fresh_collection(monkeypatch, tmp_path):
+    """reindex --force wipes the collection first, then uses add() (not upsert) — no duplicates possible."""
     h, r = _step12_home(monkeypatch, tmp_path)
 
     calls = {"add": 0, "upsert": 0}
 
     class FakeColl:
-        metadata = {"embed_model": "nomic-embed-text"}
+        metadata = {"embed_model": "nomic-embed-text", "schema_version": "4"}
         def add(self, **kw): calls["add"] += 1
         def upsert(self, **kw): calls["upsert"] += 1
-        def count(self): return 1
+        def count(self): return 0
         def query(self, **kw): return {"ids": [[]], "metadatas": [[]], "distances": [[]]}
         def delete(self, **kw): pass
 
     monkeypatch.setattr(cli, "_embed", lambda *a, **kw: [0.1])
     monkeypatch.setattr(cli, "_get_chroma", lambda: FakeColl())
 
-    cli._save("already embedded note", "proj")  # needs_embed=0 after save
+    cli._save("already embedded note", "proj")
 
     calls["add"] = calls["upsert"] = 0  # reset after save
     result = r.invoke(cli.app, ["reindex", "--force"])
     assert result.exit_code == 0
-    assert calls["upsert"] == 1   # --force must use upsert
-    assert calls["add"] == 0      # add must NOT be called on --force
+    assert calls["add"] >= 1     # force uses add() on the wiped-then-fresh collection
+    assert calls["upsert"] == 0  # upsert not needed
 
 
 # ── Step 12: RRF correctness ─────────────────────────────────────────────────
@@ -945,3 +1383,153 @@ def test_rrf_fuse_merges_correctly():
     assert len(result) == 4           # union: A B C D, no duplicates
     assert len(set(ids)) == len(ids)  # no duplicate IDs in output
     assert result[0][0] == "B"        # full row tuple preserved, not just ID
+
+
+# ── _search / ask normalization (Step 9) ────────────────────────────────────
+
+def test_search_embeddings_off_returns_8tuples(monkeypatch):
+    monkeypatch.setattr(cli, "_config", lambda: {"embeddings": False})
+    monkeypatch.setattr(cli, "_search_fts", lambda *a, **kw: [("id1","proj","2024","path/x.md","snippet")])
+    result = cli._search("q", None, 5)
+    assert len(result) == 1
+    assert len(result[0]) == 8
+    assert result[0][5] is None and result[0][6] is None and result[0][7] is None
+
+
+def test_search_fts_rows_padded_to_8tuples(monkeypatch):
+    monkeypatch.setattr(cli, "_search_fts", lambda *a, **kw: [("id1","proj","2024","path/x.md","snip")])
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: [0.1])
+    monkeypatch.setattr(cli, "_search_vec", lambda *a, **kw: [])
+    result = cli._search("q", None, 5)
+    assert len(result[0]) == 8
+    assert result[0][5] is None and result[0][6] is None and result[0][7] is None
+
+
+def test_search_shared_id_fts_row_gets_section_fields_from_vec(monkeypatch):
+    # When a note appears in both FTS and vec, the fused row should carry
+    # section_title/char_start/char_end from the vec row (not Nones).
+    fts_row = ("id1", "proj", "2024", "path/x.md", "fts snippet")
+    vec_row = ("id1", "proj", "2024", "path/x.md", 0.9, "Layer 3e", 100, 500)
+    monkeypatch.setattr(cli, "_search_fts", lambda *a, **kw: [fts_row])
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: [0.1])
+    monkeypatch.setattr(cli, "_search_vec", lambda *a, **kw: [vec_row])
+    result = cli._search("q", None, 5)
+    assert len(result) == 1
+    row = result[0]
+    assert row[4] == "fts snippet"     # FTS snippet preserved at [4]
+    assert row[5] == "Layer 3e"        # section_title from vec
+    assert row[6] == 100               # char_start from vec
+    assert row[7] == 500               # char_end from vec
+
+
+def test_search_vec_only_row_excerpt_at_index4(monkeypatch):
+    monkeypatch.setattr(cli, "_search_fts", lambda *a, **kw: [])
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: [0.1])
+    monkeypatch.setattr(cli, "_search_vec", lambda *a, **kw: [("id1","proj","2024","p/x.md",0.42,"Intro",0,50)])
+    monkeypatch.setattr(cli, "_read_body", lambda *a, **kw: "hello world")
+    result = cli._search("q", None, 5)
+    assert isinstance(result[0][4], str)
+    assert result[0][4] == "hello world"
+    assert result[0][5] == "Intro"
+    assert result[0][6] == 0
+    assert result[0][7] == 50
+
+
+def test_search_ollama_unavailable_fallback_returns_8tuples(monkeypatch):
+    monkeypatch.setattr(cli, "_search_fts", lambda *a, **kw: [("id1","proj","2024","p/x.md","snip")])
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    result = cli._search("q", None, 5)
+    assert len(result) == 1
+    assert len(result[0]) == 8
+    assert result[0][5] is None
+
+
+def test_ask_sources_block_appears(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    cli._save("## Intro\n" + "x" * 110, "proj")
+    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: {"response": "mock answer"})
+    r = CliRunner()
+    result = r.invoke(cli.app, ["ask", "Intro", "-p", "proj"])
+    assert "Sources:" in result.output
+
+
+def test_ask_no_sources_suppresses_block(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    cli._save("## Intro\n" + "x" * 110, "proj")
+    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: {"response": "mock answer"})
+    r = CliRunner()
+    result = r.invoke(cli.app, ["ask", "Intro", "-p", "proj", "--no-sources"])
+    assert "Sources:" not in result.output
+
+
+def test_ask_uses_read_section_when_char_offsets_present(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [("id1","proj","2024","p/x.md","snip","Intro",5,50)])
+    monkeypatch.setattr(cli, "_read_section", lambda path, cs, ce: calls.append((path, cs, ce)) or "section text here")
+    captured = []
+    def fake_post(url, payload, **kw):
+        captured.append(payload)
+        return {"response": "x"}
+    monkeypatch.setattr(cli, "_post_json", fake_post)
+    monkeypatch.setattr(cli, "_require_init", lambda: None)
+    monkeypatch.setattr(cli, "_config", lambda: {})
+    r = CliRunner()
+    r.invoke(cli.app, ["ask", "what is intro"])
+    assert calls
+    assert any("section text here" in str(p) for p in captured)
+
+
+def test_ask_uses_read_body_when_no_char_offsets(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [("id1","proj","2024","p/x.md","snip",None,None,None)])
+    monkeypatch.setattr(cli, "_read_body", lambda path: calls.append(path) or "body text")
+    captured = []
+    def fake_post(url, payload, **kw):
+        captured.append(payload)
+        return {"response": "x"}
+    monkeypatch.setattr(cli, "_post_json", fake_post)
+    monkeypatch.setattr(cli, "_require_init", lambda: None)
+    monkeypatch.setattr(cli, "_config", lambda: {})
+    r = CliRunner()
+    r.invoke(cli.app, ["ask", "what"])
+    assert calls
+    assert any("body text" in str(p) for p in captured)
+
+
+# ── doctor (Step 10) ────────────────────────────────────────────────────────
+
+def test_doctor_chunks_not_notes_in_pending_message(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    cli._save("note one", "proj")
+    cli._save("note two", "proj")
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    result = CliRunner().invoke(cli.app, ["doctor"])
+    assert "chunk(s) not yet embedded" in result.output
+    assert "note(s) not yet embedded" not in result.output
+
+
+def test_doctor_schema_version_shown_when_chroma_ok(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    fake_collection = type("C", (), {
+        "count": lambda self: 0,
+        "get": lambda self, **kw: {"ids": []},
+        "query": lambda self, **kw: {"ids": [[]], "metadatas": [[]], "distances": [[]]},
+        "metadata": {"embed_model": "nomic-embed-text", "schema_version": "4"},
+    })()
+    monkeypatch.setattr(cli, "_get_chroma", lambda: fake_collection)
+    result = CliRunner().invoke(cli.app, ["doctor"])
+    assert "schema v4" in result.output
+    assert "nomic-embed-text" in result.output
+
+
+def test_doctor_no_schema_line_when_chroma_raises(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    result = CliRunner().invoke(cli.app, ["doctor"])
+    assert "schema v" not in result.output
+    assert "vector index" not in result.output

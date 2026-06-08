@@ -25,6 +25,10 @@ class OllamaUnavailable(Exception):
     """Raised when Ollama is unreachable or times out."""
 
 
+class CloudError(Exception):
+    """Raised when a cloud provider call fails."""
+
+
 app = typer.Typer(
     help="kage — your local context broker. Your notes, surfaced into your AI, on your machine.",
     add_completion=False,
@@ -364,6 +368,71 @@ def _post_json(url: str, payload: dict, headers: dict | None = None, timeout: in
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
+
+
+DEFAULT_PROVIDERS: dict[str, dict] = {
+    "claude":     {"type": "claude",        "api_key_env": "ANTHROPIC_API_KEY",  "model": "claude-sonnet-4-6"},
+    "openai":     {"type": "openai",        "api_key_env": "OPENAI_API_KEY",     "model": "gpt-4o"},
+    "gemini":     {"type": "gemini",        "api_key_env": "GEMINI_API_KEY",     "model": "gemini-2.0-flash"},
+    "groq":       {"type": "openai-compat", "api_key_env": "GROQ_API_KEY",       "model": "llama-3.3-70b-versatile",
+                   "base_url": "https://api.groq.com/openai", "chat_path": "/v1/chat/completions"},
+    "perplexity": {"type": "openai-compat", "api_key_env": "PERPLEXITY_API_KEY", "model": "llama-3.1-sonar-large-128k-online",
+                   "base_url": "https://api.perplexity.ai",   "chat_path": "/chat/completions"},
+}
+
+
+def _call_cloud(provider_name: str, system: str, user_msg: str, cfg: dict) -> str:
+    """Dispatch to a named cloud provider. Raises CloudError on any failure."""
+    default_pcfg = DEFAULT_PROVIDERS.get(provider_name, {})
+    user_pcfg = cfg.get("providers", {}).get(provider_name, {})
+    if not default_pcfg and not user_pcfg:
+        raise CloudError(
+            f"Unknown provider '{provider_name}'. "
+            f"Add [providers.{provider_name}] to ~/.kage/config.toml"
+        )
+    pcfg = {**default_pcfg, **user_pcfg}
+    key = os.environ.get(pcfg["api_key_env"], "")
+    if not key:
+        raise CloudError(f"{pcfg['api_key_env']} not set (provider: {provider_name})")
+    ptype = pcfg.get("type", "openai-compat")
+    model = pcfg.get("model", "")
+    try:
+        if ptype == "claude":
+            out = _post_json(
+                "https://api.anthropic.com/v1/messages",
+                {"model": model, "max_tokens": 1024, "system": system,
+                 "messages": [{"role": "user", "content": user_msg}]},
+                headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
+            )
+            return out["content"][0]["text"].strip()
+        elif ptype in ("openai", "openai-compat"):
+            base = pcfg.get("base_url", "https://api.openai.com")
+            path = pcfg.get("chat_path", "/v1/chat/completions")
+            out = _post_json(
+                f"{base}{path}",
+                {"model": model, "max_tokens": 1024,
+                 "messages": [{"role": "system", "content": system},
+                               {"role": "user", "content": user_msg}]},
+                headers={"Authorization": f"Bearer {key}"},
+            )
+            return out["choices"][0]["message"]["content"].strip()
+        elif ptype == "gemini":
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta"
+                f"/models/{model}:generateContent?key={key}"
+            )
+            out = _post_json(url, {
+                "systemInstruction": {"parts": [{"text": system}]},
+                "contents": [{"parts": [{"text": user_msg}]}],
+            })
+            candidates = out.get("candidates") or []
+            if not candidates or "content" not in candidates[0]:
+                raise CloudError(f"Gemini returned no content (provider: {provider_name})")
+            return candidates[0]["content"]["parts"][0]["text"].strip()
+        else:
+            raise CloudError(f"Unknown provider type '{ptype}'")
+    except (urllib.error.URLError, KeyError, IndexError, TimeoutError) as exc:
+        raise CloudError(f"Provider '{provider_name}' request failed: {exc}") from exc
 
 
 def _rrf_fuse(fts_rows: list, vec_rows: list, k: int = 60) -> list:
@@ -774,12 +843,13 @@ def recall(
 def ask(
     question: str = typer.Argument(..., help="Your question."),
     project: str = typer.Option(None, "--project", "-p", help="Limit context to a project."),
-    cloud: bool = typer.Option(False, "--cloud", help="Use Claude (Anthropic) instead of the local model."),
+    cloud: bool = typer.Option(False, "--cloud", help="Use a cloud provider instead of the local model."),
+    provider: str = typer.Option(None, "--provider", help="Cloud provider name (e.g. openai, groq, gemini). Overrides config cloud_provider."),
     think: bool = typer.Option(False, "--think", help="Let the local model reason first (slower, deeper)."),
     limit: int = typer.Option(5, "--limit", "-n", help="How many notes to pull as context."),
     no_sources: bool = typer.Option(False, "--no-sources", help="Suppress the Sources block."),
 ) -> None:
-    """Answer a question using your recalled notes — local model by default, --cloud for Claude."""
+    """Answer a question using your recalled notes — local model by default, --cloud to use a cloud provider."""
     _require_init()
 
     rows = _search(question, project, limit, any_terms=True)
@@ -810,26 +880,21 @@ def ask(
     thinking = ""
 
     if cloud:
-        key = os.environ.get("ANTHROPIC_API_KEY")
-        if not key:
-            typer.echo("--cloud needs ANTHROPIC_API_KEY in your environment.", err=True)
-            raise typer.Exit(code=1)
-        model = cfg.get("cloud_model", "claude-sonnet-4-6")
-        typer.echo(f"· asking {model} ({len(rows)} note(s) as context)…\n")
+        provider_name = provider or cfg.get("cloud_provider", "claude")
+        default_pcfg = DEFAULT_PROVIDERS.get(provider_name, {})
+        user_pcfg = cfg.get("providers", {}).get(provider_name, {})
+        pcfg = {**default_pcfg, **user_pcfg}
+        model = pcfg.get("model", provider_name)
+        typer.echo(f"· asking {model} via {provider_name} ({len(rows)} note(s) as context)…\n")
         try:
-            out = _post_json(
-                "https://api.anthropic.com/v1/messages",
-                {
-                    "model": model,
-                    "max_tokens": 1024,
-                    "system": system,
-                    "messages": [{"role": "user", "content": f"CONTEXT:\n{context}\n\nQUESTION: {question}"}],
-                },
-                headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
+            answer = _call_cloud(
+                provider_name,
+                system,
+                f"CONTEXT:\n{context}\n\nQUESTION: {question}",
+                cfg,
             )
-            answer = out["content"][0]["text"].strip()
-        except (urllib.error.URLError, KeyError, IndexError, TimeoutError) as e:
-            typer.echo(f"Cloud request failed: {e}", err=True)
+        except CloudError as e:
+            typer.echo(str(e), err=True)
             raise typer.Exit(code=1)
     else:
         model = cfg.get("model", "qwen3:14b")
@@ -936,7 +1001,12 @@ def status() -> None:
         typer.echo(f"             {c:>4}  {p}")
     typer.echo(f"  index    {_disp(DB_PATH)}   ({db_kb:.0f} KB)")
     _cfg = _config()
-    typer.echo(f"  model    {_cfg.get('model', 'qwen3:14b')} local · {_cfg.get('cloud_model', 'claude-sonnet-4-6')} via --cloud")
+    provider_name = _cfg.get("cloud_provider", "claude")
+    _default_pcfg = DEFAULT_PROVIDERS.get(provider_name, {})
+    _user_pcfg = _cfg.get("providers", {}).get(provider_name, {})
+    _pcfg = {**_default_pcfg, **_user_pcfg}
+    cloud_model = _pcfg.get("model", provider_name)
+    typer.echo(f"  model    {_cfg.get('model', 'qwen3:14b')} local · {cloud_model} via {provider_name} (--cloud)")
     free_gb = shutil.disk_usage(KAGE_HOME).free / 1e9
     typer.echo(f"  disk     {free_gb:.0f} GB free")
     typer.echo("  ✓ everything local — nothing has left this Mac\n")
@@ -1021,6 +1091,23 @@ def doctor() -> None:
     typer.echo(f"  {'✓' if ok_ollama else '⚠'} local model: {detail}")
     if not ok_ollama:
         typer.echo(f"      → for `kage ask`: start Ollama (`ollama serve`) + `ollama pull {model}`")
+
+    # Advisory — cloud provider key status
+    user_providers = cfg.get("providers", {})
+    all_provider_names = list(DEFAULT_PROVIDERS.keys())
+    for name in user_providers:
+        if name not in all_provider_names:
+            all_provider_names.append(name)
+    typer.echo("\n  Cloud providers:")
+    for name in all_provider_names:
+        default_pcfg = DEFAULT_PROVIDERS.get(name, {})
+        user_pcfg = user_providers.get(name, {})
+        pcfg = {**default_pcfg, **user_pcfg}
+        env_var = pcfg.get("api_key_env", "")
+        key_set = bool(os.environ.get(env_var, ""))
+        mark = "✓" if key_set else "·"
+        status_word = "set" if key_set else "not set"
+        typer.echo(f"    {mark} {name:<12}  {env_var:<24}  {status_word}")
 
     if all_ok:
         typer.echo("\n✓ kage looks healthy.\n")

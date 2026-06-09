@@ -12,7 +12,7 @@
 
 ## Current focus
 
-**🔵 Discovery / planning** — we are here. No code yet. Refining what kage is, what to build, in what order.
+**Historical Session-1 state:** discovery / planning. This line is preserved for archive context; it is no longer current. Current implementation state lives in `README.md`, `CLAUDE.md`, and `src/kage/cli.py`.
 
 ---
 
@@ -116,4 +116,3 @@ graph TB
 ## Next session resume point
 
 > **Continue widening dimension 6 (learning model).** Then dimensions 7-9. Then collapse everything into a Discovery Doc and write Cycle 1 pitch.
-

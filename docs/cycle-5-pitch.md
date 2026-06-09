@@ -1,6 +1,32 @@
 # Cycle 5 Pitch — Multi-Provider Cloud (v0.5)
 
 *Written: 2026-06-08*
+*Status: IMPLEMENTED / CLOSED — 2026-06-09.*
+
+---
+
+## Closeout
+
+Cycle 5 is complete in the repository.
+
+**Shipped:**
+- `CloudError`, `DEFAULT_PROVIDERS`, and `_call_cloud()`
+- `kage ask --cloud --provider <name>`
+- config default through `cloud_provider`
+- built-in providers: `claude`, `openai`, `gemini`, `groq`, `perplexity`
+- user provider overrides from `~/.kage/config.json`
+- provider key visibility in `kage doctor`
+- local/cloud model line in `kage status`
+- tests for provider URL shape, auth headers, missing keys, Gemini safety blocks, config overrides, ask routing, doctor output, and status output
+
+**Verified:**
+- Full automated suite passes: `117 passed`
+- Provider behavior is tested with mocked HTTP calls.
+
+**Not yet manually verified:**
+- Live API calls with real OpenAI/Groq/Gemini/Anthropic/Perplexity keys.
+
+Live provider smoke tests should use an isolated temporary `KAGE_HOME` with dummy notes only. Do not test live providers against the real personal memory store unless the goal is explicitly to send that context to that provider.
 
 ---
 
@@ -32,38 +58,41 @@ Four types. That's the complete set. Adding a new OpenAI-compatible service
 
 ### Layer 2 — Named provider profiles (in config, unlimited)
 
-Users define named profiles in `~/.kage/config.toml`. Any number. Mix types, models, keys.
+Users define named profiles in `~/.kage/config.json`. Any number. Mix types, models, keys.
 
-```toml
-# Active default when --cloud is used without --provider
-cloud_provider = "claude"
-
-[providers.claude]
-type        = "claude"
-api_key_env = "ANTHROPIC_API_KEY"
-model       = "claude-sonnet-4-6"
-
-[providers.openai]
-type        = "openai"
-api_key_env = "OPENAI_API_KEY"
-model       = "gpt-4o"
-
-[providers.gemini]
-type        = "gemini"
-api_key_env = "GEMINI_API_KEY"
-model       = "gemini-2.0-flash"
-
-[providers.groq]
-type        = "openai-compat"
-base_url    = "https://api.groq.com/openai"
-api_key_env = "GROQ_API_KEY"
-model       = "llama-3.3-70b-versatile"
-
-[providers.perplexity]
-type        = "openai-compat"
-base_url    = "https://api.perplexity.ai"
-api_key_env = "PERPLEXITY_API_KEY"
-model       = "llama-3.1-sonar-large-128k-online"
+```json
+{
+  "cloud_provider": "claude",
+  "providers": {
+    "claude": {
+      "type": "claude",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "model": "claude-sonnet-4-6"
+    },
+    "openai": {
+      "type": "openai",
+      "api_key_env": "OPENAI_API_KEY",
+      "model": "gpt-4o"
+    },
+    "gemini": {
+      "type": "gemini",
+      "api_key_env": "GEMINI_API_KEY",
+      "model": "gemini-2.0-flash"
+    },
+    "groq": {
+      "type": "openai-compat",
+      "base_url": "https://api.groq.com/openai",
+      "api_key_env": "GROQ_API_KEY",
+      "model": "llama-3.3-70b-versatile"
+    },
+    "perplexity": {
+      "type": "openai-compat",
+      "base_url": "https://api.perplexity.ai",
+      "api_key_env": "PERPLEXITY_API_KEY",
+      "model": "llama-3.1-sonar-large-128k-online"
+    }
+  }
+}
 ```
 
 **Adding a new provider = add a config block. Zero code.**
@@ -80,7 +109,7 @@ common providers — just set the env var. User config blocks override/extend th
 ## Manual Switching Interface
 
 ```
-# Use config default (cloud_provider in config.toml)
+# Use config default (cloud_provider in config.json)
 kage ask "what is Layer 3e?" --cloud
 
 # Override on the fly
@@ -88,7 +117,7 @@ kage ask "what is Layer 3e?" --cloud --provider openai
 kage ask "what is Layer 3e?" --cloud --provider groq
 kage ask "what is Layer 3e?" --cloud --provider my-custom-endpoint
 
-# Change default persistently → edit cloud_provider in config.toml
+# Change default persistently → edit cloud_provider in config.json
 ```
 
 ---
@@ -124,7 +153,7 @@ def _call_cloud(provider_name: str, system: str, user_msg: str, cfg: dict) -> st
     user_pcfg = cfg.get("providers", {}).get(provider_name, {})
     if not default_pcfg and not user_pcfg:
         raise CloudError(f"Unknown provider '{provider_name}'. "
-                         f"Add [providers.{provider_name}] to ~/.kage/config.toml")
+                         f"Add providers.{provider_name} to ~/.kage/config.json")
     pcfg = {**default_pcfg, **user_pcfg}
     key = os.environ.get(pcfg["api_key_env"], "")
     if not key:

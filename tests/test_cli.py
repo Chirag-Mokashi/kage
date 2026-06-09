@@ -1748,3 +1748,852 @@ def test_status_cloud_model_user_model_override(monkeypatch, tmp_path):
     (h / "config.json").write_text('{"cloud_provider": "openai", "providers": {"openai": {"model": "gpt-4o-mini"}}}')
     r = CliRunner().invoke(cli.app, ["status"])
     assert "gpt-4o-mini via openai" in r.output
+
+
+# ── MCP server (Cycle 6) ──────────────────────────────────────────────────────
+
+mcp_server = pytest.importorskip("kage.mcp_server", reason="mcp[cli] not installed")
+
+
+def _mcp_home(monkeypatch, tmp_path):
+    """Isolated in-process kage home for MCP tool tests."""
+    h = tmp_path / ".kage"
+    for attr, val in {
+        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+    }.items():
+        monkeypatch.setattr(cli, attr, val)
+    CliRunner().invoke(cli.app, ["init"])
+    return h
+
+
+def test_mcp_recall_returns_list(monkeypatch, tmp_path):
+    _mcp_home(monkeypatch, tmp_path)
+    cli._save("the eiffel tower is in paris", "test", embed=False)
+    results = mcp_server.kage_recall("eiffel")
+    assert isinstance(results, list)
+    assert len(results) >= 1
+    assert results[0]["id"]
+    assert "excerpt" in results[0]
+
+
+def test_mcp_recall_partition_filter(monkeypatch, tmp_path):
+    _mcp_home(monkeypatch, tmp_path)
+    cli._save("alpha shared word", "projA", embed=False)
+    cli._save("beta shared word", "projB", embed=False)
+
+    a = mcp_server.kage_recall("shared", project="projA")
+    assert len(a) >= 1
+    assert all(r["project"] == "projA" for r in a)
+    assert not any(r["project"] == "projB" for r in a)
+
+    b = mcp_server.kage_recall("shared", project="projB")
+    assert len(b) >= 1
+    assert all(r["project"] == "projB" for r in b)
+    assert not any(r["project"] == "projA" for r in b)
+
+
+def test_mcp_recall_no_project_returns_all(monkeypatch, tmp_path):
+    _mcp_home(monkeypatch, tmp_path)
+    cli._save("alpha shared word", "projA", embed=False)
+    cli._save("beta shared word", "projB", embed=False)
+    results = mcp_server.kage_recall("shared", project=None)
+    projects = {r["project"] for r in results}
+    assert "projA" in projects
+    assert "projB" in projects
+
+
+def test_mcp_remember_write_gate_off_by_default(monkeypatch, tmp_path):
+    _mcp_home(monkeypatch, tmp_path)
+    result = mcp_server.kage_remember("test note")
+    assert result["saved"] is False
+    assert "writes disabled" in result["reason"]
+    assert result["id"] is None
+
+
+def test_mcp_remember_write_gate_on(monkeypatch, tmp_path):
+    import json as _j
+    h = _mcp_home(monkeypatch, tmp_path)
+    cfg = _j.loads((h / "config.json").read_text())
+    cfg["mcp_allow_writes"] = True
+    (h / "config.json").write_text(_j.dumps(cfg, indent=2))
+
+    result = mcp_server.kage_remember("MCP saved note", project="test")
+    assert result["saved"] is True
+    assert result["id"]
+    assert result["reason"] == "saved"
+
+
+def test_mcp_ask_local_returns_answer(monkeypatch, tmp_path):
+    _mcp_home(monkeypatch, tmp_path)
+    cli._save("the eiffel tower is in paris", "test", embed=False)
+
+    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: {"response": "Paris."})
+
+    result = mcp_server.kage_ask("where is the eiffel tower")
+    assert result["answer"] == "Paris."
+    assert isinstance(result["sources"], list)
+    assert result["provider"].startswith("local:")
+
+
+def test_mcp_ask_with_provider(monkeypatch, tmp_path):
+    _mcp_home(monkeypatch, tmp_path)
+    cli._save("dogs are mammals", "test", embed=False)
+
+    monkeypatch.setattr(cli, "_call_cloud", lambda name, sys, msg, cfg: "Yes, dogs are mammals.")
+
+    result = mcp_server.kage_ask("are dogs mammals", provider="claude")
+    assert result["answer"] == "Yes, dogs are mammals."
+    assert result["provider"] == "claude"
+
+
+def test_mcp_ask_cloud_error_returns_error_message(monkeypatch, tmp_path):
+    _mcp_home(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: (_ for _ in ()).throw(cli.CloudError("bad key")))
+
+    result = mcp_server.kage_ask("q", provider="openai")
+    assert "bad key" in result["answer"]
+    assert result["sources"] == []
+
+
+def test_mcp_status_correct_count_and_projects(monkeypatch, tmp_path):
+    _mcp_home(monkeypatch, tmp_path)
+    cli._save("note one", "projA", embed=False)
+    cli._save("note two", "projA", embed=False)
+    cli._save("note three", "projB", embed=False)
+
+    result = mcp_server.kage_status()
+    assert result["memory_count"] == 3
+    assert "projA" in result["projects"]
+    assert "projB" in result["projects"]
+    assert "model" in result
+    assert result["disk_free"].endswith("GB")
+
+
+def test_mcp_status_empty_store(monkeypatch, tmp_path):
+    _mcp_home(monkeypatch, tmp_path)
+    result = mcp_server.kage_status()
+    assert result["memory_count"] == 0
+    assert result["projects"] == []
+
+
+def test_doctor_shows_mcp_check(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert "✓ MCP server (mcp[cli])" in r.output
+
+
+def test_mcp_remember_write_gate_on_persists_to_disk(monkeypatch, tmp_path):
+    import json as _j, sqlite3 as _sq
+    h = _mcp_home(monkeypatch, tmp_path)
+    cfg = _j.loads((h / "config.json").read_text())
+    cfg["mcp_allow_writes"] = True
+    (h / "config.json").write_text(_j.dumps(cfg, indent=2))
+
+    result = mcp_server.kage_remember("MCP persisted note", project="mcp-test")
+    assert result["saved"] is True
+    mem_id = result["id"]
+
+    assert (h / "memory" / f"{mem_id}.md").exists()
+    conn = _sq.connect(h / "indexes" / "kage.db")
+    row = conn.execute("SELECT project FROM memories WHERE id=?", (mem_id,)).fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] == "mcp-test"
+
+
+def test_mcp_ask_uses_read_section_when_char_offsets_present(monkeypatch, tmp_path):
+    _mcp_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [
+        ("id1", "proj", "2024", "memory/n.md", "snip", "Intro", 5, 50)
+    ])
+    read_calls = []
+    monkeypatch.setattr(cli, "_read_section",
+                        lambda path, cs, ce: read_calls.append((path, cs, ce)) or "section text")
+    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: {"response": "answer"})
+
+    result = mcp_server.kage_ask("what is intro")
+    assert read_calls                     # _read_section was called (line 63)
+    assert result["answer"] == "answer"
+    assert "id1" in result["sources"]
+
+
+def test_mcp_ask_handles_missing_markdown_gracefully(monkeypatch, tmp_path):
+    _mcp_home(monkeypatch, tmp_path)
+    # Search returns a hit with no char offsets; the markdown file doesn't exist
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [
+        ("id1", "proj", "2024", "memory/gone.md", "snip", None, None, None)
+    ])
+    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: {"response": "fallback answer"})
+
+    result = mcp_server.kage_ask("q")      # _read_body raises OSError → text = "" → no source
+    assert result["answer"] == "fallback answer"
+    assert result["sources"] == []        # OSError path (lines 67-68) — no source added
+
+
+def test_mcp_ask_local_unavailable_returns_error_dict(monkeypatch, tmp_path):
+    _mcp_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+
+    import urllib.error
+    monkeypatch.setattr(cli, "_post_json",
+                        lambda *a, **kw: (_ for _ in ()).throw(urllib.error.URLError("down")))
+
+    result = mcp_server.kage_ask("q")     # local Ollama down — lines 100-101
+    assert result["answer"].startswith("Local model unavailable:")
+    assert result["sources"] == []
+    assert result["provider"] == "local"
+
+
+# ── Coverage gap fill: cli.py 82% → 100% ────────────────────────────────────
+
+# ── init edge cases ──────────────────────────────────────────────────────────
+
+def test_init_rerun_shows_config_existed(monkeypatch, tmp_path):
+    """Line 101: re-running init on an existing store must mark config as 'exists'."""
+    h = tmp_path / ".kage"
+    for attr, val in {
+        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+    }.items():
+        monkeypatch.setattr(cli, attr, val)
+    r = CliRunner()
+    r.invoke(cli.app, ["init"])          # first run — creates everything
+    result = r.invoke(cli.app, ["init"]) # second run — config already exists
+    assert result.exit_code == 0
+    assert "exists" in result.output     # CONFIG_PATH was appended to existed list
+
+
+def test_init_migration_adds_needs_embed_in_process(monkeypatch, tmp_path):
+    """Line 126: conn.commit() after ALTER TABLE must be called when migration succeeds."""
+    h = tmp_path / ".kage"
+    (h / "indexes").mkdir(parents=True)
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    conn.executescript("""
+        CREATE TABLE memories (
+            id TEXT PRIMARY KEY, content_path TEXT NOT NULL,
+            project TEXT, created_at TEXT NOT NULL
+        );
+        CREATE VIRTUAL TABLE memory_fts USING fts5(id UNINDEXED, body);
+    """)
+    conn.close()
+    for attr, val in {
+        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+    }.items():
+        monkeypatch.setattr(cli, attr, val)
+    result = CliRunner().invoke(cli.app, ["init"])
+    assert result.exit_code == 0
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(memories)")]
+    conn.close()
+    assert "needs_embed" in cols
+
+
+# ── _require_init ─────────────────────────────────────────────────────────────
+
+def test_require_init_exits_when_db_missing(monkeypatch, tmp_path):
+    """Lines 148-149: any command must exit 1 with 'kage init' hint if DB doesn't exist."""
+    h = tmp_path / "empty"
+    for attr, val in {
+        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+    }.items():
+        monkeypatch.setattr(cli, attr, val)
+    r = CliRunner().invoke(cli.app, ["status"])
+    assert r.exit_code == 1
+    assert "kage init" in r.output
+
+
+# ── _search_fts ───────────────────────────────────────────────────────────────
+
+def test_search_fts_returns_empty_for_blank_query():
+    """Line 291: _search_fts with no real terms must return [] without touching the DB."""
+    assert cli._search_fts("", None, 5) == []
+    assert cli._search_fts("   ", None, 5) == []
+
+
+# ── _config ───────────────────────────────────────────────────────────────────
+
+def test_config_returns_empty_dict_when_file_missing(monkeypatch, tmp_path):
+    """Lines 361-362: _config must return {} when CONFIG_PATH doesn't exist."""
+    monkeypatch.setattr(cli, "CONFIG_PATH", tmp_path / "nonexistent.json")
+    assert cli._config() == {}
+
+
+def test_config_returns_empty_dict_on_invalid_json(monkeypatch, tmp_path):
+    """Lines 361-362: _config must return {} on JSON parse error."""
+    bad = tmp_path / "bad.json"
+    bad.write_text("not json {{{")
+    monkeypatch.setattr(cli, "CONFIG_PATH", bad)
+    assert cli._config() == {}
+
+
+# ── _call_cloud unknown type ───────────────────────────────────────────────────
+
+def test_call_cloud_unknown_provider_type_raises(monkeypatch):
+    """Line 436: user-defined provider with an unknown 'type' must raise CloudError."""
+    monkeypatch.setenv("CUSTOM_KEY", "x")
+    cfg = {"providers": {"custom": {"type": "magic-type", "api_key_env": "CUSTOM_KEY", "model": "m"}}}
+    with pytest.raises(cli.CloudError, match="Unknown provider type"):
+        cli._call_cloud("custom", "sys", "msg", cfg)
+
+
+# ── _embed HTTP errors ────────────────────────────────────────────────────────
+
+def test_embed_raises_on_http_400(monkeypatch):
+    """Lines 466-467: HTTP 400 from embed endpoint must raise OllamaUnavailable with 'HTTP 400'."""
+    import urllib.error as _ue
+    err = _ue.HTTPError(url="http://x", code=400, msg="Bad Request", hdrs={}, fp=None)
+    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: (_ for _ in ()).throw(err))
+    with pytest.raises(cli.OllamaUnavailable, match="HTTP 400"):
+        cli._embed("test")
+
+
+def test_embed_raises_on_non_400_http_error(monkeypatch):
+    """Line 468: non-400 HTTPError must re-raise as OllamaUnavailable."""
+    import urllib.error as _ue
+    err = _ue.HTTPError(url="http://x", code=500, msg="Server Error", hdrs={}, fp=None)
+    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: (_ for _ in ()).throw(err))
+    with pytest.raises(cli.OllamaUnavailable):
+        cli._embed("test")
+
+
+# ── _ollama_status ────────────────────────────────────────────────────────────
+
+def test_ollama_status_unreachable(monkeypatch):
+    """Lines 549-550: URLError must return (False, 'Ollama not reachable')."""
+    import urllib.request as _req, urllib.error as _ue
+    monkeypatch.setattr(_req, "urlopen", lambda *a, **kw: (_ for _ in ()).throw(_ue.URLError("refused")))
+    ok, msg = cli._ollama_status({}, "qwen3:14b")
+    assert ok is False
+    assert "not reachable" in msg
+
+
+def test_ollama_status_model_not_pulled(monkeypatch):
+    """Line 553: Ollama reachable but model absent must return (False, '...not pulled')."""
+    import urllib.request as _req, json as _j
+
+    class _FakeResp:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def read(self): return _j.dumps({"models": [{"name": "other:latest"}]}).encode()
+
+    monkeypatch.setattr(_req, "urlopen", lambda *a, **kw: _FakeResp())
+    ok, msg = cli._ollama_status({}, "qwen3:14b")
+    assert ok is False
+    assert "not pulled" in msg
+
+
+# ── remember: decline confirm ─────────────────────────────────────────────────
+
+def test_remember_decline_confirm_discards_note(monkeypatch, tmp_path):
+    """Lines 569-570: declining the confirm prompt must print 'Discarded' and save nothing."""
+    h = _save_home(monkeypatch, tmp_path)
+    r = CliRunner().invoke(cli.app, ["remember", "secret note", "-p", "x"], input="n\n")
+    assert "Discarded" in r.output
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    count = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+    conn.close()
+    assert count == 0
+
+
+# ── import_ edge cases ────────────────────────────────────────────────────────
+
+def test_import_non_folder_exits_1(monkeypatch, tmp_path):
+    """Lines 587-588: import_ on a regular file must exit 1 with 'Not a folder'."""
+    _save_home(monkeypatch, tmp_path)
+    f = tmp_path / "file.txt"
+    f.write_text("hello")
+    r = CliRunner().invoke(cli.app, ["import", str(f)])
+    assert r.exit_code == 1
+    assert "Not a folder" in r.output
+
+
+def test_import_dry_run_lists_files_writes_nothing(monkeypatch, tmp_path):
+    """Lines 596-600: --dry-run must list files but write nothing to the store."""
+    h = _save_home(monkeypatch, tmp_path)
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "a.md").write_text("note a content")
+    (notes / "b.md").write_text("note b content")
+    r = CliRunner().invoke(cli.app, ["import", str(notes), "--dry-run"])
+    assert r.exit_code == 0
+    assert "Dry run" in r.output
+    assert "no changes made" in r.output
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    count = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+    conn.close()
+    assert count == 0
+
+
+def test_import_empty_folder_exits_cleanly(monkeypatch, tmp_path):
+    """Lines 603-604: import_ with no .md/.txt files must report 'No .md/.txt files' and exit 0."""
+    _save_home(monkeypatch, tmp_path)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    r = CliRunner().invoke(cli.app, ["import", str(empty)])
+    assert r.exit_code == 0
+    assert "No .md/.txt files" in r.output
+
+
+def test_import_skips_blank_files(monkeypatch, tmp_path):
+    """Line 610: import_ must skip files whose body is only whitespace."""
+    h = _save_home(monkeypatch, tmp_path)
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "blank.md").write_text("   \n   ")
+    (notes / "real.md").write_text("actual content here")
+    r = CliRunner().invoke(cli.app, ["import", str(notes)])
+    assert r.exit_code == 0
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    count = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+    conn.close()
+    assert count == 1  # blank file skipped
+
+
+# ── reindex --force edge cases ────────────────────────────────────────────────
+
+def _fake_force_coll():
+    """Minimal fake ChromaDB collection for reindex --force tests."""
+    return type("C", (), {
+        "add": lambda self, **kw: None,
+        "count": lambda self: 0,
+        "query": lambda self, **kw: {"ids": [[]], "metadatas": [[]], "distances": [[]]},
+        "metadata": {"embed_model": "nomic-embed-text", "schema_version": "4"},
+        "delete": lambda self, **kw: None,
+    })()
+
+
+def test_reindex_force_empty_db_reports_nothing(monkeypatch, tmp_path):
+    """Lines 645-646: reindex --force on empty DB must print 'nothing to reindex' and exit 0."""
+    _, r = _reindex_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_get_chroma", lambda: _fake_force_coll())
+    result = r.invoke(cli.app, ["reindex", "--force"])
+    assert result.exit_code == 0
+    assert "nothing to reindex" in result.output
+
+
+def test_reindex_force_ollama_down_exits_1(monkeypatch, tmp_path):
+    """Lines 650-652: reindex --force must exit 1 when _get_chroma raises OllamaUnavailable."""
+    h, r = _reindex_home(monkeypatch, tmp_path)
+    cli._save("a note", "proj", embed=False)
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    result = r.invoke(cli.app, ["reindex", "--force"])
+    assert result.exit_code == 1
+    assert "ollama serve" in result.output
+
+
+def test_reindex_force_skips_missing_markdown(monkeypatch, tmp_path):
+    """Lines 658-660: reindex --force must warn and skip a note whose markdown file is gone."""
+    h, r = _reindex_home(monkeypatch, tmp_path)
+    added = []
+    fake_coll = type("C", (), {
+        "add": lambda self, **kw: added.extend(kw["ids"]),
+        "count": lambda self: 0,
+        "query": lambda self, **kw: {"ids": [[]], "metadatas": [[]], "distances": [[]]},
+        "metadata": {"embed_model": "nomic-embed-text", "schema_version": "4"},
+        "delete": lambda self, **kw: None,
+    })()
+    monkeypatch.setattr(cli, "_get_chroma", lambda: fake_coll)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: [0.1])
+    mem_id = cli._save("orphaned note", "proj", embed=False)
+    (h / "memory" / f"{mem_id}.md").unlink()   # delete the markdown behind kage's back
+    result = r.invoke(cli.app, ["reindex", "--force"])
+    assert result.exit_code == 0
+    assert "skipping" in result.output
+    assert not added   # nothing embedded — the orphaned note was skipped
+
+
+def test_reindex_force_chunk_insert_failure_propagates(monkeypatch, tmp_path):
+    """Lines 674-676: reindex --force must rollback and re-raise if chunk INSERT fails."""
+    h, r = _reindex_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_get_chroma", lambda: _fake_force_coll())
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: [0.1])
+    # Save the note FIRST (with valid _chunk_note), then patch to return NULL char_start.
+    # NULL char_start violates NOT NULL → INSERT raises sqlite3.IntegrityError during reindex.
+    cli._save("a note", "proj", embed=False)
+    monkeypatch.setattr(cli, "_chunk_note", lambda body: [{"title": "", "char_start": None, "char_end": None}])
+    result = r.invoke(cli.app, ["reindex", "--force"])
+    # The exception propagates out of the command — CliRunner captures it
+    assert result.exit_code != 0 or result.exception is not None
+
+
+def test_reindex_force_embed_raises_exits_1(monkeypatch, tmp_path):
+    """Lines 684-686: reindex --force must exit 1 when _embed raises OllamaUnavailable."""
+    h, r = _reindex_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_get_chroma", lambda: _fake_force_coll())
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    cli._save("a note", "proj", embed=False)
+    result = r.invoke(cli.app, ["reindex", "--force"])
+    assert result.exit_code == 1
+    assert "ollama serve" in result.output
+
+
+# ── reindex non-force: _get_chroma raises ─────────────────────────────────────
+
+def test_reindex_non_force_ollama_down_exits_1(monkeypatch, tmp_path):
+    """Lines 728-730: reindex must exit 1 when _get_chroma raises OllamaUnavailable."""
+    h, r = _reindex_home(monkeypatch, tmp_path)
+    cli._save("a pending note", "proj", embed=False)
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    result = r.invoke(cli.app, ["reindex"])
+    assert result.exit_code == 1
+    assert "ollama serve" in result.output
+
+
+# ── list_ command ─────────────────────────────────────────────────────────────
+
+def test_list_empty_store_shows_nothing_saved(monkeypatch, tmp_path):
+    """Lines 789-792: list_ on an empty store must print 'Nothing saved yet'."""
+    _save_home(monkeypatch, tmp_path)
+    r = CliRunner().invoke(cli.app, ["list"])
+    assert r.exit_code == 0
+    assert "Nothing saved yet" in r.output
+
+
+def test_list_shows_notes_with_preview(monkeypatch, tmp_path):
+    """Lines 795-801: list_ must show each note's preview, project, and ID."""
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    cli._save("the quick brown fox", "myproj", embed=False)
+    r = CliRunner().invoke(cli.app, ["list"])
+    assert r.exit_code == 0
+    assert "quick brown fox" in r.output
+    assert "myproj" in r.output
+
+
+def test_list_truncates_long_preview(monkeypatch, tmp_path):
+    """Lines 798-799: list_ must truncate previews longer than 70 chars with '…'."""
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    cli._save("x" * 100, "proj", embed=False)
+    r = CliRunner().invoke(cli.app, ["list"])
+    assert "…" in r.output
+
+
+def test_list_with_project_filter(monkeypatch, tmp_path):
+    """list_ -p must only show notes from that project."""
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    cli._save("alpha content", "projA", embed=False)
+    cli._save("beta content", "projB", embed=False)
+    r = CliRunner().invoke(cli.app, ["list", "-p", "projA"])
+    assert r.exit_code == 0
+    assert "alpha" in r.output
+    assert "beta" not in r.output
+
+
+def test_list_project_filter_no_results(monkeypatch, tmp_path):
+    """Line 790: list_ -p with no matching notes must include the project name in the message."""
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    cli._save("something", "other", embed=False)
+    r = CliRunner().invoke(cli.app, ["list", "-p", "missing-proj"])
+    assert r.exit_code == 0
+    assert "Nothing saved yet" in r.output
+    assert "missing-proj" in r.output
+
+
+# ── recall command ────────────────────────────────────────────────────────────
+
+def test_recall_empty_query_exits_1(monkeypatch, tmp_path):
+    """Lines 815-816: recall with a blank query must exit 1 with 'Empty query'."""
+    _save_home(monkeypatch, tmp_path)
+    r = CliRunner().invoke(cli.app, ["recall", ""])
+    assert r.exit_code == 1
+    assert "Empty query" in r.output
+
+
+def test_recall_no_matches(monkeypatch, tmp_path):
+    """Lines 819-821: recall with no results must print 'No matches' and exit 0."""
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    r = CliRunner().invoke(cli.app, ["recall", "xyz"])
+    assert r.exit_code == 0
+    assert "No matches" in r.output
+
+
+def test_recall_shows_matched_results(monkeypatch, tmp_path):
+    """Lines 839-842: recall with results must print snippet, project, and ID."""
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [
+        ("id1", "projA", "2026-01-01T00:00:00", "memory/id1.md", "quick brown fox", None, None, None)
+    ])
+    r = CliRunner().invoke(cli.app, ["recall", "fox"])
+    assert r.exit_code == 0
+    assert "quick brown fox" in r.output
+    assert "projA" in r.output
+
+
+def test_recall_pipe_sends_to_clipboard(monkeypatch, tmp_path):
+    """Lines 823-834: recall --pipe must format notes and call pbcopy."""
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    cli._save("clipboard test content", "proj", embed=False)
+
+    pbcopy_input = []
+
+    def fake_run(cmd, input=None, check=False):
+        pbcopy_input.append(input)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    r = CliRunner().invoke(cli.app, ["recall", "clipboard test", "--pipe"])
+    assert r.exit_code == 0
+    assert pbcopy_input
+    assert b"clipboard test content" in pbcopy_input[0]
+
+
+def test_recall_pipe_fallback_when_pbcopy_absent(monkeypatch, tmp_path):
+    """Lines 835-836: recall --pipe must print payload to stdout if pbcopy is not found."""
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    cli._save("fallback pipe content", "proj", embed=False)
+
+    def fake_run(cmd, input=None, check=False):
+        raise FileNotFoundError("pbcopy not found")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    r = CliRunner().invoke(cli.app, ["recall", "fallback pipe", "--pipe"])
+    assert "fallback pipe content" in r.output
+
+
+# ── ask edge cases ────────────────────────────────────────────────────────────
+
+def test_ask_handles_missing_markdown_in_context_build(monkeypatch, tmp_path):
+    """Lines 868-869: ask must silently skip a note whose markdown file can't be read (OSError)."""
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [
+        ("id1", "proj", "2026", "memory/gone.md", "snip", None, None, None)
+    ])
+    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: {"response": "the answer"})
+    r = CliRunner().invoke(cli.app, ["ask", "q"])
+    assert r.exit_code == 0
+    assert "the answer" in r.output  # proceeds with empty context, no crash
+
+
+def test_ask_local_urlerror_exits_1(monkeypatch, tmp_path):
+    """Lines 909-911: ask must exit 1 with a friendly message when the local model is unreachable."""
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    import urllib.error as _ue
+    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: (_ for _ in ()).throw(_ue.URLError("refused")))
+    r = CliRunner().invoke(cli.app, ["ask", "q"])
+    assert r.exit_code == 1
+    assert "ollama" in r.output.lower() or "Ollama" in r.output
+
+
+def test_ask_think_flag_shows_thinking_block(monkeypatch, tmp_path):
+    """Line 916: ask --think must print '[thinking]' block when model returns thinking text."""
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+
+    def fake_post(url, payload, headers=None, timeout=120):
+        return {"response": "the final answer", "thinking": "step by step reasoning here"}
+
+    monkeypatch.setattr(cli, "_post_json", fake_post)
+    r = CliRunner().invoke(cli.app, ["ask", "q", "--think"])
+    assert r.exit_code == 0
+    assert "[thinking]" in r.output
+    assert "step by step reasoning here" in r.output
+
+
+# ── forget edge cases ─────────────────────────────────────────────────────────
+
+def test_forget_no_match_exits_1(monkeypatch, tmp_path):
+    """Lines 942-943: forget with an ID that doesn't exist must exit 1."""
+    _save_home(monkeypatch, tmp_path)
+    r = CliRunner().invoke(cli.app, ["forget", "nonexistent-id-xyz"])
+    assert r.exit_code == 1
+    assert "No note matches" in r.output
+
+
+def test_forget_multiple_matches_exits_1(monkeypatch, tmp_path):
+    """Lines 945-948: forget with a prefix matching multiple notes must exit 1."""
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    cli._save("note one", "proj", embed=False)
+    cli._save("note two", "proj", embed=False)
+    # All IDs start with "202" (year 20xx) — matches both
+    r = CliRunner().invoke(cli.app, ["forget", "202"])
+    assert r.exit_code == 1
+    assert "matches" in r.output
+
+
+def test_forget_decline_confirm_keeps_note(monkeypatch, tmp_path):
+    """Lines 956-957: declining the forget confirm must keep the note intact."""
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    mem_id = cli._save("keep me safe", "proj", embed=False)
+    r = CliRunner().invoke(cli.app, ["forget", mem_id], input="n\n")
+    assert r.exit_code == 0
+    assert "Kept" in r.output
+    # Verify note is still in DB
+    conn = sqlite3.connect(cli.DB_PATH)
+    row = conn.execute("SELECT id FROM memories WHERE id=?", (mem_id,)).fetchone()
+    conn.close()
+    assert row is not None
+
+
+# ── status edge cases ─────────────────────────────────────────────────────────
+
+def test_status_shows_per_project_breakdown(monkeypatch, tmp_path):
+    """Line 1004: status must print per-project rows when notes exist."""
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    cli._save("note in alpha", "alpha", embed=False)
+    cli._save("note in beta", "beta", embed=False)
+    r = CliRunner().invoke(cli.app, ["status"])
+    assert r.exit_code == 0
+    assert "alpha" in r.output
+    assert "beta" in r.output
+
+
+def test_status_shows_question_mark_when_config_unreadable(monkeypatch, tmp_path):
+    """Lines 996-997: status must show '?' for version when config.json has invalid JSON."""
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "config.json").write_text("not valid json {{{")
+    r = CliRunner().invoke(cli.app, ["status"])
+    assert r.exit_code == 0
+    assert "config v?" in r.output
+
+
+# ── doctor edge cases ─────────────────────────────────────────────────────────
+
+def test_doctor_config_unreadable_marks_check_failed(monkeypatch, tmp_path):
+    """Lines 1029-1030: doctor must fail the config check when config.json has bad JSON."""
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "config.json").write_text("not valid json {{{")
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert r.exit_code == 1
+    assert "✗ config.json readable" in r.output
+
+
+def test_doctor_shows_fix_hint_for_failed_check(monkeypatch, tmp_path):
+    """Line 1064: doctor must print '→ fix' text for each failed check."""
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "config.json").write_text("bad json")
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert "→ run: kage init" in r.output
+
+
+def test_doctor_sqlite_error_marks_db_check_failed(monkeypatch, tmp_path):
+    """Lines 1044-1045: doctor must mark db check failed when sqlite3.Error is raised."""
+    import json as _j
+    h = tmp_path / ".kage"
+    h.mkdir()
+    (h / "memory").mkdir()
+    (h / "indexes").mkdir()
+    (h / "indexes" / "kage.db").write_bytes(b"not a sqlite database")  # corrupted DB
+    (h / "config.json").write_text(_j.dumps({"version": "0.1.0"}))
+    for attr, val in {
+        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+    }.items():
+        monkeypatch.setattr(cli, attr, val)
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert r.exit_code == 1
+    assert "✗ database" in r.output
+
+
+def test_doctor_sqlite_error_in_chunks_check_is_silenced(monkeypatch, tmp_path):
+    """Lines 1075-1076: sqlite3.Error in the chunks pending check must be silently swallowed."""
+    import json as _j
+    h = tmp_path / ".kage"
+    h.mkdir()
+    (h / "memory").mkdir()
+    (h / "indexes").mkdir()
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    conn.executescript("""
+        CREATE TABLE memories (
+            id TEXT PRIMARY KEY, content_path TEXT NOT NULL,
+            project TEXT, created_at TEXT NOT NULL,
+            needs_embed INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE VIRTUAL TABLE memory_fts USING fts5(id UNINDEXED, body);
+    """)
+    conn.close()
+    # Note: chunks table deliberately absent → SELECT COUNT(*) FROM chunks raises sqlite3.Error
+    (h / "config.json").write_text(_j.dumps({"version": "0.1.0"}))
+    for attr, val in {
+        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+    }.items():
+        monkeypatch.setattr(cli, attr, val)
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    monkeypatch.setattr(cli, "_ollama_status", lambda cfg, model: (True, "mocked ok"))
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    # Must not crash and all_ok must remain True — the sqlite3.Error was silenced
+    assert "kage doctor" in r.output
+    assert r.exit_code == 0
+
+
+def test_doctor_ollama_down_shows_advisory(monkeypatch, tmp_path):
+    """Line 1096: doctor must print Ollama advisory when local model is not ready."""
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    monkeypatch.setattr(cli, "_ollama_status", lambda cfg, model: (False, "Ollama not reachable"))
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert "ollama serve" in r.output
+    assert "ollama pull" in r.output
+
+
+def test_doctor_mcp_not_installed_shows_warning(monkeypatch, tmp_path):
+    """Lines 1119-1120: doctor must warn when the mcp package is not importable."""
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    monkeypatch.setitem(sys.modules, "mcp", None)  # None in sys.modules → ImportError on 'import mcp'
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert "⚠ MCP server" in r.output
+    assert "pip install" in r.output
+
+
+def test_doctor_exits_1_with_failure_summary(monkeypatch, tmp_path):
+    """Lines 1128-1129: doctor must exit 1 and print failure message when any check fails."""
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "config.json").write_text("bad json")  # makes cfg_ok = False
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert r.exit_code == 1
+    assert "some checks failed" in r.output
+
+
+# ── mcp_serve command ─────────────────────────────────────────────────────────
+
+def test_mcp_serve_when_mcp_not_installed(monkeypatch, tmp_path):
+    """Lines 1135-1140: mcp_serve must exit 1 with a friendly message when kage.mcp_server is missing."""
+    _save_home(monkeypatch, tmp_path)
+    # Setting sys.modules[key] = None makes 'from key import ...' raise ImportError
+    monkeypatch.setitem(sys.modules, "kage.mcp_server", None)
+    r = CliRunner().invoke(cli.app, ["mcp", "serve"])
+    assert r.exit_code == 1
+    assert "MCP not installed" in r.output
+
+
+def test_mcp_serve_calls_mcp_run(monkeypatch, tmp_path):
+    """Line 1141: mcp_serve must call mcp.run(transport='stdio') on the real mcp object."""
+    import types
+    _save_home(monkeypatch, tmp_path)
+    run_calls = []
+
+    class FakeMCP:
+        def run(self, transport=None):
+            run_calls.append(transport)
+
+    fake_mod = types.ModuleType("kage.mcp_server")
+    fake_mod.mcp = FakeMCP()
+    monkeypatch.setitem(sys.modules, "kage.mcp_server", fake_mod)
+    r = CliRunner().invoke(cli.app, ["mcp", "serve"])
+    assert r.exit_code == 0
+    assert run_calls == ["stdio"]

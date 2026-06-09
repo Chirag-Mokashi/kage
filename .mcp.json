@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "kage": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "kage", "mcp", "serve"]
+    }
+  }
+}

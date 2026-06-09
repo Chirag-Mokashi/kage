@@ -35,6 +35,9 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
+_mcp_app = typer.Typer(help="MCP server commands.")
+app.add_typer(_mcp_app, name="mcp")
+
 # ── Layout ────────────────────────────────────────────────────────────────
 KAGE_HOME = Path(os.environ.get("KAGE_HOME") or Path.home() / ".kage")  # override for relocation/tests
 MEMORY_DIR = KAGE_HOME / "memory"          # 5A: markdown source of truth (#70)
@@ -1109,6 +1112,16 @@ def doctor() -> None:
         status_word = "set" if key_set else "not set"
         typer.echo(f"    {mark} {name:<12}  {env_var:<24}  {status_word}")
 
+    # Advisory — MCP server package importable.
+    try:
+        import mcp as _mcp_pkg  # noqa: F401
+        mcp_ok = True
+    except ImportError:
+        mcp_ok = False
+    typer.echo(f"  {'✓' if mcp_ok else '⚠'} MCP server (mcp[cli]){'' if mcp_ok else ' — not installed'}")
+    if not mcp_ok:
+        typer.echo("      → pip install 'mcp[cli]'")
+
     if all_ok:
         typer.echo("\n✓ kage looks healthy.\n")
     else:
@@ -1116,5 +1129,17 @@ def doctor() -> None:
         raise typer.Exit(code=1)
 
 
-if __name__ == "__main__":
+@_mcp_app.command("serve")
+def mcp_serve() -> None:
+    """Start the kage MCP server (stdio transport — for Claude Code, Antigravity 2.0, etc.)."""
+    _require_init()
+    try:
+        from kage.mcp_server import mcp as _mcp
+    except ImportError:
+        typer.echo("MCP not installed — run: pip install 'mcp[cli]'", err=True)
+        raise typer.Exit(code=1)
+    _mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":  # pragma: no cover
     app()

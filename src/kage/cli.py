@@ -363,7 +363,7 @@ def _post_json(url: str, payload: dict, headers: dict | None = None, timeout: in
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", **(headers or {})},
+        headers={"Content-Type": "application/json", "User-Agent": "kage/0.5", **(headers or {})},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -388,7 +388,7 @@ def _call_cloud(provider_name: str, system: str, user_msg: str, cfg: dict) -> st
     if not default_pcfg and not user_pcfg:
         raise CloudError(
             f"Unknown provider '{provider_name}'. "
-            f"Add [providers.{provider_name}] to ~/.kage/config.toml"
+            f"Add providers.{provider_name} to ~/.kage/config.json"
         )
     pcfg = {**default_pcfg, **user_pcfg}
     key = os.environ.get(pcfg["api_key_env"], "")

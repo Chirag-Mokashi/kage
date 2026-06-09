@@ -2,7 +2,7 @@
 
 *Entry point for any Claude Code session in this repo. Lightweight orientation only — the canonical planning state lives in [docs/blueprint.md](docs/blueprint.md).*
 
-*Last updated: 2026-06-04 (Session 14)*
+*Last updated: 2026-06-08 (implementation reality sync)*
 
 ---
 
@@ -50,25 +50,32 @@
 
 Every design decision must be checked against this list. Operational definitions in `docs/blueprint.md`. The single-word North Star: **Seamless** — kage acts invisibly; the only hard problem is adoption.
 
-## Current Stage
+## Current State
 
-**Stage 0 (blueprinting)** — designing the system layer-by-layer. No code yet.
+**Working CLI exists.** The repository is no longer purely Stage 0 planning: `src/kage/cli.py` implements the headless local broker thin slice and several follow-on cycles.
 
-Stage 1 (implementation) begins only when the Stage 0 blueprint is locked end-to-end and a Cycle 1 pitch is written.
+Current implemented surface:
+- local markdown source of truth under `~/.kage/memory`
+- SQLite FTS5 index and project partition filter
+- ChromaDB chunk/vector index with `kage reindex`
+- `remember`, `import`, `recall`, `ask`, `list`, `forget`, `status`, `doctor`
+- local Ollama answering by default
+- cloud answering via named providers (`claude`, `openai`, `gemini`, `groq`, `perplexity`, plus user config)
+- black-box and unit tests in `tests/test_cli.py`
 
-Progress: Layers 1 (designed), 2 (arch), 3a–3e, 4, 5 locked. Substrate = Odysseus (extend, own repo). Remaining: Layer 6 (Learning), Layer 7 (MCP-out), Layer 2 detail + the Cycle 1 pitch.
+The long-term blueprint still matters for direction, but docs that say "no code yet" or "Stage 1 has not started" are historical/stale unless explicitly marked current. For implementation truth, inspect `README.md`, `src/kage/cli.py`, and `tests/test_cli.py`.
 
 ## Canonical Docs (where the real planning lives)
 
 | File | What it is |
 |---|---|
-| [docs/blueprint.md](docs/blueprint.md) | **Read this for substantive context.** The detailed planning state. North Star, 7-layer architecture, locked decisions, session log, all open questions. Self-contained. |
-| [docs/cycle-1-pitch.md](docs/cycle-1-pitch.md) | **The live Cycle 1** — v0.1 thin-slice pitch (what we build first). |
+| [docs/blueprint.md](docs/blueprint.md) | **Read this for strategic context.** The detailed long-term planning state. Some status language is historical; current implementation may be ahead of it. |
+| [docs/cycle-1-pitch.md](docs/cycle-1-pitch.md) | Historical v0.1 thin-slice pitch. Useful for original scope, not a complete description of current code. |
 | [docs/architecture.md](docs/architecture.md) | ⚠️ LEGACY (Session 1) — superseded by blueprint.md §4 (Odysseus substrate). See banner in file. |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | ⚠️ LEGACY (Session 1) — superseded by cycle-1-pitch.md + blueprint.md. See banner in file. |
 | [docs/competitor-flowcharts.md](docs/competitor-flowcharts.md) | Engine-level comparisons with prior art |
 
-For a fresh Claude session: **start by reading docs/blueprint.md.** It contains the current state of everything.
+For a fresh coding session: read `README.md`, then `src/kage/cli.py`, `tests/test_cli.py`, and `docs/blueprint.md` for strategic context.
 
 ## Strategic Anchors (stable across sessions)
 
@@ -81,13 +88,14 @@ For a fresh Claude session: **start by reading docs/blueprint.md.** It contains 
 
 ## Operating Rules
 
+- **Default coding workflow:** inspect first, make scoped changes when asked, run relevant tests, and report clearly.
 - **Suggest, don't execute.** Chirag approves and runs everything. Never act autonomously.
 - **All write actions require explicit user confirmation** (every agent, every flow).
 - **When a decision needs to be made — stop, discuss, decide together.**
-- **Stay at Stage 0 altitude** until blueprint is locked. Conceptual decisions only; defer engineering specifics to Stage 1.
+- **Do not treat the repo as planning-only.** Implementation work is active; keep docs and code aligned.
 - **No Mermaid in new docs** — ASCII / Unicode box-drawing characters only (renderer-independent).
 - **Bold recommendation first.** Lead with the conclusion + argument. Never bury opinion at the end. Save neutral menus for true value-driven choices.
-- **Complete over fast.** Stage 0 has no time pressure. The original 3-week build plan is deprioritized. Real goal: become a better AI engineer through depth. **Push back if Chirag is rushing.**
+- **Complete over fast.** The original 3-week build plan is deprioritized. Real goal: become a better AI engineer through depth while still shipping useful slices. **Push back if Chirag is rushing.**
 - **Awareness over control.** When designing UX or routing, the user is *aware* of what's running but does NOT have to steer it. Status is a transparency layer, not a control surface.
 - **Options over suggestions.** Wherever a decision is presented, surface options explicitly. Don't make silent choices.
 - **Memory auto-loads** across sessions (see `~/.claude/projects/-Users-mokashi-Projects-kage/memory/`) — durable preferences and project state persist there.

@@ -1533,3 +1533,218 @@ def test_doctor_no_schema_line_when_chroma_raises(monkeypatch, tmp_path):
     result = CliRunner().invoke(cli.app, ["doctor"])
     assert "schema v" not in result.output
     assert "vector index" not in result.output
+
+
+# ── _call_cloud (Cycle 5 Step 1) ──────────────────────────────────────────
+
+def test_call_cloud_unknown_provider(monkeypatch):
+    with pytest.raises(cli.CloudError) as e:
+        cli._call_cloud("no_such", "sys", "msg", {})
+    assert "Unknown provider" in str(e.value)
+
+
+def test_call_cloud_missing_env_var(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(cli.CloudError) as e:
+        cli._call_cloud("openai", "sys", "msg", {})
+    assert "OPENAI_API_KEY" in str(e.value)
+
+
+def test_call_cloud_claude_uses_anthropic_url(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    calls = []
+    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append((url, kw)) or {"content": [{"text": "ans"}]})
+    result = cli._call_cloud("claude", "sys", "msg", {})
+    assert result == "ans"
+    assert "anthropic.com" in calls[0][0]
+    assert calls[0][1]["headers"]["x-api-key"] == "test-key"
+
+
+def test_call_cloud_openai_uses_bearer_auth(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "oai-key")
+    calls = []
+    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append((url, kw)) or {"choices": [{"message": {"content": "ans"}}]})
+    result = cli._call_cloud("openai", "sys", "msg", {})
+    assert result == "ans"
+    assert "openai.com/v1/chat/completions" in calls[0][0]
+    assert calls[0][1]["headers"]["Authorization"] == "Bearer oai-key"
+
+
+def test_call_cloud_groq_url_has_v1_path(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "groq-key")
+    calls = []
+    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append(url) or {"choices": [{"message": {"content": "ans"}}]})
+    cli._call_cloud("groq", "sys", "msg", {})
+    assert calls[0] == "https://api.groq.com/openai/v1/chat/completions"
+
+
+def test_call_cloud_perplexity_url_has_no_v1(monkeypatch):
+    monkeypatch.setenv("PERPLEXITY_API_KEY", "ppl-key")
+    calls = []
+    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append(url) or {"choices": [{"message": {"content": "ans"}}]})
+    cli._call_cloud("perplexity", "sys", "msg", {})
+    assert calls[0] == "https://api.perplexity.ai/chat/completions"
+
+
+def test_call_cloud_gemini_key_in_url(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "gem-key")
+    calls = []
+    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append(url) or {"candidates": [{"content": {"parts": [{"text": "ans"}]}}]})
+    result = cli._call_cloud("gemini", "sys", "msg", {})
+    assert result == "ans"
+    assert "?key=gem-key" in calls[0]
+    assert "generateContent" in calls[0]
+
+
+def test_call_cloud_gemini_safety_block_raises(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "gem-key")
+    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: {"candidates": [{}]})
+    with pytest.raises(cli.CloudError):
+        cli._call_cloud("gemini", "sys", "msg", {})
+
+
+def test_call_cloud_user_config_partial_override_keeps_defaults(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "oai-key")
+    calls = []
+    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append(payload) or {"choices": [{"message": {"content": "ans"}}]})
+    cfg = {"providers": {"openai": {"model": "gpt-4o-mini"}}}
+    cli._call_cloud("openai", "sys", "msg", cfg)
+    assert calls[0]["model"] == "gpt-4o-mini"
+
+
+def test_call_cloud_network_error_raises_cloud_error(monkeypatch):
+    import urllib.error
+    monkeypatch.setenv("OPENAI_API_KEY", "oai-key")
+    def bad_post(*a, **kw): raise urllib.error.URLError("timeout")
+    monkeypatch.setattr(cli, "_post_json", bad_post)
+    with pytest.raises(cli.CloudError, match="request failed"):
+        cli._call_cloud("openai", "sys", "msg", {})
+
+
+# ── ask --provider (Cycle 5 Step 2) ──────────────────────────────────────
+
+def test_ask_cloud_default_provider_is_claude(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    captured = []
+    monkeypatch.setattr(cli, "_call_cloud", lambda name, *a, **kw: captured.append(name) or "ans")
+    CliRunner().invoke(cli.app, ["ask", "q", "--cloud"])
+    assert captured[0] == "claude"
+
+
+def test_ask_cloud_provider_flag_overrides_default(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    captured = []
+    monkeypatch.setattr(cli, "_call_cloud", lambda name, *a, **kw: captured.append(name) or "ans")
+    CliRunner().invoke(cli.app, ["ask", "q", "--cloud", "--provider", "openai"])
+    assert captured[0] == "openai"
+
+
+def test_ask_cloud_config_provider_used_when_no_flag(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "config.json").write_text('{"cloud_provider": "groq"}')
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    captured = []
+    monkeypatch.setattr(cli, "_call_cloud", lambda name, *a, **kw: captured.append(name) or "ans")
+    CliRunner().invoke(cli.app, ["ask", "q", "--cloud"])
+    assert captured[0] == "groq"
+
+
+def test_ask_cloud_flag_overrides_config_provider(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "config.json").write_text('{"cloud_provider": "groq"}')
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    captured = []
+    monkeypatch.setattr(cli, "_call_cloud", lambda name, *a, **kw: captured.append(name) or "ans")
+    CliRunner().invoke(cli.app, ["ask", "q", "--cloud", "--provider", "gemini"])
+    assert captured[0] == "gemini"
+
+
+def test_ask_cloud_error_exits_nonzero(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: (_ for _ in ()).throw(cli.CloudError("bad key")))
+    r = CliRunner().invoke(cli.app, ["ask", "q", "--cloud"])
+    assert r.exit_code == 1
+
+
+def test_ask_cloud_status_line_shows_model_and_provider(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: "ans")
+    r = CliRunner().invoke(cli.app, ["ask", "q", "--cloud", "--provider", "openai"])
+    assert "gpt-4o" in r.output
+    assert "openai" in r.output
+
+
+def test_ask_local_path_unchanged(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    calls = []
+    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append(url) or {"response": "local ans"})
+    r = CliRunner().invoke(cli.app, ["ask", "q"])
+    assert any("11434" in c for c in calls)
+    assert "local ans" in r.output
+
+
+# ── doctor cloud providers (Cycle 5 Step 3) ──────────────────────────────────
+
+def test_doctor_cloud_key_set_shows_checkmark(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert "✓ claude" in r.output
+    assert "· openai" in r.output
+
+
+def test_doctor_cloud_all_missing_shows_dots(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "PERPLEXITY_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert r.output.count("· ") >= 5
+
+
+def test_doctor_cloud_user_provider_appears(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    (h / "config.json").write_text('{"providers": {"myprovider": {"api_key_env": "MY_CUSTOM_KEY"}}}')
+    monkeypatch.delenv("MY_CUSTOM_KEY", raising=False)
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert "myprovider" in r.output
+    assert "MY_CUSTOM_KEY" in r.output
+
+
+def test_doctor_cloud_user_provider_key_set(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    (h / "config.json").write_text('{"providers": {"myprovider": {"api_key_env": "MY_CUSTOM_KEY"}}}')
+    monkeypatch.setenv("MY_CUSTOM_KEY", "val")
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert "✓ myprovider" in r.output
+
+
+# ── status cloud model line (Cycle 5 Step 4) ─────────────────────────────────
+
+def test_status_cloud_model_shows_provider_name(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    r = CliRunner().invoke(cli.app, ["status"])
+    assert "claude-sonnet-4-6 via claude" in r.output
+
+
+def test_status_cloud_model_uses_config_provider(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "config.json").write_text('{"cloud_provider": "groq"}')
+    r = CliRunner().invoke(cli.app, ["status"])
+    assert "llama-3.3-70b-versatile via groq" in r.output
+
+
+def test_status_cloud_model_user_model_override(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "config.json").write_text('{"cloud_provider": "openai", "providers": {"openai": {"model": "gpt-4o-mini"}}}')
+    r = CliRunner().invoke(cli.app, ["status"])
+    assert "gpt-4o-mini via openai" in r.output

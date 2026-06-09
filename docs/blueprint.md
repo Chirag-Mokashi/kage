@@ -1,12 +1,11 @@
-# kage — Stage 0 Blueprint
+# kage — Blueprint
 
-> **Status:** Stage 0 (planning / blueprinting). We are NOT yet building.
-> Stage 1 (implementation) starts only when this blueprint is locked end-to-end.
+> **Status:** strategic blueprint plus historical planning record. Implementation has begun: the repo now contains a working CLI that saves/imports notes, maintains markdown + SQLite + ChromaDB indexes, recalls context, answers through local Ollama, and supports named cloud providers. Some older sections still describe pre-build Stage 0 decisions; treat those as historical unless this top status or current code contradicts them.
 >
-> **Purpose of this file:** Single source of truth for the kage project state.
-> Open this at the start of any session to re-enter with full context.
+> **Purpose of this file:** Long-term product and architecture context for kage.
+> For current implementation truth, read `README.md`, `src/kage/cli.py`, and `tests/test_cli.py`.
 >
-> *Last updated: 2026-06-04, Session 14 (Layer 1 interface DESIGNED — #91–#98). Substrate = Odysseus (extend, not fork); see §4 + #81–#90.*
+> *Last updated: 2026-06-08 (research session — TurboVec/TurboQuant/Permission Broker findings integrated; Cosmos QN results received). Session 14 decision log last changed: Layer 1 interface DESIGNED — #91–#98. Substrate = Odysseus (extend, not fork); see §4 + #81–#90.*
 >
 > *Companion docs:*
 > - [architecture.md](architecture.md) — visual system map
@@ -590,6 +589,10 @@ LightRAG query-side          │   (k=60, N retrievers)  re-ranker
 2. Cross-encoder re-ranker model selection (bge-reranker-v2-m3 vs. mxbai-rerank-v2-base vs. Qwen3-as-judge) — leaning bge-v2-m3
 3. Whether to include re-ranker in v1.0 at all, or defer to v1.5
 4. Cosmos research integration (see Section 8)
+
+**Future backend candidate — watch list (not a blocker):**
+
+- **TurboVec** (`RyanCodrai/turbovec`) — Rust vector index, ARM NEON optimized (Apple Silicon native), 8× compression vs FAISS/ChromaDB, online ingest (no retraining or rebuild step). Conceptually a strong fit: M5 Pro native, no retraining matches the wall-flow, compression expands headroom alongside Qwen3 14B. **As of 2026-06-08: Mac ARM build failure (#92 open), upsert data-loss bugs (#89/#90 open) — not production-ready.** Design behind a swappable backend interface (◦adapt-later principle, #85). Cosmos QN Part A returned no primary evidence (tool limitation). **Decision gate: do not swap ChromaDB for TurboVec until Cosmos/community confirms ARM build and data-integrity issues resolved.**
 
 ### Cross-cutting — Ingest Pipeline Philosophy
 
@@ -1187,6 +1190,7 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 
 **5C — VECTOR INDEX (decision #72; backend FAISS → ChromaDB per #85, Session 13):**
 - ChromaDB collection for v1 (HNSW index; at personal scale ≤100K vectors quality is effectively exact; ~0.3-0.5GB at 100K×768d; revisit index tuning only beyond ~500K vectors, which personal scale won't hit for years)
+- **Watch:** TurboVec (`RyanCodrai/turbovec`) — ARM NEON, 8× compression, online ingest. Not production-ready as of 2026-06-08 (Mac ARM #92, upsert bugs #89/#90). The ◦adapt-later principle (#85) keeps the swap path open: markdown source of truth survives any backend change. Evaluate when community confirms stability.
 - Granite Embedding 311M R2, 768d (#50)
 - Incremental add/delete via Chroma collection ops (upsert / delete by ID); full rebuild ONLY on embedding-model swap
 - Persisted by Chroma under `~/.kage/indexes/chroma/`; loads at startup; written after async ingest batches
@@ -1204,6 +1208,8 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
    ─────────────────────────────────
    Total                   ~16-18 GB  → fits with headroom
 ```
+
+**KV-cache compression watch — TurboQuant** (arXiv:2504.19874, Google Research): NOT a weight quantizer — operates on the KV cache at inference time, fully independent of and stackable with Q4_K_M weight quantization (different memory pools). At 3.5 bits/channel: quality-neutral at ~4.57× KV-cache compression. At 2.5 bits/channel: marginal degradation at ~6.4×. Evaluated quality-neutral across 4K–104K token contexts (LongBench + Needle-in-a-Haystack). KV cache scales linearly with context length — TurboQuant becomes increasingly load-bearing as kage's multi-session context grows. Ollama PR #15505 not yet merged as of 2026-06-08. **Passive watch item**: evaluate when running >32K context sessions or when multi-session context becomes a feature. Cosmos QN Part B confirmed: long-term trajectory is favorable, integration timeline open. *(Research finding 2026-06-08)*
 
 **Read path:** SQLite pre-filter (project AND identity AND state → candidate docids; the partition WALL lives here, #99) → FTS5 BM25 + ChromaDB dense over the allowed candidates → RRF fusion → bge-reranker (Layer 3c) → fetch winning content from markdown (5A).
 
@@ -1404,6 +1410,37 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 - Engagement plan with OJ team (lurk Discord, plan upstream PRs)
 - Eval / testing strategy (per-layer, per-agent)
 - **Ingest pipeline philosophy** — direction proposed (hybrid sync/async); sync/async split awaiting final tweaks
+- **Implicit session context capture** — kage's wall-save (#16) means the implicit reasoning thread mid-session (WHY decisions were made, conversational texture, casual mentions that shaped interpretation) never enters memory because the user is in flow. Session inbox (Flow 2) partially addresses this but depends on end-of-session review that often doesn't happen. Open question: how does kage capture implicit session reasoning, not just explicit saves? Is this the Librarian's job? Does it require a lightweight observation mode that flags "this looks like a decision being made" without full scraping? Note: not a new layer — a refinement question for Layer 3b and the Librarian's responsibilities. Does not block current blueprint progress. *(Research finding 2026-06-08)*
+
+### Open Design Surface — Permission Broker (2026-06-08)
+
+kage as permission mediator when installing a new AI tool. Every tool today creates its own silo (`~/.claude/`, `~/.codex/`, `~/.gemini/`, Cursor SQLite) with its own permissions, settings, and memory. None talk to each other. Installing a new tool means starting from zero and re-granting permissions blindly.
+
+**The design:**
+kage intercepts when a new AI tool is installed and acts as a permission mediator:
+
+```
+   1. Compare new tool's requested permissions against existing
+      canonical baseline (what Claude Code already has approved)
+   2. Surface SHARED permissions — "these map directly from Claude
+      Code, port them over?" (approve all or review one by one)
+   3. Surface NEW permissions — user approves or rejects each
+      explicitly; nothing assumed
+   4. Write tool-specific permission file in that tool's native
+      format
+```
+
+**Key principle:** kage assumes nothing. User sees everything, decides everything.
+
+**Cosmos QN Part C validation (2026-06-08):** No existing system does all four simultaneously. MCP security literature (ACM TOSEM 2026, arXiv:2511) explicitly calls for the "missing layer" kage proposes: explicit revocation semantics, signed policy descriptors, centralized validation, inline policy enforcement. MemPalace (April 2026) does cross-tool MEMORY brokerage but not permissions. No prior art for the permission-specific surface found.
+
+**Key empirical signal:** Claude Code users approve ~93% of permission prompts; auto-approve rates rise from ~20% to >40% over sessions (approval fatigue documented). The Permission Broker solves this by contextualizing: "shared from Claude Code" vs "new permission you haven't approved before" — users make informed decisions rather than habituated approvals.
+
+**Characteristics served:** Transparent + Controlled + Broker + Seamless — 4 of 10 simultaneously.
+
+**Relationship to existing layers:** Not Layer 3e (selective disclosure of MEMORY) but a parallel surface — selective disclosure of CAPABILITIES. Sits above the tool layer, below the user. Not a Stage 1 blocker; should inform tool-registration architecture from the start so retrofitting isn't necessary.
+
+**Status:** Design surface identified. Cosmos research confirms novelty. No design session yet. Add to Layer 6/7 design agenda.
 
 ### Pending — Cosmos research (to be initiated)
 
@@ -1425,6 +1462,15 @@ A. ⏳ **Personal-scale knowledge distillation prior art** — does any existing
 B. ⏳ **LoRA fine-tuning on Apple Silicon (M-series) 2024-2026** — practical feasibility for Qwen3-14B-Q4 on 24GB unified memory. Tooling, timing, quality.
 C. ⏳ **Privacy-preserving distillation patterns 2024-2026** — DP-SGD on LoRA, selective distillation, memorization risks, mitigations.
 D. ⏳ **Catastrophic forgetting in personalized LoRA 2024-2026** — rehearsal strategies, modular adapters, evaluation methodology.
+
+Research-session additions (2026-06-08):
+
+8. ⏳ **Miso One voice output engine** — Miso Labs 8B open model, 110ms latency, persona switching (Friend/Therapist/YouTuber/Teacher), LiveKit/WebRTC pipeline. Local deployment on M5 Pro? Memory footprint alongside Qwen3 14B? Comparison with Piper TTS for real-time voice output. Decision gate: run before committing to voice output engine choice.
+
+N. ✓ **Combined query — TurboVec + TurboQuant + Cross-tool portability + Permission Broker** — DELIVERED and integrated 2026-06-08. Full 14-point query (Parts A/B/C). Key findings:
+   - **Part A (TurboVec):** No primary evidence retrieved — Cosmos could not find repo/issue data. All 5 questions remain open. Watch list only.
+   - **Part B (TurboQuant):** Strong findings. Quality-neutral at 3.5 bits/channel (4.57× compression), 4K–104K context validated. Ollama PR #15505 timeline — no evidence. Follow-on work (eOptShrinkQ) at 2.22 bits near-lossless. Long-term trajectory favorable as context windows grow.
+   - **Part C (Cross-tool + Permission Broker):** Permission Broker confirmed as "missing layer" in MCP security literature. Config fragmentation is real and evidenced. AGENTS.md at 60K+ repos (–28.64% runtime, –16.58% output tokens). MemPalace = memory only, not permissions. No prior system does permission brokerage across multiple AI tools. Approval fatigue (~93% approve rate) empirically documented. Findings integrated into Permission Broker design surface above.
 
 ---
 
@@ -1453,6 +1499,7 @@ Items deliberately set aside — either deferred to a later cycle, conditional o
 | 15 | Morning briefing opening line style | content question, defer |
 | 15.5 | Optional per-state TTL on `pending` memories (auto-archive after N days if not promoted to scoped/baseline) | Inspired by GitHub Copilot Memory's 28-day expiry pattern but adapted to kage's state machine. NOT a blanket expiry — only on `pending` state. Defer to v2 (Cosmos Q5 finding, Session 4). |
 | 16 | News topics for morning briefing | content question, defer |
+| 16.5 | **Voice output engine — Miso One vs Piper** (2026-06-08) | Miso One (Miso Labs 8B, open API, 110ms latency via LiveKit/WebRTC, persona switching: Friend/Therapist/YouTuber/Teacher) vs Piper (fast, offline, lightweight rule-based TTS). Decision gates: M5 Pro memory headroom after Qwen3 14B loaded, local deployment verification for Miso One, Cosmos Q8 results. Neither blocks Stage 0/1. Do not swap Piper for Miso One until Q8 returns and both are tested on M5 Pro. |
 
 ### Deferred — research / thesis path
 

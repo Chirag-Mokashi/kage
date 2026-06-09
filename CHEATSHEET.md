@@ -40,7 +40,8 @@ kage list [-p <project>]             # browse saved notes
 kage recall "<words>" [-p <project>] # keyword search
 kage recall "<words>" --pipe         # copy matches to clipboard → paste into any AI
 kage ask "<question>" [-p <project>] # answer using your notes  (full natural language)
-kage ask "<question>" --cloud        # same, via Claude  (needs ANTHROPIC_API_KEY)
+kage ask "<question>" --cloud        # same, via configured cloud provider
+kage ask "<question>" --cloud --provider openai  # override provider for this call
 kage ask "<question>" --think        # let the local model reason first  (slower)
 kage forget <id|prefix>              # delete one note (copy the id from `kage list`)
 kage status                          # what's stored, where, which model
@@ -73,7 +74,7 @@ It recalls the most relevant notes, sends them as context to the model, and answ
 | Hard reasoning, architecture decisions | `kage ask --cloud` or claude.ai (personal) | quota/free |
 | Planning sessions, long-form reasoning | claude.ai personal account | free |
 | Research drafts | Gemini (personal account) | free |
-| API-powered Claude in kage | `kage ask --cloud` | uni quota |
+| API-powered cloud in kage | `kage ask --cloud --provider <name>` | quota/API cost |
 
 **Token tip:** Claude Code sessions eat quota proportional to context length, not just output.
 Keep sessions short and scoped to ONE task. Use `kage ask` (local) to answer code questions
@@ -107,4 +108,4 @@ git switch -c cycle-N    # start a new cycle branch
 - **Your notes** — `~/.kage/memory/*.md`  (plain markdown — yours, 100% local)
 - **Index** — `~/.kage/indexes/kage.db`  (derived; rebuildable from the markdown)
 - **The code** — `~/Projects/kage/src/kage/cli.py`
-- **Config** — `~/.kage/config.json`  (set `model`, `cloud_model`, `ollama_url` here)
+- **Config** — `~/.kage/config.json`  (set `model`, `ollama_url`, `cloud_provider`, `providers`)

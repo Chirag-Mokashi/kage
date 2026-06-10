@@ -50,6 +50,12 @@
 
 Every design decision must be checked against this list. Operational definitions in `docs/blueprint.md`. The single-word North Star: **Seamless** — kage acts invisibly; the only hard problem is adoption.
 
+## Operating Value: Jugaad (above the 10) — locked 2026-06-10
+
+**jugaad** (जुगाड़) — kage's *spirit*, sitting above the 10 characteristics (those are system properties; this is the lens for WHAT kage reaches for). Frugal, resourceful ingenuity under constraint: extract maximum capability from what you already have; route *around* artificial constraints (paywalls, missing APIs, double-billing) using existing resources rather than paying to remove them. Canonical example: drive the subscription web UI you already pay for instead of paying again for the API.
+
+**Guardrail (inseparable from jugaad):** jugaad governs WHAT we reach for and HOW we route around constraints — *never how we build*. The workaround is resourceful; the implementation stays clean, tested, and complete. Jugaad is resourceful in *what*; **Complete over fast** governs *how*. They check each other.
+
 ## Current State
 
 **Working CLI exists.** The repository is no longer purely Stage 0 planning: `src/kage/cli.py` implements the headless local broker thin slice and several follow-on cycles.

@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import re
 import secrets
 import shutil
 import sqlite3
@@ -55,7 +56,8 @@ CREATE TABLE IF NOT EXISTS memories (
     content_path TEXT NOT NULL,
     project      TEXT,
     created_at   TEXT NOT NULL,
-    needs_embed  INTEGER NOT NULL DEFAULT 1
+    needs_embed  INTEGER NOT NULL DEFAULT 1,
+    local_only   INTEGER NOT NULL DEFAULT 0
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(id UNINDEXED, body);
 CREATE TABLE IF NOT EXISTS chunks (
@@ -126,6 +128,11 @@ def init() -> None:
             conn.commit()
         except sqlite3.OperationalError:
             pass  # column already exists in an existing DB
+        try:
+            conn.execute("ALTER TABLE memories ADD COLUMN local_only INTEGER NOT NULL DEFAULT 0")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
     finally:
         conn.close()
     (created if db_is_new else existed).append(DB_PATH)
@@ -214,14 +221,26 @@ def _read_section(content_path: str, char_start: int, char_end: int) -> str:
         return ""
 
 
-def _save(text: str, project: str | None, source: str | None = None, embed: bool = True) -> str:
+def _save(
+    text: str,
+    project: str | None,
+    source: str | None = None,
+    embed: bool = True,
+    local_only: bool = False,
+) -> str:
     """Write a memory (markdown source-of-truth #70) + index it (#71). Returns its id."""
+    cfg = _config()
+    if not local_only and project and project in cfg.get("local_only_projects", []):
+        local_only = True
+
     mem_id = _new_id()
     created = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
     rel_path = f"memory/{mem_id}.md"
     front = f"---\nid: {mem_id}\nproject: {project or ''}\ncreated_at: {created}\n"
     if source:
         front += f"source: {source}\n"
+    if local_only:
+        front += "local_only: true\n"
     (KAGE_HOME / rel_path).write_text(front + "---\n\n" + text.rstrip() + "\n")
 
     body = text.strip()
@@ -231,8 +250,9 @@ def _save(text: str, project: str | None, source: str | None = None, embed: bool
     conn = _connect()
     try:
         conn.execute(
-            "INSERT INTO memories (id, content_path, project, created_at) VALUES (?, ?, ?, ?)",
-            (mem_id, rel_path, project, created),
+            "INSERT INTO memories (id, content_path, project, created_at, local_only)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (mem_id, rel_path, project, created, int(local_only)),
         )
         conn.execute("INSERT INTO memory_fts (id, body) VALUES (?, ?)", (mem_id, text))
         for i, chunk in enumerate(chunks):
@@ -438,6 +458,134 @@ def _call_cloud(provider_name: str, system: str, user_msg: str, cfg: dict) -> st
         raise CloudError(f"Provider '{provider_name}' request failed: {exc}") from exc
 
 
+# ── Privacy gate (Layer 3e) ────────────────────────────────────────────────
+
+_PII_PATTERNS: list[dict] = [
+    # INDIAN IDENTITY DOCUMENTS
+    {"name": "Aadhaar",          "pattern": r"\b\d{4}[\s-]\d{4}[\s-]\d{4}\b"},
+    {"name": "PAN card",         "pattern": r"\b[A-Z]{5}[0-9]{4}[A-Z]\b"},
+    {"name": "Passport (IN)",    "pattern": r"\b[A-Z][0-9]{7}\b"},
+    {"name": "Voter ID (IN)",    "pattern": r"\b[A-Z]{3}[0-9]{7}\b"},
+    {"name": "Driving licence",  "pattern": r"\b[A-Z]{2}[0-9]{2}[\s-]?[0-9]{4,11}\b"},
+    {"name": "GSTIN",            "pattern": r"\b[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]\b"},
+    {"name": "IFSC code",        "pattern": r"\b[A-Z]{4}0[A-Z0-9]{6}\b"},
+    {"name": "Vehicle reg (IN)", "pattern": r"\b[A-Z]{2}[\s-]?\d{2}[\s-]?[A-Z]{1,2}[\s-]?\d{4}\b"},
+    # CONTACT INFORMATION
+    {"name": "Email",            "pattern": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"},
+    {"name": "Phone (IN)",       "pattern": r"\b(\+91[\s-]?)?[6-9]\d{9}\b"},
+    {"name": "Phone (intl)",     "pattern": r"\+[1-9]\d{1,14}\b"},
+    {"name": "Indian PIN code",  "pattern": r"(?i)\bpin\s*(?:code)?\s*[:=]?\s*[1-9][0-9]{5}\b"},
+    # FINANCIAL
+    {"name": "Credit/debit card", "pattern": r"\b(?:\d{4}[\s-]?){3}\d{4}\b"},
+    {"name": "UPI ID",           "pattern": r"\b[a-zA-Z0-9._-]+@[a-zA-Z]+\b"},
+    {"name": "CVV",              "pattern": r"(?i)cvv\s*[:=]\s*\d{3,4}"},
+    # CREDENTIALS AND KEYS
+    {"name": "Password field",   "pattern": r"(?i)(password|passwd|pwd|secret)\s*[:=]\s*\S+"},
+    {"name": "OpenAI key",       "pattern": r"\bsk-[A-Za-z0-9]{20,}\b"},
+    {"name": "Google key",       "pattern": r"\bAIza[A-Za-z0-9_-]{35}\b"},
+    {"name": "GitHub PAT",       "pattern": r"\bghp_[A-Za-z0-9]{36}\b"},
+    {"name": "GitHub OAuth",     "pattern": r"\bgho_[A-Za-z0-9]{36}\b"},
+    {"name": "AWS access key",   "pattern": r"\bAKIA[0-9A-Z]{16}\b"},
+    {"name": "Bearer token",     "pattern": r"(?i)bearer\s+[A-Za-z0-9\-._~+/]+=*"},
+    {"name": "JWT token",        "pattern": r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"},
+    {"name": "SSH private key",  "pattern": r"-----BEGIN [A-Z ]+ PRIVATE KEY-----"},
+    {"name": ".env secret",      "pattern": r"(?i)\b(SECRET|TOKEN|KEY|PASS)\s*=\s*\S{8,}"},
+    # NETWORK AND SYSTEM
+    {"name": "IPv4 address",     "pattern": r"\b(?:\d{1,3}\.){3}\d{1,3}\b"},
+    {"name": "IPv6 address",     "pattern": r"\b([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b"},
+    {"name": "MAC address",      "pattern": r"([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}"},
+    # LOCATION
+    {"name": "GPS coordinates",  "pattern": r"-?\d{1,3}\.\d{4,},\s*-?\d{1,3}\.\d{4,}"},
+]
+
+
+def _pii_scan(text: str, extra_patterns: list[dict] | None = None) -> list[str]:
+    """Scan text for PII patterns; return list of matched pattern names (empty = clean)."""
+    hits = []
+    for entry in (_PII_PATTERNS + (extra_patterns or [])):
+        try:
+            if re.search(entry["pattern"], text):
+                hits.append(entry["name"])
+        except re.error:
+            pass  # skip malformed user-supplied patterns
+    return hits
+
+
+def _write_audit(record: dict) -> None:
+    """Append one JSON record to the audit log. Best-effort — never raises."""
+    try:
+        with open(KAGE_HOME / "audit.jsonl", "a") as f:
+            f.write(json.dumps(record) + "\n")
+    except OSError:
+        pass
+
+
+_session_approvals: dict[str, bool] = {}
+
+
+def _disclosure_gate(rows: list, cfg: dict) -> tuple[list, list[dict]]:
+    """Filter rows before cloud dispatch. Returns (allowed_rows, withheld_list).
+
+    withheld_list entries: {"note_id": str, "reason": str, "pii_patterns": list[str]}
+    Per-provider trust tiers are deferred (v2).
+    """
+    if not rows:
+        return [], []
+
+    note_ids = [row[0] for row in rows]
+    local_only_projects: list[str] = cfg.get("local_only_projects", [])
+    extra_pii: list[dict] = cfg.get("pii_patterns", [])
+
+    conn = _connect()
+    try:
+        placeholders = ",".join("?" * len(note_ids))
+        lo_map: dict[str, bool] = {
+            r[0]: bool(r[1])
+            for r in conn.execute(
+                f"SELECT id, local_only FROM memories WHERE id IN ({placeholders})",
+                note_ids,
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+
+    allowed: list = []
+    withheld: list[dict] = []
+    for row in rows:
+        note_id: str = row[0]
+        project: str | None = row[1]
+
+        if lo_map.get(note_id, False):
+            withheld.append({"note_id": note_id, "reason": "local_only:flag", "pii_patterns": []})
+            continue
+
+        if project and project in local_only_projects:
+            withheld.append({
+                "note_id": note_id,
+                "reason": f"local_only:project:{project}",
+                "pii_patterns": [],
+            })
+            continue
+
+        path, char_start, char_end = row[3], row[6], row[7]
+        if char_start is not None and char_end is not None:
+            text = _read_section(path, char_start, char_end)
+        else:
+            try:
+                text = _read_body(path)
+            except OSError:
+                text = ""
+
+        pii_hits = _pii_scan(text, extra_pii)
+        if pii_hits:
+            withheld.append({"note_id": note_id, "reason": "pii_detected", "pii_patterns": pii_hits})
+            continue
+
+        allowed.append(row)
+
+    return allowed, withheld
+
+
 def _rrf_fuse(fts_rows: list, vec_rows: list, k: int = 60) -> list:
     """Merge FTS5 and vector candidates via Reciprocal Rank Fusion; caller slices to limit."""
     fts_n, vec_n = len(fts_rows), len(vec_rows)
@@ -557,6 +705,7 @@ def _ollama_status(cfg: dict, model: str) -> tuple[bool, str]:
 def remember(
     text: str = typer.Argument(..., help="The note to remember."),
     project: str = typer.Option(None, "--project", "-p", help="Tag this memory to a project."),
+    local: bool = typer.Option(False, "--local", help="Mark note local-only — never sent to cloud providers."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirm prompt (for scripts/tests)."),
 ) -> None:
     """Save a note to memory (markdown + index). Confirms before writing (the wall, #16)."""
@@ -565,12 +714,15 @@ def remember(
     # The wall (#16): show it and confirm BEFORE anything is written.
     typer.echo(f'\n  "{text}"')
     typer.echo(f"  project: {project or '(none)'}")
+    if local:
+        typer.echo("  local-only: yes (will not be sent to cloud)")
     if not yes and not typer.confirm("Save this to memory?", default=True):
         typer.echo("Discarded — nothing saved.")
         raise typer.Exit()
 
-    mem_id = _save(text, project)
-    typer.echo(f"  ✓ saved   {_disp(KAGE_HOME / f'memory/{mem_id}.md')}   [{mem_id}]   (local)")
+    mem_id = _save(text, project, local_only=local)
+    suffix = "  [local-only]" if local else ""
+    typer.echo(f"  ✓ saved   {_disp(KAGE_HOME / f'memory/{mem_id}.md')}   [{mem_id}]   (local){suffix}")
 
 
 @app.command(name="import")
@@ -851,11 +1003,89 @@ def ask(
     think: bool = typer.Option(False, "--think", help="Let the local model reason first (slower, deeper)."),
     limit: int = typer.Option(5, "--limit", "-n", help="How many notes to pull as context."),
     no_sources: bool = typer.Option(False, "--no-sources", help="Suppress the Sources block."),
+    always_ask: bool = typer.Option(False, "--always-ask", help="Re-prompt before each cloud dispatch (overrides session approval memory)."),
 ) -> None:
     """Answer a question using your recalled notes — local model by default, --cloud to use a cloud provider."""
     _require_init()
 
     rows = _search(question, project, limit, any_terms=True)
+    cfg = _config()
+
+    # 3e disclosure gate — runs before context assembly, cloud path only
+    provider_name: str = ""
+    if cloud:
+        provider_name = provider or cfg.get("cloud_provider", "claude")
+        allowed_rows, withheld = _disclosure_gate(rows, cfg)
+        withheld_reasons = [w["reason"] for w in withheld]
+        pii_hits = [p for w in withheld for p in w["pii_patterns"]]
+
+        if withheld and not allowed_rows:
+            # Case 2: all notes withheld → silent Ollama fallback
+            typer.echo("[kage] All retrieved context is local-only.")
+            for w in withheld[:3]:
+                typer.echo(f"  · withheld: {w['note_id'][:16]}  ({w['reason']})")
+            typer.echo("  · Answering with local Ollama only (no cloud call).\n")
+            _write_audit({
+                "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                "provider": provider_name, "project": project,
+                "notes_retrieved": len(rows), "notes_withheld": len(withheld),
+                "withheld_reasons": withheld_reasons, "pii_detected": pii_hits,
+                "user_approved": None, "outcome": "blocked_all_local",
+            })
+            cloud = False
+        else:
+            user_approved = True
+            require_approval = cfg.get("require_approval", True)
+            session_remember = cfg.get("session_remember_approval", True)
+            need_prompt = (
+                require_approval
+                and withheld
+                and (always_ask or not session_remember or provider_name not in _session_approvals)
+            )
+            if need_prompt:
+                pii_withheld = [w for w in withheld if w["pii_patterns"]]
+                if pii_withheld:
+                    typer.echo(
+                        f"\n[kage] PII detected in {len(pii_withheld)} note(s) before dispatch to {provider_name}."
+                    )
+                else:
+                    typer.echo(f"\n[kage] Preparing to send context to {provider_name}.")
+                typer.echo(f"  · {len(allowed_rows) + len(withheld)} note(s) matched")
+                for w in withheld:
+                    pii_str = (
+                        f" ({', '.join(w['pii_patterns'][:2])})" if w["pii_patterns"] else ""
+                    )
+                    typer.echo(f"  · withheld: {w['note_id'][:16]}  {w['reason']}{pii_str}")
+                typer.echo(f"  · {len(allowed_rows)} note(s) will be included")
+                user_approved = typer.confirm("\nProceed with partial context?", default=True)
+            elif withheld:
+                # already approved this session — notify but don't re-ask
+                typer.echo(
+                    f"[kage] {len(withheld)} note(s) withheld before dispatch to {provider_name}."
+                )
+
+            if not user_approved:
+                typer.echo("[kage] Denied — falling back to local Ollama.\n")
+                _write_audit({
+                    "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "provider": provider_name, "project": project,
+                    "notes_retrieved": len(rows), "notes_withheld": len(withheld),
+                    "withheld_reasons": withheld_reasons, "pii_detected": pii_hits,
+                    "user_approved": False, "outcome": "denied_by_user",
+                })
+                cloud = False
+            else:
+                if withheld and session_remember:
+                    _session_approvals[provider_name] = True
+                _write_audit({
+                    "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "provider": provider_name, "project": project,
+                    "notes_retrieved": len(rows), "notes_withheld": len(withheld),
+                    "withheld_reasons": withheld_reasons, "pii_detected": pii_hits,
+                    "user_approved": None if (withheld and not require_approval) else True,
+                    "outcome": "dispatched",
+                })
+                rows = allowed_rows
 
     context_parts = []
     sources = []
@@ -879,11 +1109,9 @@ def ask(
         "'I don't know — nothing in your notes covers this.' "
         "Do not use general knowledge. Be concise."
     )
-    cfg = _config()
     thinking = ""
 
     if cloud:
-        provider_name = provider or cfg.get("cloud_provider", "claude")
         default_pcfg = DEFAULT_PROVIDERS.get(provider_name, {})
         user_pcfg = cfg.get("providers", {}).get(provider_name, {})
         pcfg = {**default_pcfg, **user_pcfg}
@@ -977,13 +1205,43 @@ def forget(
 
 
 @app.command()
-def status() -> None:
+def status(
+    audit: bool = typer.Option(False, "--audit", help="Show last N dispatch records from the audit log."),
+    audit_n: int = typer.Option(10, "--n", help="Number of audit records to show (with --audit)."),
+) -> None:
     """Show what kage holds and where it lives."""
     _require_init()
+
+    _audit_path = KAGE_HOME / "audit.jsonl"
+    if audit:
+        if not _audit_path.exists():
+            typer.echo(f"  no audit log yet — {_disp(_audit_path)}")
+            return
+        try:
+            lines = _audit_path.read_text().strip().splitlines()
+            records = [json.loads(line) for line in lines if line.strip()]
+            last = records[-audit_n:]
+            typer.echo(f"\n  Audit log ({len(last)} of {len(records)} record(s)):\n")
+            for r in last:
+                ts = r.get("ts", "")[:16].replace("T", " ")
+                prov = r.get("provider", "?")
+                retrieved = r.get("notes_retrieved", 0)
+                wh = r.get("notes_withheld", 0)
+                outcome = r.get("outcome", "?")
+                typer.echo(
+                    f"    {ts}  {prov:<12}  {retrieved} retrieved  {wh} withheld  [{outcome}]"
+                )
+            typer.echo("")
+        except (OSError, ValueError):
+            typer.echo("  ⚠ audit log unreadable")
+        return
 
     conn = _connect()
     try:
         total = conn.execute("SELECT count(*) FROM memories").fetchone()[0]
+        local_only_total = conn.execute(
+            "SELECT count(*) FROM memories WHERE local_only = 1"
+        ).fetchone()[0]
         by_proj = conn.execute(
             "SELECT COALESCE(project, '(no project)') AS p, count(*) AS c "
             "FROM memories GROUP BY p ORDER BY c DESC, p"
@@ -996,10 +1254,11 @@ def status() -> None:
     except (OSError, ValueError):
         version = "?"
     db_kb = DB_PATH.stat().st_size / 1024 if DB_PATH.exists() else 0.0
+    lo_suffix = f"  ({local_only_total} local-only)" if local_only_total else ""
 
     typer.echo("\nkage status")
     typer.echo(f"  store    {_disp(KAGE_HOME)}   (config v{version})")
-    typer.echo(f"  memory   {total} note(s) across {len(by_proj)} project(s)")
+    typer.echo(f"  memory   {total} note(s) across {len(by_proj)} project(s){lo_suffix}")
     for p, c in by_proj:
         typer.echo(f"             {c:>4}  {p}")
     typer.echo(f"  index    {_disp(DB_PATH)}   ({db_kb:.0f} KB)")
@@ -1121,6 +1380,24 @@ def doctor() -> None:
     typer.echo(f"  {'✓' if mcp_ok else '⚠'} MCP server (mcp[cli]){'' if mcp_ok else ' — not installed'}")
     if not mcp_ok:
         typer.echo("      → pip install 'mcp[cli]'")
+
+    # Advisory — privacy gate (Layer 3e) config
+    local_only_projects = cfg.get("local_only_projects", [])
+    if local_only_projects:
+        typer.echo(f"  ✓ privacy gate  {len(local_only_projects)} local-only project(s) configured")
+    else:
+        typer.echo("  · privacy gate  no local_only_projects set (--local flag still works per note)")
+
+    # Advisory — audit log writable
+    audit_ok = True
+    try:
+        with open(KAGE_HOME / "audit.jsonl", "a"):
+            pass
+    except OSError:
+        audit_ok = False
+    typer.echo(f"  {'✓' if audit_ok else '⚠'} audit log  {_disp(KAGE_HOME / 'audit.jsonl')}")
+    if not audit_ok:
+        typer.echo("      → check write permissions on ~/.kage")
 
     if all_ok:
         typer.echo("\n✓ kage looks healthy.\n")

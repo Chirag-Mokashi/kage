@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import shutil
 from pathlib import Path
 
@@ -31,11 +32,12 @@ def kage_recall(query: str, project: str | None = None, limit: int = 5) -> list[
 
 
 @mcp.tool()
-def kage_remember(text: str, project: str | None = None) -> dict:
+def kage_remember(text: str, project: str | None = None, local: bool = False) -> dict:
     """Save a note to kage memory.
 
     Write-gated: disabled by default. Enable by setting mcp_allow_writes: true
     in ~/.kage/config.json.
+    Set local=true to mark the note local-only (never sent to cloud providers).
     """
     cfg = _cli._config()
     if not cfg.get("mcp_allow_writes", False):
@@ -44,8 +46,8 @@ def kage_remember(text: str, project: str | None = None) -> dict:
             "id": None,
             "reason": "writes disabled — set mcp_allow_writes in config",
         }
-    mem_id = _cli._save(text, project)
-    return {"saved": True, "id": mem_id, "reason": "saved"}
+    mem_id = _cli._save(text, project, local_only=local)
+    return {"saved": True, "id": mem_id, "reason": "saved", "local_only": local}
 
 
 @mcp.tool()
@@ -54,8 +56,34 @@ def kage_ask(question: str, provider: str | None = None, project: str | None = N
 
     Omit provider to use the local Ollama model. Specify a provider name
     (claude, openai, groq, etc.) to route through kage's cloud stack.
+    The 3e disclosure gate runs automatically — local-only notes and PII are
+    withheld from cloud dispatch. Counts are reported in the response.
     """
     rows = _cli._search(question, project, 5, any_terms=True)
+    cfg = _cli._config()
+
+    # 3e disclosure gate — MCP has no interactive prompt; auto-filter and report
+    withheld_count = 0
+    withheld_reasons: list[str] = []
+    if provider:
+        allowed_rows, withheld = _cli._disclosure_gate(rows, cfg)
+        withheld_count = len(withheld)
+        withheld_reasons = [w["reason"] for w in withheld]
+        pii_hits = [p for w in withheld for p in w["pii_patterns"]]
+        all_blocked = bool(withheld) and not allowed_rows
+        outcome = "blocked_all_local_mcp" if all_blocked else "dispatched_mcp"
+        _cli._write_audit({
+            "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "provider": provider, "project": project,
+            "notes_retrieved": len(rows), "notes_withheld": withheld_count,
+            "withheld_reasons": withheld_reasons, "pii_detected": pii_hits,
+            "user_approved": None, "outcome": outcome,
+        })
+        if all_blocked:
+            provider = None  # fall back to local Ollama; rows unchanged (local context)
+        else:
+            rows = allowed_rows  # only permitted context goes to cloud
+
     context_parts: list[str] = []
     sources: list[str] = []
     for note_id, _proj, _created, path, _snip, section_title, char_start, char_end in rows:
@@ -77,7 +105,6 @@ def kage_ask(question: str, provider: str | None = None, project: str | None = N
         "'I don't know — nothing in your notes covers this.' "
         "Do not use general knowledge. Be concise."
     )
-    cfg = _cli._config()
     if provider:
         try:
             answer = _cli._call_cloud(
@@ -88,7 +115,8 @@ def kage_ask(question: str, provider: str | None = None, project: str | None = N
             )
             used_provider = provider
         except _cli.CloudError as exc:
-            return {"answer": str(exc), "sources": [], "provider": provider}
+            return {"answer": str(exc), "sources": [], "provider": provider,
+                    "withheld_count": withheld_count}
     else:
         model = cfg.get("model", "qwen3:14b")
         url = cfg.get("ollama_url", "http://localhost:11434") + "/api/generate"
@@ -100,10 +128,15 @@ def kage_ask(question: str, provider: str | None = None, project: str | None = N
         except Exception as exc:
             return {
                 "answer": f"Local model unavailable: {exc}",
-                "sources": [],
-                "provider": "local",
+                "sources": [], "provider": "local", "withheld_count": withheld_count,
             }
-    return {"answer": answer, "sources": sources, "provider": used_provider}
+    return {
+        "answer": answer,
+        "sources": sources,
+        "provider": used_provider,
+        "withheld_count": withheld_count,
+        "withheld_reasons": withheld_reasons,
+    }
 
 
 @mcp.tool()

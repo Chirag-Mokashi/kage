@@ -2597,3 +2597,578 @@ def test_mcp_serve_calls_mcp_run(monkeypatch, tmp_path):
     r = CliRunner().invoke(cli.app, ["mcp", "serve"])
     assert r.exit_code == 0
     assert run_calls == ["stdio"]
+
+
+# ── Cycle 7 — Layer 3e privacy gate ───────────────────────────────────────────
+
+import json as _json  # noqa: E402 — used in gate tests only
+
+
+# ── _pii_scan ─────────────────────────────────────────────────────────────────
+
+def test_pii_scan_matches_aadhaar():
+    assert "Aadhaar" in cli._pii_scan("my id is 1234 5678 9012")
+
+
+def test_pii_scan_matches_pan():
+    assert "PAN card" in cli._pii_scan("PAN: ABCDE1234F")
+
+
+def test_pii_scan_matches_openai_key():
+    assert "OpenAI key" in cli._pii_scan("key=sk-abcdefghijklmnopqrstuv")
+
+
+def test_pii_scan_matches_email():
+    assert "Email" in cli._pii_scan("reach me at user@example.com please")
+
+
+def test_pii_scan_matches_aws_key():
+    assert "AWS access key" in cli._pii_scan("AKIAIOSFODNN7EXAMPLE")
+
+
+def test_pii_scan_matches_ssh_key():
+    assert "SSH private key" in cli._pii_scan("-----BEGIN RSA PRIVATE KEY-----")
+
+
+def test_pii_scan_clean_text_returns_empty():
+    assert cli._pii_scan("today I learned about recursion in Python") == []
+
+
+def test_pii_scan_extra_patterns_respected():
+    hits = cli._pii_scan("EMP-12345", extra_patterns=[{"name": "EmployeeID", "pattern": r"EMP-\d+"}])
+    assert "EmployeeID" in hits
+
+
+# ── _save local_only flag ─────────────────────────────────────────────────────
+
+def test_save_local_only_writes_frontmatter_and_db(monkeypatch, tmp_path):
+    """--local flag must set local_only:true in markdown frontmatter and local_only=1 in DB."""
+    h = _save_home(monkeypatch, tmp_path)
+    mem_id = cli._save("my Aadhaar details", None, local_only=True)
+    md = (h / "memory" / f"{mem_id}.md").read_text()
+    assert "local_only: true" in md
+    conn = cli._connect()
+    row = conn.execute("SELECT local_only FROM memories WHERE id=?", (mem_id,)).fetchone()
+    conn.close()
+    assert row[0] == 1
+
+
+def test_remember_local_flag_sets_local_only(monkeypatch, tmp_path):
+    """kage remember --local must set local_only via _save and confirm in output."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    r = CliRunner().invoke(cli.app, ["remember", "passport info", "--local", "--yes"])
+    assert r.exit_code == 0
+    assert "local-only" in r.output
+    md_files = list((h / "memory").glob("*.md"))
+    assert len(md_files) == 1
+    assert "local_only: true" in md_files[0].read_text()
+
+
+def test_save_auto_flags_local_only_from_project_config(monkeypatch, tmp_path):
+    """Notes saved to a project listed in local_only_projects must be auto-flagged."""
+    h = _save_home(monkeypatch, tmp_path)
+    cfg = _json.loads((h / "config.json").read_text())
+    cfg["local_only_projects"] = ["health"]
+    (h / "config.json").write_text(_json.dumps(cfg))
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+
+    mem_id = cli._save("doctor visit notes", "health")
+    conn = cli._connect()
+    row = conn.execute("SELECT local_only FROM memories WHERE id=?", (mem_id,)).fetchone()
+    conn.close()
+    assert row[0] == 1
+
+
+def test_save_non_local_project_not_flagged(monkeypatch, tmp_path):
+    """Notes in unlisted projects must NOT be auto-flagged as local_only."""
+    h = _save_home(monkeypatch, tmp_path)
+    cfg = _json.loads((h / "config.json").read_text())
+    cfg["local_only_projects"] = ["health"]
+    (h / "config.json").write_text(_json.dumps(cfg))
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+
+    mem_id = cli._save("public tech note", "kage")
+    conn = cli._connect()
+    row = conn.execute("SELECT local_only FROM memories WHERE id=?", (mem_id,)).fetchone()
+    conn.close()
+    assert row[0] == 0
+
+
+# ── _disclosure_gate ──────────────────────────────────────────────────────────
+
+def _fake_row(mem_id, project=None):
+    """Build a minimal 8-tuple row matching _search() output."""
+    return (mem_id, project, "2026-06-10", f"memory/{mem_id}.md", "snip", None, None, None)
+
+
+def test_disclosure_gate_withholds_local_only_flag(monkeypatch, tmp_path):
+    """Gate must block a note whose local_only DB flag is 1."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    mem_id = cli._save("secret", None, local_only=True)
+    cfg = cli._config()
+    allowed, withheld = cli._disclosure_gate([_fake_row(mem_id)], cfg)
+    assert allowed == []
+    assert len(withheld) == 1
+    assert withheld[0]["reason"] == "local_only:flag"
+
+
+def test_disclosure_gate_withholds_local_only_project(monkeypatch, tmp_path):
+    """Gate must block a note via project rule even when note was saved before the rule existed."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    # Save before adding finance to local_only_projects → local_only=0 in DB
+    mem_id = cli._save("bank statement", "finance")
+    # Now retroactively add the project rule
+    cfg_data = _json.loads((h / "config.json").read_text())
+    cfg_data["local_only_projects"] = ["finance"]
+    (h / "config.json").write_text(_json.dumps(cfg_data))
+    cfg = cli._config()
+    allowed, withheld = cli._disclosure_gate([_fake_row(mem_id, "finance")], cfg)
+    assert allowed == []
+    assert withheld[0]["reason"] == "local_only:project:finance"
+
+
+def test_disclosure_gate_withholds_pii_detected(monkeypatch, tmp_path):
+    """Gate must block a note that matches a PII pattern even without the local_only flag."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    mem_id = cli._save("my key is sk-abcdefghijklmnopqrstuv", None)
+    cfg = cli._config()
+    allowed, withheld = cli._disclosure_gate([_fake_row(mem_id)], cfg)
+    assert allowed == []
+    assert withheld[0]["reason"] == "pii_detected"
+    assert "OpenAI key" in withheld[0]["pii_patterns"]
+
+
+def test_disclosure_gate_allows_clean_note(monkeypatch, tmp_path):
+    """Gate must allow a clean note with no local_only flag and no PII."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    mem_id = cli._save("Python is a dynamically typed language", None)
+    cfg = cli._config()
+    allowed, withheld = cli._disclosure_gate([_fake_row(mem_id)], cfg)
+    assert len(allowed) == 1
+    assert withheld == []
+
+
+def test_disclosure_gate_empty_rows():
+    """Gate on empty input must return two empty lists without error."""
+    allowed, withheld = cli._disclosure_gate([], {})
+    assert allowed == []
+    assert withheld == []
+
+
+# ── ask command — gate integration ────────────────────────────────────────────
+
+def test_ask_cloud_all_withheld_falls_back_to_ollama(monkeypatch, tmp_path):
+    """Case 2: when all notes are local-only the gate must skip cloud and call Ollama."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    mem_id = cli._save("my passport number", None, local_only=True)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [_fake_row(mem_id)])
+    cloud_calls: list[str] = []
+    monkeypatch.setattr(cli, "_call_cloud", lambda name, *a, **kw: cloud_calls.append(name) or "ans")
+    monkeypatch.setattr(cli, "_post_json", lambda url, p, **kw: {"response": "local ans"})
+    r = CliRunner().invoke(cli.app, ["ask", "q", "--cloud"])
+    assert r.exit_code == 0
+    assert cloud_calls == []
+    assert "local-only" in r.output
+    assert "Proceed" not in r.output  # no prompt for Case 2
+
+
+def test_ask_cloud_some_withheld_prompts_user(monkeypatch, tmp_path):
+    """Case 1: local_only note withheld — gate shows 'Preparing to send context' preamble + [y/N] prompt."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    # local_only=True, clean text — withheld by flag, not PII
+    secret_id = cli._save("launch presentation notes", None, local_only=True)
+    clean_id = cli._save("recursion is a useful concept", None)
+    monkeypatch.setattr(cli, "_search",
+        lambda *a, **kw: [_fake_row(secret_id), _fake_row(clean_id)])
+    monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: "cloud answer")
+    monkeypatch.setattr(cli, "_session_approvals", {})
+    r = CliRunner().invoke(cli.app, ["ask", "q", "--cloud"], input="y\n")
+    assert r.exit_code == 0
+    assert "Preparing to send context" in r.output
+    assert "Proceed with partial context?" in r.output
+    assert "withheld" in r.output
+
+
+def test_ask_cloud_user_denies_falls_back_to_ollama(monkeypatch, tmp_path):
+    """When user answers N at the gate prompt the cloud must not be called."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    secret_id = cli._save("my Aadhaar 1234 5678 9012", None)
+    clean_id = cli._save("clean note", None)
+    monkeypatch.setattr(cli, "_search",
+        lambda *a, **kw: [_fake_row(secret_id), _fake_row(clean_id)])
+    cloud_calls: list[str] = []
+    monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: cloud_calls.append(1) or "ans")
+    monkeypatch.setattr(cli, "_post_json", lambda url, p, **kw: {"response": "local ans"})
+    monkeypatch.setattr(cli, "_session_approvals", {})
+    r = CliRunner().invoke(cli.app, ["ask", "q", "--cloud"], input="n\n")
+    assert r.exit_code == 0
+    assert cloud_calls == []
+    assert "Denied" in r.output
+
+
+def test_ask_cloud_session_approval_suppresses_reprompt(monkeypatch, tmp_path):
+    """Second cloud call to same provider in a session must skip the prompt."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    secret_id = cli._save("my Aadhaar 1234 5678 9012", None)
+    clean_id = cli._save("clean note", None)
+    monkeypatch.setattr(cli, "_search",
+        lambda *a, **kw: [_fake_row(secret_id), _fake_row(clean_id)])
+    monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: "cloud answer")
+    monkeypatch.setattr(cli, "_session_approvals", {})
+
+    r1 = CliRunner().invoke(cli.app, ["ask", "q", "--cloud"], input="y\n")
+    assert "Proceed" in r1.output
+
+    r2 = CliRunner().invoke(cli.app, ["ask", "q", "--cloud"])
+    assert "Proceed" not in r2.output
+
+
+def test_ask_cloud_always_ask_overrides_session_memory(monkeypatch, tmp_path):
+    """--always-ask must re-prompt even after a session approval."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    secret_id = cli._save("my Aadhaar 1234 5678 9012", None)
+    clean_id = cli._save("clean note", None)
+    monkeypatch.setattr(cli, "_search",
+        lambda *a, **kw: [_fake_row(secret_id), _fake_row(clean_id)])
+    monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: "cloud answer")
+    monkeypatch.setattr(cli, "_session_approvals", {"claude": True})
+
+    r = CliRunner().invoke(cli.app, ["ask", "q", "--cloud", "--always-ask"], input="y\n")
+    assert "Proceed" in r.output
+
+
+# ── audit log ─────────────────────────────────────────────────────────────────
+
+def test_audit_log_written_on_dispatch(monkeypatch, tmp_path):
+    """Gate must write a JSONL record to audit.jsonl on each cloud dispatch."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: "answer")
+    CliRunner().invoke(cli.app, ["ask", "q", "--cloud"])
+    records = [_json.loads(l) for l in (h / "audit.jsonl").read_text().strip().splitlines()]
+    assert len(records) == 1
+    assert records[0]["provider"] == "claude"
+    assert records[0]["outcome"] == "dispatched"
+    assert records[0]["notes_withheld"] == 0
+
+
+def test_audit_log_written_on_block(monkeypatch, tmp_path):
+    """Gate must write an audit record with outcome blocked_all_local when all notes are withheld."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    mem_id = cli._save("secret", None, local_only=True)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [_fake_row(mem_id)])
+    monkeypatch.setattr(cli, "_post_json", lambda url, p, **kw: {"response": "local"})
+    CliRunner().invoke(cli.app, ["ask", "q", "--cloud"])
+    records = [_json.loads(l) for l in (h / "audit.jsonl").read_text().strip().splitlines()]
+    assert records[0]["outcome"] == "blocked_all_local"
+    assert records[0]["notes_withheld"] == 1
+
+
+def test_audit_log_written_on_denial(monkeypatch, tmp_path):
+    """Gate must write an audit record with outcome denied_by_user when user answers N."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    secret_id = cli._save("Aadhaar 1234 5678 9012", None)
+    clean_id = cli._save("public note", None)
+    monkeypatch.setattr(cli, "_search",
+        lambda *a, **kw: [_fake_row(secret_id), _fake_row(clean_id)])
+    monkeypatch.setattr(cli, "_post_json", lambda url, p, **kw: {"response": "local"})
+    monkeypatch.setattr(cli, "_session_approvals", {})
+    CliRunner().invoke(cli.app, ["ask", "q", "--cloud"], input="n\n")
+    records = [_json.loads(l) for l in (h / "audit.jsonl").read_text().strip().splitlines()]
+    assert records[0]["outcome"] == "denied_by_user"
+    assert records[0]["user_approved"] is False
+
+
+# ── status and doctor ─────────────────────────────────────────────────────────
+
+def test_status_shows_local_only_count(monkeypatch, tmp_path):
+    """kage status must display the count of local-only notes when non-zero."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    cli._save("public note", None)
+    cli._save("private note", None, local_only=True)
+    r = CliRunner().invoke(cli.app, ["status"])
+    assert "local-only" in r.output
+
+
+def test_status_audit_flag_shows_records(monkeypatch, tmp_path):
+    """kage status --audit must display dispatch records from the audit log."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: "answer")
+    CliRunner().invoke(cli.app, ["ask", "q", "--cloud"])
+    r = CliRunner().invoke(cli.app, ["status", "--audit"])
+    assert "dispatched" in r.output
+    assert "claude" in r.output
+
+
+def test_status_audit_flag_no_log_yet(monkeypatch, tmp_path):
+    """kage status --audit must report cleanly when no audit log exists yet."""
+    _save_home(monkeypatch, tmp_path)
+    r = CliRunner().invoke(cli.app, ["status", "--audit"])
+    assert r.exit_code == 0
+    assert "no audit log" in r.output
+
+
+def test_doctor_shows_privacy_gate_advisory(monkeypatch, tmp_path):
+    """kage doctor must show the privacy gate line for local_only_projects."""
+    h = _save_home(monkeypatch, tmp_path)
+    cfg_data = _json.loads((h / "config.json").read_text())
+    cfg_data["local_only_projects"] = ["health", "finance"]
+    (h / "config.json").write_text(_json.dumps(cfg_data))
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert "privacy gate" in r.output
+    assert "2 local-only project" in r.output
+
+
+def test_doctor_shows_no_local_only_projects_advisory(monkeypatch, tmp_path):
+    """kage doctor must show advisory when local_only_projects is not configured."""
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert "no local_only_projects" in r.output
+
+
+def test_doctor_shows_audit_log_advisory(monkeypatch, tmp_path):
+    """kage doctor must confirm the audit log path is writable."""
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert "audit log" in r.output
+
+
+# ── MCP gate — kage_ask ───────────────────────────────────────────────────────
+
+def test_mcp_kage_ask_gate_withholds_local_only(monkeypatch, tmp_path):
+    """kage_ask MCP tool must run the disclosure gate and fall back to Ollama when all withheld."""
+    from kage import mcp_server
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    mem_id = cli._save("secret passport", None, local_only=True)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [_fake_row(mem_id)])
+    cloud_calls: list[str] = []
+    monkeypatch.setattr(cli, "_call_cloud", lambda name, *a, **kw: cloud_calls.append(name) or "ans")
+    monkeypatch.setattr(cli, "_post_json", lambda url, p, **kw: {"response": "local ans"})
+    result = mcp_server.kage_ask("what is my passport?", provider="groq")
+    assert cloud_calls == []
+    assert result["withheld_count"] == 1
+
+
+def test_mcp_kage_ask_gate_allows_clean_note(monkeypatch, tmp_path):
+    """kage_ask MCP tool must pass clean notes through to the cloud provider."""
+    from kage import mcp_server
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    mem_id = cli._save("Python uses indentation", None)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [_fake_row(mem_id)])
+    monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: "cloud answer")
+    result = mcp_server.kage_ask("what about Python?", provider="groq")
+    assert result["withheld_count"] == 0
+    assert result["answer"] == "cloud answer"
+
+
+def test_mcp_kage_ask_audit_written(monkeypatch, tmp_path):
+    """kage_ask MCP tool must write an audit record on every cloud dispatch."""
+    from kage import mcp_server
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: "answer")
+    mcp_server.kage_ask("q", provider="groq")
+    records = [_json.loads(l) for l in (h / "audit.jsonl").read_text().strip().splitlines()]
+    assert records[0]["provider"] == "groq"
+    assert records[0]["outcome"] == "dispatched_mcp"
+
+
+# ── coverage completeness for new Cycle 7 lines ───────────────────────────────
+
+def test_post_json_success_return(monkeypatch):
+    """Line 393: _post_json must parse and return the HTTP response body as JSON."""
+    import urllib.request as _req
+    expected = {"status": "ok", "value": 42}
+
+    class _FakeResp:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def read(self): return _json.dumps(expected).encode()
+
+    monkeypatch.setattr(_req, "urlopen", lambda req, timeout=120: _FakeResp())
+    result = cli._post_json("http://fake-host/api", {"key": "val"})
+    assert result == expected
+
+
+def test_write_audit_oserror_is_silent(monkeypatch, tmp_path):
+    """Lines 516-517: _write_audit must silently swallow OSError (e.g. disk full)."""
+    import builtins
+    h = _save_home(monkeypatch, tmp_path)
+    real_open = builtins.open
+
+    def bad_open(path, mode="r", *a, **kw):
+        if "audit.jsonl" in str(path):
+            raise OSError("disk full")
+        return real_open(path, mode, *a, **kw)
+
+    monkeypatch.setattr(builtins, "open", bad_open)
+    cli._write_audit({"ts": "now", "outcome": "test"})  # must not raise
+
+
+def test_disclosure_gate_uses_section_offsets(monkeypatch, tmp_path):
+    """Line 569: gate must call _read_section when a row has char_start/char_end set."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    mem_id = cli._save("safe content about coding", None)
+    cfg = cli._config()
+    row_with_offsets = (mem_id, None, "2026", f"memory/{mem_id}.md", "snip", "Intro", 0, 24)
+    allowed, withheld = cli._disclosure_gate([row_with_offsets], cfg)
+    assert len(allowed) == 1
+    assert withheld == []
+
+
+def test_disclosure_gate_missing_file_treated_as_clean(monkeypatch, tmp_path):
+    """Lines 573-574: gate must allow a note whose markdown file is missing (empty text = no PII)."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    mem_id = cli._save("something", None)
+    (h / "memory" / f"{mem_id}.md").unlink()
+    cfg = cli._config()
+    allowed, withheld = cli._disclosure_gate([_fake_row(mem_id)], cfg)
+    assert len(allowed) == 1
+    assert withheld == []
+
+
+def test_ollama_status_model_ready(monkeypatch):
+    """Line 697: _ollama_status must return (True, ...) when the model name is in the tags list."""
+    import urllib.request as _req
+    model = "qwen3:14b"
+
+    class _FakeResp:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def read(self): return _json.dumps({"models": [{"name": model}]}).encode()
+
+    monkeypatch.setattr(_req, "urlopen", lambda *a, **kw: _FakeResp())
+    ok, msg = cli._ollama_status({}, model)
+    assert ok is True
+    assert "ready" in msg
+
+
+def test_status_audit_flag_unreadable_log(monkeypatch, tmp_path):
+    """Lines 1224-1225: status --audit must handle a corrupt audit log without crashing."""
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "audit.jsonl").write_text("not valid json {{{")
+    r = CliRunner().invoke(cli.app, ["status", "--audit"])
+    assert r.exit_code == 0
+    assert "unreadable" in r.output
+
+
+def test_doctor_audit_log_unwritable(monkeypatch, tmp_path):
+    """Lines 1385-1386, 1389: doctor must show ⚠ when the audit log path is not writable."""
+    import builtins
+    h = _save_home(monkeypatch, tmp_path)
+    real_open = builtins.open
+
+    def bad_open(path, mode="r", *a, **kw):
+        if "audit.jsonl" in str(path) and "a" in mode:
+            raise OSError("read-only filesystem")
+        return real_open(path, mode, *a, **kw)
+
+    monkeypatch.setattr(builtins, "open", bad_open)
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert "⚠" in r.output
+    assert "audit log" in r.output
+
+
+# ── missing-test additions (post-review) ──────────────────────────────────────
+
+def test_pii_scan_invalid_extra_pattern_is_skipped():
+    """Malformed regex in extra_patterns must be silently skipped — must not raise."""
+    hits = cli._pii_scan("some text", extra_patterns=[{"name": "bad", "pattern": r"[invalid"}])
+    assert isinstance(hits, list)  # did not raise
+
+
+def test_ask_cloud_require_approval_false_skips_prompt_filters_and_audits_none(monkeypatch, tmp_path):
+    """require_approval:false must skip the prompt, still withhold PII notes, and write user_approved=null."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    cfg_data = _json.loads((h / "config.json").read_text())
+    cfg_data["require_approval"] = False
+    (h / "config.json").write_text(_json.dumps(cfg_data))
+    secret_id = cli._save("my Aadhaar 1234 5678 9012", None)
+    clean_id = cli._save("clean public note", None)
+    monkeypatch.setattr(cli, "_search",
+        lambda *a, **kw: [_fake_row(secret_id), _fake_row(clean_id)])
+    cloud_calls: list = []
+    monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: cloud_calls.append(1) or "cloud answer")
+    monkeypatch.setattr(cli, "_session_approvals", {})
+    r = CliRunner().invoke(cli.app, ["ask", "q", "--cloud"])
+    assert r.exit_code == 0
+    assert "Proceed" not in r.output  # no prompt when require_approval=false
+    assert cloud_calls  # cloud was still called (clean note passed through)
+    records = [_json.loads(l) for l in (h / "audit.jsonl").read_text().strip().splitlines()]
+    assert records[0]["user_approved"] is None  # auto-approved — no prompt shown
+
+
+def test_ask_cloud_session_approval_actually_calls_cloud(monkeypatch, tmp_path):
+    """After session approval, cloud must actually be called — not silently fall back to Ollama."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    secret_id = cli._save("my Aadhaar 1234 5678 9012", None)
+    clean_id = cli._save("clean note", None)
+    monkeypatch.setattr(cli, "_search",
+        lambda *a, **kw: [_fake_row(secret_id), _fake_row(clean_id)])
+    cloud_calls: list = []
+    monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: cloud_calls.append(1) or "cloud answer")
+    monkeypatch.setattr(cli, "_session_approvals", {"claude": True})  # already approved
+    r = CliRunner().invoke(cli.app, ["ask", "q", "--cloud"])
+    assert r.exit_code == 0
+    assert "Proceed" not in r.output  # no re-prompt
+    assert cloud_calls  # cloud was actually called
+    assert "cloud answer" in r.output
+
+
+def test_ask_cloud_session_remember_false_always_prompts(monkeypatch, tmp_path):
+    """session_remember_approval:false must prompt even if provider was pre-approved in _session_approvals."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    cfg_data = _json.loads((h / "config.json").read_text())
+    cfg_data["session_remember_approval"] = False
+    (h / "config.json").write_text(_json.dumps(cfg_data))
+    secret_id = cli._save("my Aadhaar 1234 5678 9012", None)
+    clean_id = cli._save("clean note", None)
+    monkeypatch.setattr(cli, "_search",
+        lambda *a, **kw: [_fake_row(secret_id), _fake_row(clean_id)])
+    monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: "cloud answer")
+    monkeypatch.setattr(cli, "_session_approvals", {"claude": True})  # would suppress prompt if remembered
+    r = CliRunner().invoke(cli.app, ["ask", "q", "--cloud"], input="y\n")
+    assert r.exit_code == 0
+    assert "Proceed" in r.output  # prompt fired despite pre-existing session approval
+
+
+def test_ask_cloud_case3_pii_preamble(monkeypatch, tmp_path):
+    """When withheld note is blocked due to PII scan, preamble must say 'PII detected in'."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    # Save a note whose text contains an Aadhaar number (PII) but is NOT flagged local_only
+    pii_id = cli._save("my Aadhaar is 1234 5678 9012", None)
+    clean_id = cli._save("clean note", None)
+    monkeypatch.setattr(cli, "_search",
+        lambda *a, **kw: [_fake_row(pii_id), _fake_row(clean_id)])
+    monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: "cloud answer")
+    monkeypatch.setattr(cli, "_session_approvals", {})
+    r = CliRunner().invoke(cli.app, ["ask", "q", "--cloud"], input="y\n")
+    assert r.exit_code == 0
+    assert "PII detected in" in r.output
+    assert "Preparing to send context" not in r.output

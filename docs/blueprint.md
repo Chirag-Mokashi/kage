@@ -43,6 +43,10 @@ kage is a **local-first personal context broker** between you and your cloud AI 
 
 Use whichever level fits the conversation: complement when explaining purpose, mediator when explaining function, broker when explaining v1 mechanism.
 
+### Operating value — Jugaad (locked 2026-06-10)
+
+Above the 10 characteristics sits one operating value: **jugaad** (जुगाड़) — frugal, resourceful ingenuity under constraint. Extract maximum capability from what you already have; route *around* artificial constraints (paywalls, missing APIs, double-billing) using existing resources rather than paying to remove them. **Guardrail (inseparable):** jugaad governs WHAT kage reaches for, never *how* it is built — the workaround is resourceful; the implementation stays clean, tested, complete. Jugaad and "Complete over fast" check each other.
+
 ### v1 scope (2026 ship target)
 
 Broker-functional. Single-device M5 Pro. Text-first interaction. The COMPLEMENT and MEDIATOR identities exist conceptually in v1 but operationally constrained to what a broker can do.

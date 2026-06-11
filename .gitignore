@@ -54,3 +54,4 @@ data/
 ~/.kage/
 *.faiss
 *.bin
+Context/

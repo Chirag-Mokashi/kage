@@ -177,8 +177,15 @@ def _read_body(rel_path: str) -> str:
     return text.strip()
 
 
-def _chunk_note(body: str) -> list[dict]:
-    """Split a note body into sections on ## / ### headers; return char-offset chunks."""
+_CHUNK_TARGET  = 1500
+_CHUNK_MIN     = 100
+_CHUNK_OVERLAP = 150
+_RERANK_POOL   = 25
+_reranker_cache: list = [False, None]   # [loaded_flag, instance_or_None]
+
+
+def _split_on_headers(body: str) -> list[dict]:
+    """Split body on ## / ### headers; return sections with char offsets. No size filtering."""
     chunks = []
     lines = body.splitlines()
     prev_header_pos = -1
@@ -210,6 +217,92 @@ def _chunk_note(body: str) -> list[dict]:
         return [{"title": "", "char_start": 0, "char_end": len(body)}]
 
     return chunks
+
+
+def _hard_windows(text: str, base: int, title: str) -> list[dict]:
+    """Slice text into fixed-size windows of TARGET chars with OVERLAP."""
+    result = []
+    pos = 0
+    while pos < len(text):
+        end = min(pos + _CHUNK_TARGET, len(text))
+        if end - pos >= _CHUNK_MIN:
+            result.append({"title": title, "char_start": base + pos, "char_end": base + end})
+        pos += _CHUNK_TARGET - _CHUNK_OVERLAP
+    if not result:
+        result.append({"title": title, "char_start": base, "char_end": base + len(text)})
+    return result
+
+
+def _window_by_pieces(pieces: list[str], text: str, base: int, title: str) -> list[dict]:
+    """Group pieces (splits of text) into TARGET-sized windows with OVERLAP."""
+    positions: list[int] = []
+    cursor = 0
+    for piece in pieces:
+        pos = text.find(piece, cursor)
+        if pos == -1:
+            pos = cursor
+        positions.append(pos)
+        cursor = pos + len(piece)
+
+    result: list[dict] = []
+    i = 0
+    while i < len(pieces):
+        w_start = positions[i]
+        w_end = positions[i] + len(pieces[i])
+        j = i + 1
+        while j < len(pieces):
+            candidate_end = positions[j] + len(pieces[j])
+            if candidate_end - w_start > _CHUNK_TARGET:
+                break
+            w_end = candidate_end
+            j += 1
+        if w_end - w_start >= _CHUNK_MIN:
+            result.append({"title": title, "char_start": base + w_start, "char_end": base + w_end})
+        if j >= len(pieces):
+            break
+        overlap_target = w_end - _CHUNK_OVERLAP
+        next_i = j
+        for k in range(j - 1, i, -1):
+            if positions[k] <= overlap_target:
+                next_i = k + 1
+                break
+        i = max(next_i, i + 1)
+    return result
+
+
+def _chunk_note(body: str) -> list[dict]:
+    """Split a note body into retrieval chunks with char offsets into body.
+
+    Header sections kept as-is when <= TARGET. Oversized sections (and
+    headerless notes > TARGET) split recursively: paragraph -> sentence -> window.
+    """
+    sections = _split_on_headers(body)
+    result = []
+    for section in sections:
+        char_start = section["char_start"]
+        char_end = section["char_end"]
+        text = body[char_start:char_end]
+        if len(text) < _CHUNK_MIN:
+            continue
+        if len(text) <= _CHUNK_TARGET:
+            result.append(section)
+            continue
+        pieces = [p for p in re.split(r'\n\n+', text) if p]
+        if len(pieces) > 1:
+            windows = _window_by_pieces(pieces, text, char_start, section["title"])
+            if windows:
+                result.extend(windows)
+                continue
+        pieces = [p for p in re.split(r'(?<=[.!?]) +', text) if p]
+        if len(pieces) > 1:
+            windows = _window_by_pieces(pieces, text, char_start, section["title"])
+            if windows:
+                result.extend(windows)
+                continue
+        result.extend(_hard_windows(text, char_start, section["title"]))
+    if not result:
+        result.append({"title": "", "char_start": 0, "char_end": len(body)})
+    return result
 
 
 def _read_section(content_path: str, char_start: int, char_end: int) -> str:
@@ -332,18 +425,16 @@ def _search_fts(query: str, project: str | None, limit: int, any_terms: bool = F
 
 def _search(query: str, project: str | None, limit: int, any_terms: bool = False):
     """Hybrid FTS5 + vector search; falls back to FTS5 when embeddings are off or Ollama is down."""
-    if not any(t for t in query.split() if t):
+    if not query or not query.strip():
         return []
     cfg = _config()
+    use_rerank = cfg.get("rerank", False)
+    pool = max(limit * 2, _RERANK_POOL) if use_rerank else limit * 2
     if not cfg.get("embeddings", True):
-        return [(*row, None, None, None) for row in _search_fts(query, project, limit, any_terms)]
-
-    def run_fts():
-        return _search_fts(query, project, limit * 2, any_terms)
-
-    def run_vec():
-        return _search_vec(_embed(query), project, limit * 2)
-
+        rows = [(*row, None, None, None) for row in _search_fts(query, project, limit, any_terms)]
+        return _rerank(rows, query, limit) if use_rerank else rows
+    def run_fts(): return _search_fts(query, project, pool, any_terms)
+    def run_vec(): return _search_vec(_embed(query), project, pool)
     with ThreadPoolExecutor(max_workers=2) as executor:
         fts_future = executor.submit(run_fts)
         vec_future = executor.submit(run_vec)
@@ -351,15 +442,15 @@ def _search(query: str, project: str | None, limit: int, any_terms: bool = False
         try:
             vec_rows = vec_future.result()
         except OllamaUnavailable:
-            return [(*row, None, None, None) for row in fts_rows[:limit]]
-
-    fused = _rrf_fuse(fts_rows, vec_rows)[:limit]
+            rows = [(*row, None, None, None) for row in fts_rows[:limit]]
+            return _rerank(rows, query, limit) if use_rerank else rows
+    candidate_limit = _RERANK_POOL if use_rerank else limit
+    fused = _rrf_fuse(fts_rows, vec_rows)[:candidate_limit]
     fts_ids = {row[0] for row in fts_rows}
     vec_by_id = {row[0]: row for row in vec_rows}
     result = []
     for row in fused:
         if row[0] not in fts_ids:
-            # vec-only row: replace float score with readable excerpt, keep section fields
             try:
                 body = _read_body(row[3]).replace("\n", " ")
                 excerpt = (body[:70] + "…") if len(body) > 70 else body
@@ -367,12 +458,11 @@ def _search(query: str, project: str | None, limit: int, any_terms: bool = False
                 excerpt = ""
             row = (row[0], row[1], row[2], row[3], excerpt, row[5], row[6], row[7])
         else:
-            # fts row: merge section fields from vec row if available, else pad with None
             vec_row = vec_by_id.get(row[0])
             section = (vec_row[5], vec_row[6], vec_row[7]) if vec_row else (None, None, None)
             row = (*row, *section)
         result.append(row)
-    return result
+    return _rerank(result, query, limit) if use_rerank else result
 
 
 def _config() -> dict:
@@ -644,6 +734,41 @@ def _get_chroma():
         )
         raise OllamaUnavailable("schema version mismatch — run: kage reindex --force")
     return collection
+
+
+def _get_reranker():
+    """Lazy-load bge-reranker-v2-m3; return None if sentence-transformers not installed."""
+    if _reranker_cache[0]:
+        return _reranker_cache[1]
+    _reranker_cache[0] = True
+    try:
+        from sentence_transformers import CrossEncoder
+        _reranker_cache[1] = CrossEncoder("BAAI/bge-reranker-v2-m3")
+    except Exception:
+        _reranker_cache[1] = None
+    return _reranker_cache[1]
+
+
+def _rerank(rows: list, query: str, top_n: int) -> list:
+    reranker = _get_reranker()
+    if reranker is None or not rows:
+        return rows[:top_n]
+    texts = []
+    for row in rows:
+        char_start, char_end = row[6], row[7]
+        if char_start is not None and char_end is not None:
+            try:
+                body = _read_body(row[3])
+                text = body[char_start:char_end][:512]
+            except OSError:
+                text = row[4] or ""
+        else:
+            text = row[4] or ""
+        texts.append(text)
+    pairs = [[query, t] for t in texts]
+    scores = reranker.predict(pairs).tolist()
+    ranked = sorted(zip(scores, rows), key=lambda x: x[0], reverse=True)
+    return [r for _, r in ranked[:top_n]]
 
 
 def _search_vec(query_vec: list[float], project: str | None, limit: int) -> list:

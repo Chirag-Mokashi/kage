@@ -19,6 +19,7 @@ import chromadb
 
 import pytest
 from typer.testing import CliRunner
+from unittest import mock
 
 from kage import cli
 
@@ -576,6 +577,67 @@ def test_chunk_note_char_end_does_not_exceed_body():
     body = "## Section\n" + "x" * 110  # no trailing newline
     result = cli._chunk_note(body)
     assert all(chunk["char_end"] <= len(body) for chunk in result)
+
+
+# ── _chunk_note recursive splitting (Cycle 8) ───────────────────────────────
+
+def test_chunk_note_headerless_long_splits_by_paragraph():
+    body = (('word ' * 60).strip() + '\n\n') * 6
+    result = cli._chunk_note(body)
+    assert len(result) > 1
+    for chunk in result:
+        assert chunk['char_end'] - chunk['char_start'] <= cli._CHUNK_TARGET + 10
+    for chunk in result:
+        assert chunk['char_end'] <= len(body)
+
+def test_chunk_note_oversized_header_section_splits():
+    section_text = ('sentence here. ' * 130).strip()
+    body = '## Big Section\n' + section_text
+    result = cli._chunk_note(body)
+    assert len(result) > 1
+    for chunk in result:
+        assert chunk['char_end'] - chunk['char_start'] <= cli._CHUNK_TARGET + 10
+    for chunk in result:
+        assert chunk['char_end'] <= len(body)
+
+def test_chunk_note_recursive_chunks_span_body():
+    para = ('word ' * 80).strip()
+    body = (para + '\n\n') * 5
+    result = cli._chunk_note(body)
+    assert result[0]['char_start'] < cli._CHUNK_OVERLAP
+    assert result[-1]['char_end'] >= len(body) - cli._CHUNK_OVERLAP
+    for chunk in result:
+        assert 0 <= chunk['char_start'] < chunk['char_end'] <= len(body)
+
+def test_chunk_note_offsets_index_into_body():
+    para = ('word ' * 80).strip()
+    body = (para + '\n\n') * 5
+    result = cli._chunk_note(body)
+    for chunk in result:
+        text = body[chunk['char_start']:chunk['char_end']]
+        assert len(text) >= cli._CHUNK_MIN
+
+def test_hard_windows_covers_text():
+    text = 'x' * 5000
+    chunks = cli._hard_windows(text, 0, 't')
+    covered = set()
+    for c in chunks:
+        covered.update(range(c['char_start'], c['char_end']))
+    assert covered.issuperset(range(len(text)))
+    for c in chunks:
+        assert c['char_end'] - c['char_start'] <= cli._CHUNK_TARGET
+
+def test_window_by_pieces_tracks_positions():
+    # text must be > _CHUNK_MIN (100) for any chunk to emit
+    words = [f"word{i:03d}" for i in range(20)]  # 20 × 7 chars = 140 chars total
+    text = " ".join(words)
+    pieces = words
+    result = cli._window_by_pieces(pieces, text, 0, "test")
+    assert len(result) > 0
+    for chunk in result:
+        assert 0 <= chunk["char_start"]
+        assert chunk["char_end"] <= len(text)
+        assert chunk["char_end"] > chunk["char_start"]
 
 
 # ── _read_section (Step 3) ──────────────────────────────────────────────────
@@ -3172,3 +3234,118 @@ def test_ask_cloud_case3_pii_preamble(monkeypatch, tmp_path):
     assert r.exit_code == 0
     assert "PII detected in" in r.output
     assert "Preparing to send context" not in r.output
+
+
+# ── Reranker tests (Cycle 8 Step 3) ─────────────────────────────────────────
+
+def test_get_reranker_returns_none_when_not_installed():
+    cli._reranker_cache[0] = False
+    cli._reranker_cache[1] = None
+    original_modules = sys.modules.copy()
+    sys.modules["sentence_transformers"] = None
+    try:
+        result = cli._get_reranker()
+        assert result is None
+    finally:
+        if "sentence_transformers" in original_modules:
+            sys.modules["sentence_transformers"] = original_modules["sentence_transformers"]
+        elif "sentence_transformers" in sys.modules:
+            del sys.modules["sentence_transformers"]
+
+
+def test_get_reranker_caches_result():
+    cli._reranker_cache[0] = False
+    cli._reranker_cache[1] = None
+    original_modules = sys.modules.copy()
+    sys.modules["sentence_transformers"] = None
+    try:
+        result1 = cli._get_reranker()
+        result2 = cli._get_reranker()
+        assert result1 is None
+        assert result2 is None
+        assert cli._reranker_cache[0] is True
+    finally:
+        if "sentence_transformers" in original_modules:
+            sys.modules["sentence_transformers"] = original_modules["sentence_transformers"]
+        elif "sentence_transformers" in sys.modules:
+            del sys.modules["sentence_transformers"]
+
+
+def test_rerank_falls_back_when_no_reranker():
+    cli._reranker_cache[0] = True
+    cli._reranker_cache[1] = None
+    rows = [
+        ("id1", "p", "ts", "path", "snip",  "title", None, None),
+        ("id2", "p", "ts", "path", "snip2", "title", None, None),
+        ("id3", "p", "ts", "path", "snip3", "title", None, None),
+    ]
+    result = cli._rerank(rows, "query", 2)
+    assert result == rows[:2]
+
+
+def test_rerank_falls_back_on_empty_rows():
+    cli._reranker_cache[0] = True
+    cli._reranker_cache[1] = None
+    result = cli._rerank([], "query", 5)
+    assert result == []
+
+
+def test_rerank_scores_and_reorders():
+    mock_reranker = mock.MagicMock()
+    mock_reranker.predict.return_value.tolist.return_value = [0.1, 0.9, 0.5]
+    cli._reranker_cache[0] = True
+    cli._reranker_cache[1] = mock_reranker
+    rows = [
+        ("id1", "p", "ts", "path", "snip1", "title", None, None),
+        ("id2", "p", "ts", "path", "snip2", "title", None, None),
+        ("id3", "p", "ts", "path", "snip3", "title", None, None),
+    ]
+    result = cli._rerank(rows, "q", 3)
+    assert result[0] == rows[1]
+    assert result[2] == rows[0]
+
+
+def test_rerank_respects_top_n():
+    mock_reranker = mock.MagicMock()
+    mock_reranker.predict.return_value.tolist.return_value = [0.1, 0.9, 0.5]
+    cli._reranker_cache[0] = True
+    cli._reranker_cache[1] = mock_reranker
+    rows = [
+        ("id1", "p", "ts", "path", "snip1", "title", None, None),
+        ("id2", "p", "ts", "path", "snip2", "title", None, None),
+        ("id3", "p", "ts", "path", "snip3", "title", None, None),
+    ]
+    result = cli._rerank(rows, "q", 2)
+    assert len(result) == 2
+    assert result[0] == rows[1]
+
+
+def test_search_rerank_off_by_default():
+    with mock.patch.object(cli, "_config", return_value={}):
+        with mock.patch.object(cli, "_search_fts", return_value=[("id1", "proj", "ts", "path", "snip")]):
+            with mock.patch.object(cli, "_embed", side_effect=cli.OllamaUnavailable("off")):
+                with mock.patch.object(cli, "_rerank") as mock_rerank:
+                    cli._search("hello", None, 5)
+                    mock_rerank.assert_not_called()
+
+
+def test_search_rerank_on_calls_rerank_fts_fallback():
+    with mock.patch.object(cli, "_config", return_value={"rerank": True}):
+        with mock.patch.object(cli, "_search_fts", return_value=[("id1", "proj", "ts", "path", "snip")]):
+            with mock.patch.object(cli, "_embed", side_effect=cli.OllamaUnavailable("off")):
+                with mock.patch.object(cli, "_rerank", return_value=["sentinel"]) as mock_rerank:
+                    result = cli._search("hello", None, 5)
+                    assert result == ["sentinel"]
+                    mock_rerank.assert_called_once()
+
+
+def test_search_rerank_on_calls_rerank_hybrid():
+    with mock.patch.object(cli, "_config", return_value={"rerank": True}):
+        with mock.patch.object(cli, "_search_fts", return_value=[("id1", "proj", "ts", "path", "snip")]):
+            with mock.patch.object(cli, "_search_vec", return_value=[("id1", "proj", "ts", "path", "snip", "title", 0, 10)]):
+                with mock.patch.object(cli, "_embed", return_value=[0.1, 0.2]):
+                    with mock.patch.object(cli, "_rrf_fuse", return_value=[("id1", "proj", "ts", "path", "snip")]):
+                        with mock.patch.object(cli, "_rerank", return_value=["sentinel"]) as mock_rerank:
+                            result = cli._search("hello", None, 5)
+                            assert result == ["sentinel"]
+                            mock_rerank.assert_called_once()

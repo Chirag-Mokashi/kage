@@ -2,7 +2,7 @@
 
 **kage** (Japanese — "shadow") is a local-first personal context broker between you and your AI stack.
 
-It sits silently between your intent and every AI tool you use — managing your memory, gating what leaves your machine, and routing queries to the right model. It is not a chatbot. It is not a Claude replacement. It is the invisible layer that makes every AI tool you already use smarter and safer.
+It sits silently between your intent and every AI tool you use — managing your memory, gating what leaves your machine, and grounding answers in your own notes. It is not a chatbot. It is not a Claude replacement. It is the invisible layer that makes every AI tool you already use smarter and safer.
 
 kage is defined at three nested levels, all simultaneously true:
 
@@ -22,6 +22,8 @@ kage is defined at three nested levels, all simultaneously true:
 ## Current state — v0.7
 
 kage ships as a headless CLI and MCP server. The full UI layer (via Odysseus integration) is in progress.
+
+**Honest status:** today kage is a *context-gated forwarder* — it retrieves your notes, gates what may leave your machine, and forwards a single grounded query to the model *you* select. The full *broker* behavior (automatic model routing, identity-partitioned memory, active context detection) is on the roadmap below — designed, not yet shipped. The BROKER level above describes the direction; this section describes what runs today.
 
 ```
   ┌─────────────────────────────────────────────────────────────┐
@@ -263,6 +265,8 @@ Ten characteristics locked in Session 4, checked against every design decision:
 ```
 
 The single-word north star: **Seamless** — kage acts invisibly. The only hard problem is adoption.
+
+Above the ten sits one operating value — **jugaad** (जुगाड़): frugal, resourceful ingenuity under constraint. Get maximum capability from what you already have; route *around* artificial constraints (paywalls, missing APIs, double-billing) rather than pay to remove them. The guardrail: jugaad governs *what* kage reaches for, never *how* it's built — the workaround is resourceful, the implementation stays clean, tested, and complete.
 
 ---
 

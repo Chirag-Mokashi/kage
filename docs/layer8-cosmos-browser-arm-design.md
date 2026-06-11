@@ -3,6 +3,13 @@
 *Design spec. Status: PLAN (cloud-authored), to be built next session per dev workflow (plan → write local → review cloud).*
 *Created 2026-06-10. Target: Cosmos. Mode: design now, build next session.*
 
+> **⚠️ UPDATE 2026-06-10 — this browser arm may be UNNECESSARY for Cosmos.**
+> Cosmos = **Edison Scientific**, which ships an **official Platform API** (API keys, docs, cookbook: edisonscientific.gitbook.io/edison-cookbook). A sanctioned API connector beats browser automation on every axis — zero ToS/ban risk, no Playwright fragility, clean to build.
+> **Decision GATED on one fact:** is Edison's API included in the subscription, or billed separately (double-pay, like Perplexity/Claude APIs)?
+> - Included / affordable → build an **Edison API connector**; abandon this browser-arm path for Cosmos.
+> - Separately billed → this browser-arm design becomes the jugaad fallback; resume ToS/detection research.
+> Chirag to check pricing (platform.edisonscientific.com/profile + /pricing). **Build NOTHING until known.**
+
 ---
 
 ## Why this exists (the economic driver)

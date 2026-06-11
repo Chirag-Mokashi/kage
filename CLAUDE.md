@@ -106,6 +106,34 @@ For a fresh coding session: read `README.md`, then `src/kage/cli.py`, `tests/tes
 - **Options over suggestions.** Wherever a decision is presented, surface options explicitly. Don't make silent choices.
 - **Memory auto-loads** across sessions (see `~/.claude/projects/-Users-mokashi-Projects-kage/memory/`) — durable preferences and project state persist there.
 
+## Implementation Workflow (HARD GATE — never skip)
+
+Locked 7-step split for ALL implementation work. The roles do **NOT** collapse:
+
+- **Cloud (the session model) PLANS and REVIEWS only.**
+- **Local (Qwen3 via `kage ask`) WRITES all code and tests.**
+- **Local RUNS tests** (`uv run pytest` via Bash).
+
+Per step, in order:
+
+```
+1. PLAN code     → cloud
+2. WRITE code    → local (Qwen3)
+3. REVIEW code   → cloud      ← NEVER skipped
+4. PLAN tests    → cloud
+5. WRITE tests   → local (Qwen3)
+6. REVIEW tests  → cloud      ← NEVER skipped
+7. RUN tests     → local
+```
+
+**THE GATE:** I never write implementation code or tests myself with Edit/Write. The instant I do, three roles collapse into one, the review step has nothing independent to check, and the learning signal is destroyed. If I catch myself about to edit `cli.py` / `test_cli.py` directly — **STOP**. That is the exact failure mode this rule exists to prevent. (Planning stays on cloud deliberately: reasoning is local's known weak class, so routing it to local produces predictable noise, not insight.)
+
+**MISTAKE LOG (mandatory, after every step):** every cloud correction of local's output is recorded via `kage remember --project kage-corrections`, in the format:
+
+> *"Correction log — `<feature>` Step N (date): Local made X errors: … **Pattern:** …"*
+
+Bidirectional — log cloud-introduced bugs too. **This log is the deliverable; the code is the byproduct.** It is the Layer 6 fuel and the entire reason the split exists. See `feedback_dev_workflow.md` in memory.
+
 ## Two Handoff Modes
 
 This file and `docs/blueprint.md` serve different purposes when handing context to another AI tool (personal Claude, Cosmos, etc.):

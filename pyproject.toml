@@ -1,6 +1,6 @@
 [project]
 name = "kage"
-version = "0.6.0"
+version = "0.8.0"
 description = "Local-first personal context broker — your notes, surfaced into your cloud AI, on your machine."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,4 +24,7 @@ packages = ["src/kage"]
 dev = [
     "pytest>=8",
     "pytest-cov>=7.1.0",
+]
+rerank = [
+    "sentence-transformers>=3",
 ]

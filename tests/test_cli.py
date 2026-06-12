@@ -296,7 +296,7 @@ def test_search_returns_empty_for_empty_query():
 
 def test_search_falls_back_to_fts_when_embed_disabled(monkeypatch):
     captured = {}
-    def fake_fts(query, project, limit, any_terms=False):
+    def fake_fts(query, project, limit, any_terms=False, identity="personal"):
         captured["limit"] = limit
         return [("A", "p", "t", "a.md", "snip")]
     monkeypatch.setattr(cli, "_config", lambda: {"embeddings": False})
@@ -332,6 +332,8 @@ def test_search_hybrid_fuses_both_results(monkeypatch):
 
 def test_search_vec_returns_correct_shape(monkeypatch):
     # v0.4: rows are 8-tuples (note_id, project, created_at, path, score, title, cs, ce)
+    monkeypatch.setattr(cli, "_allowed_note_ids", lambda identity, project: {"n1", "n2"})
+
     class FakeCollection:
         def count(self): return 2
         def get(self, where=None, include=None): return {"ids": ["n1_c0", "n2_c0"]}
@@ -355,6 +357,7 @@ def test_search_vec_returns_correct_shape(monkeypatch):
 
 def test_search_vec_applies_project_filter(monkeypatch):
     captured = {}
+    monkeypatch.setattr(cli, "_allowed_note_ids", lambda identity, project: {"n1"})
 
     class FakeCollection:
         def count(self): return 1
@@ -368,10 +371,13 @@ def test_search_vec_applies_project_filter(monkeypatch):
 
     monkeypatch.setattr(cli, "_get_chroma", lambda: FakeCollection())
     cli._search_vec([0.1], "projA", 5)
-    assert captured["where"] == {"project": "projA"}
+    assert "note_id" in captured["where"]
+    assert set(captured["where"]["note_id"]["$in"]) == {"n1"}
 
 
 def test_search_vec_returns_empty_on_empty_collection(monkeypatch):
+    monkeypatch.setattr(cli, "_allowed_note_ids", lambda identity, project: {"n1"})
+
     class FakeCollection:
         def count(self): return 0
         def get(self, where=None, include=None): return {"ids": []}
@@ -382,6 +388,7 @@ def test_search_vec_returns_empty_on_empty_collection(monkeypatch):
 
 def test_search_vec_no_where_when_project_is_none(monkeypatch):
     captured = {}
+    monkeypatch.setattr(cli, "_allowed_note_ids", lambda identity, project: {"n1"})
 
     class FakeCollection:
         def count(self): return 1
@@ -395,7 +402,8 @@ def test_search_vec_no_where_when_project_is_none(monkeypatch):
 
     monkeypatch.setattr(cli, "_get_chroma", lambda: FakeCollection())
     cli._search_vec([0.1], None, 5)
-    assert captured["where"] is None
+    assert "note_id" in captured["where"]
+    assert set(captured["where"]["note_id"]["$in"]) == {"n1"}
 
 
 # ── _get_chroma (Step 4) ────────────────────────────────────────────────────
@@ -518,6 +526,313 @@ def test_chunks_table_created_on_existing_db(tmp_path):
     cols = [row[1] for row in conn.execute("PRAGMA table_info(chunks)")]
     conn.close()
     assert "id" in cols and "char_start" in cols
+
+
+# ── schema Step 1 (Cycle 9): join tables + state column ────────────────────
+
+def test_init_creates_join_tables(tmp_path):
+    h = tmp_path / ".kage"
+    run(["init"], h)
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    table_names = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+    index_names = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")]
+    conn.close()
+    assert "memory_projects" in table_names
+    assert "memory_identities" in table_names
+    assert "idx_mem_projects_project" in index_names
+    assert "idx_mem_identities_identity" in index_names
+
+
+def test_init_creates_state_column(tmp_path):
+    h = tmp_path / ".kage"
+    run(["init"], h)
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(memories)")]
+    conn.close()
+    assert "state" in cols
+
+
+def test_init_migration_adds_state_to_existing_db(tmp_path):
+    h = tmp_path / ".kage"
+    (h / "indexes").mkdir(parents=True)
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    conn.executescript("""
+        CREATE TABLE memories (
+            id TEXT PRIMARY KEY, content_path TEXT NOT NULL,
+            project TEXT, created_at TEXT NOT NULL, needs_embed INTEGER NOT NULL DEFAULT 1,
+            local_only INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE VIRTUAL TABLE memory_fts USING fts5(id UNINDEXED, body);
+    """)
+    conn.close()
+    assert run(["init"], h).returncode == 0
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(memories)")]
+    tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+    conn.close()
+    assert "state" in cols
+    assert "memory_projects" in tables
+    assert "memory_identities" in tables
+
+
+def test_init_idempotent_on_migrated_db(tmp_path):
+    h = tmp_path / ".kage"
+    run(["init"], h)
+    assert run(["init"], h).returncode == 0
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(memories)")]
+    tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+    conn.close()
+    assert "state" in cols
+    assert "memory_projects" in tables
+    assert "memory_identities" in tables
+
+
+# ── _allowed_note_ids wall (Cycle 9, Step 2) — M1-M7 TDD ──────────────────
+
+def _wall_home(monkeypatch, tmp_path):
+    h = tmp_path / ".kage"
+    for attr, val in {
+        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+    }.items():
+        monkeypatch.setattr(cli, attr, val)
+    CliRunner().invoke(cli.app, ["init"])
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    conn.executemany(
+        "INSERT INTO memories(id, content_path, created_at, state) VALUES (?,?,?,?)",
+        [
+            ("m1","m1.md","2026-01-01","scoped"),
+            ("m2","m2.md","2026-01-01","baseline"),
+            ("m3","m3.md","2026-01-01","scoped"),
+            ("m4","m4.md","2026-01-01","baseline"),
+            ("m5","m5.md","2026-01-01","scoped"),
+            ("m6","m6.md","2026-01-01","baseline"),
+            ("m7","m7.md","2026-01-01","pending"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO memory_identities(mem_id, identity) VALUES (?,?)",
+        [
+            ("m1","personal"),
+            ("m2","personal"),("m2","neu"),
+            ("m3","neu"),
+            ("m4","neu"),
+            ("m5","neu"),
+            ("m6","personal"),("m6","neu"),
+            ("m7","personal"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO memory_projects(mem_id, project) VALUES (?,?)",
+        [("m1","kage"),("m3","quantum"),("m5","llm-rsrch")],
+    )
+    conn.commit()
+    conn.close()
+    return h
+
+
+def test_allowed_note_ids_personal_kage(monkeypatch, tmp_path):
+    _wall_home(monkeypatch, tmp_path)
+    assert cli._allowed_note_ids("personal", "kage") == {"m1", "m2", "m6"}
+
+def test_allowed_note_ids_personal_no_project(monkeypatch, tmp_path):
+    _wall_home(monkeypatch, tmp_path)
+    assert cli._allowed_note_ids("personal", None) == {"m1", "m2", "m6"}
+
+def test_allowed_note_ids_neu_quantum(monkeypatch, tmp_path):
+    _wall_home(monkeypatch, tmp_path)
+    assert cli._allowed_note_ids("neu", "quantum") == {"m2", "m3", "m4", "m6"}
+
+def test_allowed_note_ids_neu_no_project(monkeypatch, tmp_path):
+    _wall_home(monkeypatch, tmp_path)
+    assert cli._allowed_note_ids("neu", None) == {"m2", "m3", "m4", "m5", "m6"}
+
+def test_allowed_note_ids_wall_invariant(monkeypatch, tmp_path):
+    _wall_home(monkeypatch, tmp_path)
+    personal_all = cli._allowed_note_ids("personal", None)
+    neu_all = cli._allowed_note_ids("neu", None)
+    assert "m1" not in neu_all
+    assert "m3" not in personal_all
+    assert "m5" not in personal_all
+
+def test_allowed_note_ids_pending_never_returned(monkeypatch, tmp_path):
+    _wall_home(monkeypatch, tmp_path)
+    assert "m7" not in cli._allowed_note_ids("personal", None)
+    assert "m7" not in cli._allowed_note_ids("personal", "kage")
+    assert "m7" not in cli._allowed_note_ids("personal", "some-other-project")
+
+
+# ── _search_fts wall (Cycle 9, Step 5) — FTS enforces identity ─────────────
+
+def test_search_fts_enforces_identity_wall(monkeypatch, tmp_path):
+    _wall_home(monkeypatch, tmp_path)
+    conn = sqlite3.connect(cli.DB_PATH)
+    conn.execute("INSERT INTO memory_fts(id, body) VALUES ('m1', 'alpha unique kage note')")
+    conn.execute("INSERT INTO memory_fts(id, body) VALUES ('m3', 'alpha unique quantum note')")
+    conn.commit()
+    conn.close()
+    personal_rows = cli._search_fts("alpha", "kage", 10, identity="personal")
+    personal_ids = {r[0] for r in personal_rows}
+    neu_rows = cli._search_fts("alpha", "quantum", 10, identity="neu")
+    neu_ids = {r[0] for r in neu_rows}
+    assert "m1" in personal_ids
+    assert "m3" not in personal_ids
+    assert "m3" in neu_ids
+    assert "m1" not in neu_ids
+
+def test_search_fts_empty_when_no_allowed_ids(monkeypatch, tmp_path):
+    _wall_home(monkeypatch, tmp_path)
+    conn = sqlite3.connect(cli.DB_PATH)
+    conn.execute("INSERT INTO memory_fts(id, body) VALUES ('m1', 'hello world')")
+    conn.commit()
+    conn.close()
+    result = cli._search_fts("hello", None, 10, identity="ghost")
+    assert result == []
+
+def test_search_embeddings_off_uses_wall(monkeypatch, tmp_path):
+    _wall_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_config", lambda: {"embeddings": False, "rerank": False})
+    conn = sqlite3.connect(cli.DB_PATH)
+    conn.execute("INSERT INTO memory_fts(id, body) VALUES ('m1', 'beta personal note')")
+    conn.execute("INSERT INTO memory_fts(id, body) VALUES ('m3', 'beta neu note')")
+    conn.commit()
+    conn.close()
+    result = cli._search("beta", "kage", 10, identity="personal")
+    ids = {r[0] for r in result}
+    assert "m1" in ids
+    assert "m3" not in ids
+
+
+# ── _migrate_identity_axis (Cycle 9, Step 3) ───────────────────────────────
+
+def _mp_home(monkeypatch, tmp_path):
+    h = tmp_path / ".kage"
+    for attr, val in {
+        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+    }.items():
+        monkeypatch.setattr(cli, attr, val)
+    CliRunner().invoke(cli.app, ["init"])
+    return h
+
+
+def test_migrate_backfills_identity(monkeypatch, tmp_path):
+    h = _mp_home(monkeypatch, tmp_path)
+    md = h / "memory" / "test-note.md"
+    md.write_text("---\nid: test-note\nproject: proj1\ncreated_at: 2026-01-01\n---\n\nhello world\n")
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    conn.execute("INSERT INTO memories(id, content_path, project, created_at) VALUES (?,?,?,?)", ("test-note", "memory/test-note.md", "proj1", "2026-01-01"))
+    conn.commit()
+    conn.close()
+    cli._migrate_identity_axis(dry_run=False)
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    assert "personal" in {row[0] for row in conn.execute("SELECT identity FROM memory_identities WHERE mem_id='test-note'")}
+    assert "proj1" in {row[0] for row in conn.execute("SELECT project FROM memory_projects WHERE mem_id='test-note'")}
+    conn.close()
+
+
+def test_migrate_dry_run_writes_nothing(monkeypatch, tmp_path):
+    h = _mp_home(monkeypatch, tmp_path)
+    md = h / "memory" / "test-note.md"
+    md.write_text("---\nid: test-note\nproject: proj1\ncreated_at: 2026-01-01\n---\n\nhello world\n")
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    conn.execute("INSERT INTO memories(id, content_path, project, created_at) VALUES (?,?,?,?)", ("test-note", "memory/test-note.md", "proj1", "2026-01-01"))
+    conn.commit()
+    conn.close()
+    cli._migrate_identity_axis(dry_run=True)
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    assert conn.execute("SELECT COUNT(*) FROM memory_identities").fetchone()[0] == 0
+    conn.close()
+    assert "identities:" not in md.read_text()
+
+
+def test_migrate_is_idempotent(monkeypatch, tmp_path):
+    h = _mp_home(monkeypatch, tmp_path)
+    md = h / "memory" / "test-note.md"
+    md.write_text("---\nid: test-note\nproject: proj1\ncreated_at: 2026-01-01\n---\n\nhello world\n")
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    conn.execute("INSERT INTO memories(id, content_path, project, created_at) VALUES (?,?,?,?)", ("test-note", "memory/test-note.md", "proj1", "2026-01-01"))
+    conn.commit()
+    conn.close()
+    stats1 = cli._migrate_identity_axis(dry_run=False)
+    assert stats1["identities_added"] == 1
+    assert stats1["projects_added"] == 1
+    assert stats1["frontmatter_updated"] == 1
+    stats2 = cli._migrate_identity_axis(dry_run=False)
+    assert stats2["identities_added"] == 0
+    assert stats2["projects_added"] == 0
+    assert stats2["frontmatter_updated"] == 0
+
+
+def test_migrate_cli_dry_run(tmp_path):
+    h = tmp_path / ".kage"
+    run(["init"], h)
+    run(["remember", "some text", "-p", "myproject", "-y"], h)
+    result = run(["migrate", "--dry-run"], h)
+    assert result.returncode == 0
+    assert "[DRY RUN]" in result.stdout
+    assert "identities added:" in result.stdout
+
+
+# ── _save identity matrix (Cycle 9, Step 4) ────────────────────────────────
+
+def test_save_writes_personal_identity_by_default(monkeypatch, tmp_path):
+    h = _mp_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: [0.1] * 768)
+    fake_coll = type("C", (), {"add": lambda self, **kw: None, "count": lambda self: 0, "query": lambda self, **kw: {"ids": [[]], "metadatas": [[]], "distances": [[]]}, "delete": lambda self, **kw: None})()
+    monkeypatch.setattr(cli, "_get_chroma", lambda: fake_coll)
+    mem_id = cli._save("hello world", "myproject")
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    identities = {r[0] for r in conn.execute("SELECT identity FROM memory_identities WHERE mem_id=?", (mem_id,))}
+    conn.close()
+    assert identities == {"personal"}
+
+def test_save_writes_state_scoped_when_project_given(monkeypatch, tmp_path):
+    h = _mp_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: [0.1] * 768)
+    fake_coll = type("C", (), {"add": lambda self, **kw: None, "count": lambda self: 0, "query": lambda self, **kw: {"ids": [[]], "metadatas": [[]], "distances": [[]]}, "delete": lambda self, **kw: None})()
+    monkeypatch.setattr(cli, "_get_chroma", lambda: fake_coll)
+    mem_id = cli._save("some note", "myproject")
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    state = conn.execute("SELECT state FROM memories WHERE id=?", (mem_id,)).fetchone()[0]
+    conn.close()
+    assert state == "scoped"
+
+def test_save_writes_state_baseline_when_no_project(monkeypatch, tmp_path):
+    h = _mp_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: [0.1] * 768)
+    fake_coll = type("C", (), {"add": lambda self, **kw: None, "count": lambda self: 0, "query": lambda self, **kw: {"ids": [[]], "metadatas": [[]], "distances": [[]]}, "delete": lambda self, **kw: None})()
+    monkeypatch.setattr(cli, "_get_chroma", lambda: fake_coll)
+    mem_id = cli._save("some note", None)
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    state = conn.execute("SELECT state FROM memories WHERE id=?", (mem_id,)).fetchone()[0]
+    conn.close()
+    assert state == "baseline"
+
+def test_save_writes_explicit_identity(monkeypatch, tmp_path):
+    h = _mp_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: [0.1] * 768)
+    fake_coll = type("C", (), {"add": lambda self, **kw: None, "count": lambda self: 0, "query": lambda self, **kw: {"ids": [[]], "metadatas": [[]], "distances": [[]]}, "delete": lambda self, **kw: None})()
+    monkeypatch.setattr(cli, "_get_chroma", lambda: fake_coll)
+    mem_id = cli._save("neu note", "hsi", identities=["neu"])
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    identities = {r[0] for r in conn.execute("SELECT identity FROM memory_identities WHERE mem_id=?", (mem_id,))}
+    conn.close()
+    assert identities == {"neu"}
+
+def test_save_round_trips_through_allowed_note_ids(monkeypatch, tmp_path):
+    h = _mp_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: [0.1] * 768)
+    fake_coll = type("C", (), {"add": lambda self, **kw: None, "count": lambda self: 0, "query": lambda self, **kw: {"ids": [[]], "metadatas": [[]], "distances": [[]]}, "delete": lambda self, **kw: None})()
+    monkeypatch.setattr(cli, "_get_chroma", lambda: fake_coll)
+    mem_id = cli._save("kage context note", "kage", identities=["personal"])
+    result = cli._allowed_note_ids("personal", "kage")
+    assert mem_id in result
+    result_neu = cli._allowed_note_ids("neu", "kage")
+    assert mem_id not in result_neu
 
 
 # ── _chunk_note (Step 2) ────────────────────────────────────────────────────
@@ -1010,11 +1325,12 @@ def test_search_vec_two_notes_both_returned(monkeypatch):
 
 
 def test_search_vec_per_project_count_uses_get_not_count(monkeypatch):
-    # count() returns 10, but per-project get() returns only 1 id
+    # count() returns 10, but per-allowed-notes get() returns only 1 chunk id
     # → n_results passed to query must be 1 (min(limit, 1)), not 10
     meta = {"note_id": "n1", "project": "proj", "created_at": "t", "content_path": "f.md",
             "section_title": "", "char_start": 0, "char_end": 50}
     queried_n = []
+    monkeypatch.setattr(cli, "_allowed_note_ids", lambda identity, project: {"n1"})
 
     class Coll:
         def count(self): return 10
@@ -1025,7 +1341,7 @@ def test_search_vec_per_project_count_uses_get_not_count(monkeypatch):
 
     monkeypatch.setattr(cli, "_get_chroma", lambda: Coll())
     cli._search_vec([0.1], "proj", 10)
-    assert queried_n[0] == 1   # capped at per-project count, not total count
+    assert queried_n[0] == 1   # capped at allowed-note chunk count, not total count
 
 
 # ── reindex (Step 9) ────────────────────────────────────────────────────────
@@ -1167,8 +1483,9 @@ def test_reindex_exits_on_ollama_down(monkeypatch, tmp_path):
 def test_vec_search_respects_project_partition(monkeypatch, tmp_path):
     """CRITICAL (pitch-mandated): _search_vec must return only notes from the queried project.
 
-    Uses a real embedded ChromaDB to verify that ChromaDB's `where` filter
-    actually isolates projA notes from projB — not just that the kwarg is passed.
+    Wall is enforced by _allowed_note_ids (SQLite pre-filter) → Chroma gets
+    where={"note_id": {"$in": allowed_ids}}. Uses real ChromaDB to verify the
+    $in filter actually isolates projA notes — not just that the kwarg is passed.
     """
     chroma_dir = tmp_path / "chroma"
     config_path = tmp_path / "config.json"
@@ -1176,6 +1493,8 @@ def test_vec_search_respects_project_partition(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli, "CHROMA_DIR", chroma_dir)
     monkeypatch.setattr(cli, "CONFIG_PATH", config_path)
+    # Wall: projA identity wall returns only note-A; note-B is projB (different identity scope)
+    monkeypatch.setattr(cli, "_allowed_note_ids", lambda identity, project: {"note-A"} if project == "projA" else {"note-B"})
 
     client = chromadb.PersistentClient(path=str(chroma_dir))
     coll = client.get_or_create_collection(
@@ -2353,14 +2672,14 @@ def test_list_with_project_filter(monkeypatch, tmp_path):
 
 
 def test_list_project_filter_no_results(monkeypatch, tmp_path):
-    """Line 790: list_ -p with no matching notes must include the project name in the message."""
+    """list_ -p with no matching notes shows 'Nothing saved yet' with identity context."""
     _save_home(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
     cli._save("something", "other", embed=False)
     r = CliRunner().invoke(cli.app, ["list", "-p", "missing-proj"])
     assert r.exit_code == 0
     assert "Nothing saved yet" in r.output
-    assert "missing-proj" in r.output
+    assert "personal" in r.output  # identity shown in the empty message
 
 
 # ── recall command ────────────────────────────────────────────────────────────
@@ -3349,3 +3668,115 @@ def test_search_rerank_on_calls_rerank_hybrid():
                             result = cli._search("hello", None, 5)
                             assert result == ["sentinel"]
                             mock_rerank.assert_called_once()
+
+
+# ── _search_vec identity wall (Cycle 9, Step 6) ─────────────────────────────
+
+def test_search_vec_returns_empty_when_no_allowed_ids(monkeypatch):
+    monkeypatch.setattr(cli, "_allowed_note_ids", lambda identity, project: set())
+    result = cli._search_vec([0.1] * 4, None, 10)
+    assert result == []
+
+
+def test_search_vec_uses_allowed_ids_in_where_clause(monkeypatch):
+    from unittest.mock import Mock, ANY
+
+    monkeypatch.setattr(cli, "_allowed_note_ids", lambda identity, project: {"m1", "m6"})
+
+    mock_collection = Mock()
+    mock_collection.get.return_value = {"ids": ["chunk1"]}
+    mock_collection.query.return_value = {
+        "ids": [["chunk1"]],
+        "metadatas": [[{"note_id": "m1", "project": "kage", "created_at": "2026-01-01", "content_path": "/x"}]],
+        "distances": [[0.1]],
+    }
+    monkeypatch.setattr(cli, "_get_chroma", lambda: mock_collection)
+
+    result = cli._search_vec([0.1] * 4, "kage", 5)
+
+    mock_collection.get.assert_called_with(where={"note_id": {"$in": ANY}}, include=[])
+    assert result[0][0] == "m1"
+
+
+def test_search_vec_empty_collection_after_wall_filter(monkeypatch):
+    monkeypatch.setattr(cli, "_allowed_note_ids", lambda identity, project: {"m1", "m2"})
+
+    mock_collection = mock.Mock()
+    mock_collection.get.return_value = {"ids": []}
+    monkeypatch.setattr(cli, "_get_chroma", lambda: mock_collection)
+
+    result = cli._search_vec([0.1] * 4, None, 10)
+    assert result == []
+
+
+def test_search_identity_threaded_to_search_vec(monkeypatch):
+    monkeypatch.setattr(cli, "_config", lambda: {})
+    monkeypatch.setattr(cli, "_embed", lambda text: [0.1] * 4)
+    monkeypatch.setattr(cli, "_allowed_note_ids", lambda identity, project: set())
+    result = cli._search("anything", None, 5, identity="neu")
+    assert result == []
+
+
+# ── Step 7: --identity flag + MCP identity param + _disclosure_gate Stage-1 ──
+
+def test_remember_flag_writes_identity(monkeypatch, tmp_path):
+    h = _mp_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    fake_coll = type("C", (), {"add": lambda self, **kw: None, "count": lambda self: 0, "query": lambda self, **kw: {"ids": [[]], "metadatas": [[]], "distances": [[]]}, "delete": lambda self, **kw: None})()
+    monkeypatch.setattr(cli, "_get_chroma", lambda: fake_coll)
+    result = CliRunner().invoke(cli.app, ["remember", "neu note", "-p", "hsi", "--identity", "neu", "-y"])
+    assert result.exit_code == 0
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    ids_with_neu = {row[0] for row in conn.execute("SELECT mem_id FROM memory_identities WHERE identity='neu'")}
+    conn.close()
+    assert len(ids_with_neu) == 1
+
+
+def test_recall_flag_threads_identity(monkeypatch, tmp_path):
+    _mp_home(monkeypatch, tmp_path)
+    captured = {}
+    def fake_search(*args, **kwargs):
+        captured.update(kwargs)
+        return []
+    monkeypatch.setattr(cli, "_search", fake_search)
+    CliRunner().invoke(cli.app, ["recall", "kage", "--identity", "neu"])
+    assert captured.get("identity") == "neu"
+
+
+def test_ask_flag_threads_identity(monkeypatch, tmp_path):
+    _mp_home(monkeypatch, tmp_path)
+    captured = {}
+    def fake_search(*args, **kwargs):
+        captured.update(kwargs)
+        return []
+    monkeypatch.setattr(cli, "_search", fake_search)
+    CliRunner().invoke(cli.app, ["ask", "what is kage?", "--identity", "neu"])
+    assert captured.get("identity") == "neu"
+
+
+def test_list_flag_respects_identity_wall(monkeypatch, tmp_path):
+    _mp_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: [0.1] * 768)
+    fake_coll = type("C", (), {"add": lambda self, **kw: None, "count": lambda self: 0, "query": lambda self, **kw: {"ids": [[]], "metadatas": [[]], "distances": [[]]}, "delete": lambda self, **kw: None})()
+    monkeypatch.setattr(cli, "_get_chroma", lambda: fake_coll)
+    cli._save("personal note", "kage", identities=["personal"])
+    cli._save("neu note", "hsi", identities=["neu"])
+    result = CliRunner().invoke(cli.app, ["list", "--identity", "personal"])
+    assert result.exit_code == 0
+    assert "personal note" in result.output
+    result = CliRunner().invoke(cli.app, ["list", "--identity", "neu"])
+    assert result.exit_code == 0
+    assert "neu note" in result.output
+
+
+def test_disclosure_gate_stage1_blocks_cross_identity(monkeypatch):
+    monkeypatch.setattr(cli, "_allowed_note_ids", lambda identity, project: {"allowed-note"})
+    rows = [
+        ("allowed-note", "p", "t", "path", "snip", None, None, None),
+        ("blocked-note", "p", "t", "path", "snip", None, None, None),
+    ]
+    result_allowed, withheld = cli._disclosure_gate(rows, {}, identity="personal", project="kage")
+    assert "allowed-note" in [r[0] for r in result_allowed]
+    blocked = [w for w in withheld if w["note_id"] == "blocked-note"]
+    assert len(blocked) == 1
+    assert blocked[0]["reason"] == "identity_wall:personal"

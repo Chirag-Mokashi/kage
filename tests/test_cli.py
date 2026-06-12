@@ -1278,6 +1278,7 @@ def _fake_vec_coll(ids, metadatas, distances, project_ids=None, total_count=None
 
 
 def test_search_vec_returns_empty_when_no_docs(monkeypatch):
+    monkeypatch.setattr(cli, "_allowed_note_ids", lambda identity, project: set())
     monkeypatch.setattr(cli, "_get_chroma", lambda: _fake_vec_coll([], [], [], total_count=0))
     assert cli._search_vec([0.1, 0.2], None, 10) == []
 
@@ -1285,6 +1286,7 @@ def test_search_vec_returns_empty_when_no_docs(monkeypatch):
 def test_search_vec_returns_8_tuples(monkeypatch):
     meta = {"note_id": "n1", "project": "proj", "created_at": "t", "content_path": "p.md",
             "section_title": "Intro", "char_start": 0, "char_end": 100}
+    monkeypatch.setattr(cli, "_allowed_note_ids", lambda identity, project: {"n1"})
     monkeypatch.setattr(cli, "_get_chroma", lambda: _fake_vec_coll(["n1_c0"], [meta], [0.1]))
     result = cli._search_vec([0.1], None, 10)
     assert len(result) == 1
@@ -1302,6 +1304,7 @@ def test_search_vec_deduplicates_chunks_by_note(monkeypatch):
     meta = {"note_id": "n1", "project": "p", "created_at": "t", "content_path": "f.md",
             "section_title": "A", "char_start": 0, "char_end": 50}
     meta2 = {**meta, "section_title": "B", "char_start": 50, "char_end": 100}
+    monkeypatch.setattr(cli, "_allowed_note_ids", lambda identity, project: {"n1"})
     monkeypatch.setattr(cli, "_get_chroma", lambda: _fake_vec_coll(
         ["n1_c0", "n1_c1"], [meta, meta2], [0.1, 0.3]
     ))
@@ -1317,6 +1320,7 @@ def test_search_vec_two_notes_both_returned(monkeypatch):
               "section_title": "A", "char_start": 0, "char_end": 50}
     meta_b = {"note_id": "n2", "project": "p", "created_at": "t", "content_path": "b.md",
               "section_title": "B", "char_start": 0, "char_end": 50}
+    monkeypatch.setattr(cli, "_allowed_note_ids", lambda identity, project: {"n1", "n2"})
     monkeypatch.setattr(cli, "_get_chroma", lambda: _fake_vec_coll(
         ["n1_c0", "n2_c0"], [meta_a, meta_b], [0.1, 0.2]
     ))
@@ -3769,7 +3773,8 @@ def test_list_flag_respects_identity_wall(monkeypatch, tmp_path):
     assert "neu note" in result.output
 
 
-def test_disclosure_gate_stage1_blocks_cross_identity(monkeypatch):
+def test_disclosure_gate_stage1_blocks_cross_identity(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, "_allowed_note_ids", lambda identity, project: {"allowed-note"})
     rows = [
         ("allowed-note", "p", "t", "path", "snip", None, None, None),

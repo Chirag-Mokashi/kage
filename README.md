@@ -14,16 +14,16 @@ kage is defined at three nested levels, all simultaneously true:
               Tools and devices are arms. kage is the brain.
 
   BROKER      Local-first context broker between you and your cloud AI stack.
-              Project × identity partitioned memory. Privacy-preserving routing.
+              Identity × project partitioned memory. Privacy-preserving routing.
 ```
 
 ---
 
-## Current state — v0.7
+## Current state — v0.9
 
 kage ships as a headless CLI and MCP server. The full UI layer (via Odysseus integration) is in progress.
 
-**Honest status:** today kage is a *context-gated forwarder* — it retrieves your notes, gates what may leave your machine, and forwards a single grounded query to the model *you* select. The full *broker* behavior (automatic model routing, identity-partitioned memory, active context detection) is on the roadmap below — designed, not yet shipped. The BROKER level above describes the direction; this section describes what runs today.
+**Honest status:** today kage is a *context-gated forwarder with a hard identity wall* — it retrieves your notes, enforces the identity × project partition before any note reaches retrieval, gates what may leave your machine, and forwards a single grounded query to the model *you* select. The full *broker* behavior (automatic model routing, active context detection, conversational interface) is on the roadmap below — designed, not yet shipped. The BROKER level above describes the direction; this section describes what runs today.
 
 ```
   ┌─────────────────────────────────────────────────────────────┐
@@ -31,11 +31,12 @@ kage ships as a headless CLI and MCP server. The full UI layer (via Odysseus int
   │  CLI (kage)                    MCP (stdio → any client)    │
   │  remember · recall · ask       kage_recall · kage_ask      │
   │  import · list · forget        kage_remember · kage_status │
-  │  status · doctor · reindex                                  │
+  │  status · doctor · reindex · migrate                        │
   └───────────────────────┬─────────────────────────────────────┘
                           │
   ┌───────────────────────▼─────────────────────────────────────┐
   │  LAYER 3e — PRIVACY GATE                                    │
+  │  Stage 1: identity wall (independent re-check)             │
   │  local_only flag · project rules · PII scan (29 patterns)  │
   │  approval prompt · session memory · audit log              │
   └───────────────────────┬─────────────────────────────────────┘
@@ -47,15 +48,17 @@ kage ships as a headless CLI and MCP server. The full UI layer (via Odysseus int
   └───────────────────────┬─────────────────────────────────────┘
                           │
   ┌───────────────────────▼─────────────────────────────────────┐
-  │  LAYER 3b — RETRIEVAL                                       │
-  │  SQLite FTS5 + ChromaDB vectors · RRF fusion               │
-  │  project partition filter · semantic + keyword hybrid      │
+  │  LAYER 3b — RETRIEVAL + IDENTITY WALL                       │
+  │  SQLite FTS5 + ChromaDB vectors · RRF fusion · reranker    │
+  │  _allowed_note_ids(identity, project) → SQLite pre-filter  │
+  │  Chroma where={"note_id": {"$in": allowed}}                │
   └───────────────────────┬─────────────────────────────────────┘
                           │
   ┌───────────────────────▼─────────────────────────────────────┐
   │  LAYER 1 — MEMORY STORE                                     │
   │  Markdown source of truth  (~/.kage/memory/)               │
   │  SQLite index · ChromaDB chunk store · local_only flag     │
+  │  memory_identities · memory_projects (join tables)         │
   └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -74,25 +77,35 @@ uv run kage init
 
 `kage init` scaffolds `~/.kage/` — config, markdown memory store, SQLite index, ChromaDB directory. Safe to re-run.
 
+**Upgrading from v0.8 or earlier:** run `kage migrate` once to backfill identity metadata on existing notes.
+
 ---
 
 ## Commands
 
 ```
-kage remember "<text>"              Save a note. Add --project X to partition it.
-                                    Add --local to mark it never-sent-to-cloud.
+kage remember "<text>"              Save a note. --project X to partition it.
+                                    --identity X to assign an identity (default: personal).
+                                    --state to set scoped/baseline/pending explicitly.
+                                    --local to mark it never-sent-to-cloud.
 
 kage recall "<query>"               Hybrid search: FTS5 + semantic (if Ollama running).
-                                    Add --project X to scope the search.
+                                    --project X to scope the search.
+                                    --identity X to scope to an identity (default: personal).
 
 kage ask "<question>"               Answer from your notes using local Ollama.
 kage ask "<question>" --cloud       Route to your default cloud provider.
 kage ask "<question>" --cloud \
   --provider groq                   Route to a specific named provider.
+kage ask "<question>" \
+  --identity neu                    Answer using only NEU identity notes.
 
 kage import <folder>                Bulk-import .md / .txt files.
+                                    --identity X to tag all imported notes.
 kage reindex                        Build / rebuild the vector index.
-kage list                           Browse saved notes.
+kage migrate                        Backfill identity metadata on existing notes.
+                                    --dry-run to preview without writing.
+kage list                           Browse saved notes (filtered by --identity).
 kage forget <id>                    Delete a note from memory + indexes.
 
 kage status                         Snapshot: note count, model, RAM, disk.
@@ -113,26 +126,43 @@ Memory lives as plain `.md` files under `~/.kage/memory/`. SQLite FTS5 and Chrom
 ~/.kage/
 ├── memory/           ← source of truth (markdown, one file per note)
 ├── indexes/
-│   └── kage.db       ← SQLite FTS5 index (derived)
+│   └── kage.db       ← SQLite FTS5 index + identity/project join tables (derived)
 ├── chroma/           ← vector index (derived, requires Ollama embed)
 ├── config.json       ← providers, routing rules, privacy config
 └── audit.jsonl       ← append-only cloud dispatch log
 ```
 
-Notes are partitioned by project. A note in project `kage` is invisible to a query scoped to project `health`. Identity and project are the two axes of memory isolation.
+### Identity × project partition
+
+Notes are partitioned on two axes:
+
+- **Identity** — the hard wall. `personal` notes are invisible to a `--identity neu` query and vice versa. Default identity is `personal`. Pass `--identity neu` to scope to a different identity.
+- **Project** — the soft filter within an identity. A note in project `kage` is invisible to a query scoped to project `health` *within the same identity*.
+
+Three note states control how the project filter is applied:
+
+```
+  scoped    note belongs to specific project(s) — only returned when that project is active
+  baseline  note has no project — returned for any query within the matching identity
+  pending   note is not yet partitioned — never returned in search
+```
+
+The wall is a SQLite pre-filter (`_allowed_note_ids`) that runs before both FTS and vector search. Chroma never sees a note ID that the wall has blocked.
 
 ---
 
 ## Privacy gate (Layer 3e)
 
-Every cloud dispatch goes through a disclosure gate. Nothing reaches an external API without passing three checks:
+Every cloud dispatch goes through a disclosure gate. Nothing reaches an external API without passing checks in order:
 
 ```
-  1. local_only flag    Was this note explicitly saved as local-only?
-  2. project rule       Is the note's project in local_only_projects config?
-  3. PII scan           Does the note contain Aadhaar, PAN, API keys,
-                        passport numbers, email addresses, or 26 other
-                        patterns across 6 categories?
+  0. identity wall  Stage-1 re-check: is this note in the active identity?
+                    (Independent second wall — defense in depth.)
+  1. local_only     Was this note explicitly saved as local-only?
+  2. project rule   Is the note's project in local_only_projects config?
+  3. PII scan       Does the note contain Aadhaar, PAN, API keys,
+                    passport numbers, email addresses, or 26 other
+                    patterns across 6 categories?
 
   PASS → user sees a summary of what will be sent, approves, cloud is called
   FAIL → note withheld, user notified, Ollama answers instead
@@ -177,13 +207,6 @@ Add any OpenAI-compatible endpoint (OpenRouter, Fireworks, Mistral, etc.) in `~/
       "base_url": "https://openrouter.ai/api/v1",
       "chat_path": "/chat/completions",
       "model": "openrouter/free"
-    },
-    "openrouter-reason": {
-      "type": "openai-compat",
-      "api_key_env": "OPENROUTER_API_KEY",
-      "base_url": "https://openrouter.ai/api/v1",
-      "chat_path": "/chat/completions",
-      "model": "nvidia/nemotron-3-ultra-550b-a55b:free"
     }
   }
 }
@@ -198,11 +221,13 @@ Override the model per provider via `providers.<name>.model`. Swap providers per
 kage exposes four tools over stdio MCP, usable from Claude Code, Odysseus, or any MCP client:
 
 ```
-kage_recall(query, project, limit)      Search memory — read-only, always available
-kage_ask(question, provider, project)   Answer from memory, gate runs automatically
-kage_remember(text, project, local)     Save a note — requires mcp_allow_writes: true
-kage_status()                           Store snapshot
+kage_recall(query, project, limit, identity)    Search memory — read-only, always available
+kage_ask(question, provider, project, identity) Answer from memory, gate runs automatically
+kage_remember(text, project, local)             Save a note — requires mcp_allow_writes: true
+kage_status()                                   Store snapshot
 ```
+
+All search tools default `identity="personal"`. Pass `identity="neu"` to scope to a different identity.
 
 **Claude Code** — add to `.mcp.json` in your repo root:
 ```json
@@ -245,13 +270,15 @@ Set a different model in `~/.kage/config.json`:
 kage today is a passive broker — it answers when called. The target is an active mediator — it orchestrates.
 
 ```
-  Cycle 8   kage chat + streaming      Conversational interface, stateful turns
-  Cycle 9   kage as MCP client         kage calls Gmail, files, web, git itself
-  Cycle 10  Layer 4 auto-routing       Intent → model selection, automatic
-  Cycle 11  Agent loop                 Multi-step planning and execution
+  Cycle 8   Retrieval quality          SHIPPED — recursive chunking + bge-reranker
+  Cycle 9   Identity axis (THE WEDGE)  SHIPPED — identity × project wall, real data
+  Cycle 10  kage chat + streaming      Conversational interface, stateful turns
+  Cycle 11  kage as MCP client         kage calls Gmail, files, web, git itself
+  Cycle 12  Layer 4 auto-routing       Intent → model selection, automatic
+  Cycle 13  Agent loop                 Multi-step planning and execution
 ```
 
-After Cycle 9, external UIs (Odysseus, Claude Code) become optional rendering surfaces. kage calls the tools directly; the UI just shows the result.
+After Cycle 11, external UIs (Odysseus, Claude Code) become optional rendering surfaces. kage calls the tools directly; the UI just shows the result.
 
 ---
 
@@ -278,11 +305,12 @@ src/kage/
 └── mcp_server.py     MCP server (FastMCP, stdio)
 
 tests/
-└── test_cli.py       227 tests, 100% line coverage
+├── test_cli.py       273 tests, ~100% line coverage
+└── eval_retrieval.py Retrieval eval harness (MRR, recall@k, identity wall invariants)
 
 docs/
 ├── blueprint.md      Long-term architecture and planning state
-├── cycle-7-pitch.md  Privacy gate design (most recent cycle)
+├── cycle-9-pitch.md  Identity axis design (most recent cycle)
 └── ...               Historical cycle pitches and research
 ```
 

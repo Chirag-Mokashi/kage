@@ -85,12 +85,12 @@ For a fresh coding session: read `README.md`, then `src/kage/cli.py`, `tests/tes
 
 ## Strategic Anchors (stable across sessions)
 
-- **Build approach:** EXTEND PewDiePie's Odysseus (MIT) as the substrate, in kage's OWN repo (NOT a fork). kage = the headless broker layer above it. (OpenJarvis retired as substrate Session 13; kept only as a design reference.)
+- **Build approach:** EXTEND PewDiePie's Odysseus (**AGPL-3.0**, NOT MIT) as the substrate, in kage's OWN repo (NOT a fork). kage itself is MIT — the MCP boundary (separate process, arm's-length protocol) keeps kage legally independent of Odysseus's copyleft. (OpenJarvis retired as substrate Session 13; kept only as a design reference.)
 - **Dual goal:** Ship kage AND learn industry SDLC by mimicking real-team practice.
 - **SDLC starter pack:** Shape Up cycles · GitHub Flow · ADRs · Conventional Commits · README/ROADMAP/CHANGELOG · GitHub Actions CI · pre-commit · semver.
 - **Local stack:** Qwen3 14B Q4_K_M via Ollama (direct), Docker sandbox, ChromaDB vector index (derived — markdown files are the memory source of truth).
 - **Cloud relationships:** Claude (reasoning), Perplexity (research), Gemini (Workspace), Cosmos (deep research). (Antigravity rejected as substrate #26 — optional client only.)
-- **Repo:** github.com/Chirag-Mokashi/kage — kage's OWN repo (live on GitHub); extends Odysseus (MIT), not a fork.
+- **Repo:** github.com/Chirag-Mokashi/kage — kage's OWN repo (live on GitHub); extends Odysseus (AGPL-3.0) via MCP, not a fork; kage's own license is MIT.
 
 ## Operating Rules
 

@@ -198,3 +198,78 @@ def test_eval_retrieval_baseline(eval_store, capsys):
 
     with capsys.disabled():
         _print_report(results, mode)
+
+
+# ── Identity wall eval (Cycle 9) ─────────────────────────────────────────────
+
+@pytest.fixture
+def wall_store(tmp_path, monkeypatch):
+    """Isolated store with one personal note and one NEU note — for wall-invariant testing."""
+    h = tmp_path / ".kage"
+    for attr, val in {
+        "KAGE_HOME":   h,
+        "MEMORY_DIR":  h / "memory",
+        "INDEX_DIR":   h / "indexes",
+        "DB_PATH":     h / "indexes" / "kage.db",
+        "CONFIG_PATH": h / "config.json",
+        "CHROMA_DIR":  h / "chroma",
+    }.items():
+        monkeypatch.setattr(cli, attr, val)
+
+    CliRunner().invoke(cli.app, ["init"])
+
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+
+    class FakeChroma:
+        def add(self, **kw): pass
+        def count(self): return 0
+        def get(self, **kw): return {"ids": []}
+        def query(self, **kw): return {"ids": [[]], "metadatas": [[]], "distances": [[]]}
+
+    monkeypatch.setattr(cli, "_get_chroma", lambda: FakeChroma())
+
+    personal_id = cli._save(
+        "kage is my personal memory broker. okiro triggers the system.",
+        "kage",
+        identities=["personal"],
+    )
+    neu_id = cli._save(
+        "glioblastoma tumor detection using hyperspectral imaging. HybridSN ViT.",
+        "hsi",
+        identities=["neu"],
+    )
+    return {"personal": personal_id, "neu": neu_id}
+
+
+def test_eval_identity_wall(wall_store, capsys):
+    """Wall invariant: no cross-identity leakage in either direction.
+
+    personal identity never returns NEU notes; NEU identity never returns personal notes.
+    Both identities CAN find their own notes (proves the wall is not over-blocking).
+    """
+    personal_id = wall_store["personal"]
+    neu_id = wall_store["neu"]
+
+    rows = cli._search("glioblastoma tumor detection", None, 10, any_terms=True, identity="personal")
+    p1 = neu_id not in [r[0] for r in rows]
+
+    rows = cli._search("kage memory broker okiro", None, 10, any_terms=True, identity="neu")
+    p2 = personal_id not in [r[0] for r in rows]
+
+    rows = cli._search("glioblastoma tumor detection", None, 10, any_terms=True, identity="neu")
+    p3 = neu_id in [r[0] for r in rows]
+
+    rows = cli._search("kage memory broker okiro", None, 10, any_terms=True, identity="personal")
+    p4 = personal_id in [r[0] for r in rows]
+
+    with capsys.disabled():
+        print("\n  Identity wall invariants (Cycle 9):")
+        print(f"    personal→NEU blocked:      {'PASS' if p1 else 'FAIL'}")
+        print(f"    NEU→personal blocked:      {'PASS' if p2 else 'FAIL'}")
+        print(f"    NEU finds own notes:       {'PASS' if p3 else 'FAIL'}")
+        print(f"    personal finds own notes:  {'PASS' if p4 else 'FAIL'}")
+
+    assert p1, "NEU note leaked into personal identity search"
+    assert p2, "Personal note leaked into NEU identity search"
+    assert p3, "NEU note not found with correct NEU identity"
+    assert p4, "Personal note not found with correct personal identity"

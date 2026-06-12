@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS memories (
     project      TEXT,
     created_at   TEXT NOT NULL,
     needs_embed  INTEGER NOT NULL DEFAULT 1,
-    local_only   INTEGER NOT NULL DEFAULT 0
+    local_only   INTEGER NOT NULL DEFAULT 0,
+    state        TEXT NOT NULL DEFAULT 'scoped' CHECK (state IN ('scoped','baseline','pending'))
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(id UNINDEXED, body);
 CREATE TABLE IF NOT EXISTS chunks (
@@ -68,6 +69,18 @@ CREATE TABLE IF NOT EXISTS chunks (
     char_end      INTEGER NOT NULL,
     needs_embed   INTEGER NOT NULL DEFAULT 1
 );
+CREATE TABLE IF NOT EXISTS memory_projects (
+    mem_id   TEXT NOT NULL,
+    project  TEXT NOT NULL,
+    PRIMARY KEY (mem_id, project)
+);
+CREATE TABLE IF NOT EXISTS memory_identities (
+    mem_id   TEXT NOT NULL,
+    identity TEXT NOT NULL,
+    PRIMARY KEY (mem_id, identity)
+);
+CREATE INDEX IF NOT EXISTS idx_mem_projects_project    ON memory_projects(project);
+CREATE INDEX IF NOT EXISTS idx_mem_identities_identity ON memory_identities(identity);
 """
 
 
@@ -133,6 +146,11 @@ def init() -> None:
             conn.commit()
         except sqlite3.OperationalError:
             pass
+        try:
+            conn.execute("ALTER TABLE memories ADD COLUMN state TEXT NOT NULL DEFAULT 'scoped'")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists in an existing DB
     finally:
         conn.close()
     (created if db_is_new else existed).append(DB_PATH)
@@ -320,11 +338,15 @@ def _save(
     source: str | None = None,
     embed: bool = True,
     local_only: bool = False,
+    identities: list[str] | None = None,
+    state: str | None = None,
 ) -> str:
     """Write a memory (markdown source-of-truth #70) + index it (#71). Returns its id."""
     cfg = _config()
     if not local_only and project and project in cfg.get("local_only_projects", []):
         local_only = True
+    if state is None:
+        state = "scoped" if project else "baseline"
 
     mem_id = _new_id()
     created = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
@@ -334,6 +356,10 @@ def _save(
         front += f"source: {source}\n"
     if local_only:
         front += "local_only: true\n"
+    front += "identities:\n"
+    for ident in (identities or ["personal"]):
+        front += f"  - {ident}\n"
+    front += f"state: {state}\n"
     (KAGE_HOME / rel_path).write_text(front + "---\n\n" + text.rstrip() + "\n")
 
     body = text.strip()
@@ -343,10 +369,20 @@ def _save(
     conn = _connect()
     try:
         conn.execute(
-            "INSERT INTO memories (id, content_path, project, created_at, local_only)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (mem_id, rel_path, project, created, int(local_only)),
+            "INSERT INTO memories (id, content_path, project, created_at, local_only, state)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (mem_id, rel_path, project, created, int(local_only), state),
         )
+        for ident in (identities or ["personal"]):
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_identities(mem_id, identity) VALUES (?, ?)",
+                (mem_id, ident),
+            )
+        if project:
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_projects(mem_id, project) VALUES (?, ?)",
+                (mem_id, project),
+            )
         conn.execute("INSERT INTO memory_fts (id, body) VALUES (?, ?)", (mem_id, text))
         for i, chunk in enumerate(chunks):
             conn.execute(
@@ -393,7 +429,37 @@ def _save(
     return mem_id
 
 
-def _search_fts(query: str, project: str | None, limit: int, any_terms: bool = False):
+def _allowed_note_ids(identity: str, project: str | None) -> set[str]:
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT m.id
+            FROM memories m
+            JOIN memory_identities mi ON mi.mem_id = m.id
+            WHERE mi.identity = :identity
+              AND m.state != 'pending'
+              AND (
+                :project IS NULL
+                OR EXISTS (
+                    SELECT 1 FROM memory_projects mp
+                    WHERE mp.mem_id = m.id AND mp.project = :project
+                )
+                OR (
+                    m.state = 'baseline'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM memory_projects mp2
+                        WHERE mp2.mem_id = m.id
+                    )
+                )
+              )
+        """, {"identity": identity, "project": project})
+        return {row[0] for row in cursor.fetchall()}
+    finally:
+        conn.close()
+
+
+def _search_fts(query: str, project: str | None, limit: int, any_terms: bool = False, identity: str = "personal"):
     """Full-text search within the partition wall (#99). Rows: (id, project, created_at, content_path, snippet).
 
     any_terms=True ORs the terms (lenient — for natural-language questions in `ask`);
@@ -410,10 +476,12 @@ def _search_fts(query: str, project: str | None, limit: int, any_terms: bool = F
         "FROM memory_fts JOIN memories m ON m.id = memory_fts.id "
         "WHERE memory_fts MATCH ? "
     )
-    params: list = [match]
-    if project:  # the partition wall lives in SQL (#99)
-        sql += "AND m.project = ? "
-        params.append(project)
+    allowed = _allowed_note_ids(identity, project)
+    if not allowed:
+        return []
+    placeholders = ",".join("?" * len(allowed))
+    sql += f"AND m.id IN ({placeholders}) "
+    params: list = [match, *allowed]
     sql += "ORDER BY rank LIMIT ?"
     params.append(limit)
     conn = _connect()
@@ -423,7 +491,7 @@ def _search_fts(query: str, project: str | None, limit: int, any_terms: bool = F
         conn.close()
 
 
-def _search(query: str, project: str | None, limit: int, any_terms: bool = False):
+def _search(query: str, project: str | None, limit: int, any_terms: bool = False, identity: str = "personal"):
     """Hybrid FTS5 + vector search; falls back to FTS5 when embeddings are off or Ollama is down."""
     if not query or not query.strip():
         return []
@@ -431,10 +499,10 @@ def _search(query: str, project: str | None, limit: int, any_terms: bool = False
     use_rerank = cfg.get("rerank", False)
     pool = max(limit * 2, _RERANK_POOL) if use_rerank else limit * 2
     if not cfg.get("embeddings", True):
-        rows = [(*row, None, None, None) for row in _search_fts(query, project, limit, any_terms)]
+        rows = [(*row, None, None, None) for row in _search_fts(query, project, limit, any_terms, identity)]
         return _rerank(rows, query, limit) if use_rerank else rows
-    def run_fts(): return _search_fts(query, project, pool, any_terms)
-    def run_vec(): return _search_vec(_embed(query), project, pool)
+    def run_fts(): return _search_fts(query, project, pool, any_terms, identity)
+    def run_vec(): return _search_vec(_embed(query), project, pool, identity)
     with ThreadPoolExecutor(max_workers=2) as executor:
         fts_future = executor.submit(run_fts)
         vec_future = executor.submit(run_vec)
@@ -613,7 +681,7 @@ def _write_audit(record: dict) -> None:
 _session_approvals: dict[str, bool] = {}
 
 
-def _disclosure_gate(rows: list, cfg: dict) -> tuple[list, list[dict]]:
+def _disclosure_gate(rows: list, cfg: dict, identity: str = "personal", project: str | None = None) -> tuple[list, list[dict]]:
     """Filter rows before cloud dispatch. Returns (allowed_rows, withheld_list).
 
     withheld_list entries: {"note_id": str, "reason": str, "pii_patterns": list[str]}
@@ -625,6 +693,9 @@ def _disclosure_gate(rows: list, cfg: dict) -> tuple[list, list[dict]]:
     note_ids = [row[0] for row in rows]
     local_only_projects: list[str] = cfg.get("local_only_projects", [])
     extra_pii: list[dict] = cfg.get("pii_patterns", [])
+
+    # Stage 1: identity wall — second independent wall before cloud dispatch
+    identity_allowed = _allowed_note_ids(identity, project)
 
     conn = _connect()
     try:
@@ -643,16 +714,20 @@ def _disclosure_gate(rows: list, cfg: dict) -> tuple[list, list[dict]]:
     withheld: list[dict] = []
     for row in rows:
         note_id: str = row[0]
-        project: str | None = row[1]
+        project_val: str | None = row[1]
+
+        if note_id not in identity_allowed:
+            withheld.append({"note_id": note_id, "reason": f"identity_wall:{identity}", "pii_patterns": []})
+            continue
 
         if lo_map.get(note_id, False):
             withheld.append({"note_id": note_id, "reason": "local_only:flag", "pii_patterns": []})
             continue
 
-        if project and project in local_only_projects:
+        if project_val and project_val in local_only_projects:
             withheld.append({
                 "note_id": note_id,
-                "reason": f"local_only:project:{project}",
+                "reason": f"local_only:project:{project_val}",
                 "pii_patterns": [],
             })
             continue
@@ -771,16 +846,16 @@ def _rerank(rows: list, query: str, top_n: int) -> list:
     return [r for _, r in ranked[:top_n]]
 
 
-def _search_vec(query_vec: list[float], project: str | None, limit: int) -> list:
+def _search_vec(query_vec: list[float], project: str | None, limit: int, identity: str = "personal") -> list:
+    allowed = _allowed_note_ids(identity, project)
+    if not allowed:
+        return []
     collection = _get_chroma()
-    if project:
-        count = len(collection.get(where={"project": project}, include=[])["ids"])
-    else:
-        count = collection.count()
+    where = {"note_id": {"$in": list(allowed)}}
+    count = len(collection.get(where=where, include=[])["ids"])
     if count == 0:
         return []
     n_results = min(limit, count)
-    where = {"project": project} if project else None
     results = collection.query(
         query_embeddings=[query_vec],
         n_results=n_results,
@@ -832,6 +907,8 @@ def remember(
     project: str = typer.Option(None, "--project", "-p", help="Tag this memory to a project."),
     local: bool = typer.Option(False, "--local", help="Mark note local-only — never sent to cloud providers."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirm prompt (for scripts/tests)."),
+    identity: str = typer.Option("personal", "--identity", "-i", help="Identity this note belongs to (default: personal)."),
+    state: str = typer.Option(None, "--state", help="State: scoped, baseline, or pending. Inferred if omitted."),
 ) -> None:
     """Save a note to memory (markdown + index). Confirms before writing (the wall, #16)."""
     _require_init()
@@ -839,13 +916,14 @@ def remember(
     # The wall (#16): show it and confirm BEFORE anything is written.
     typer.echo(f'\n  "{text}"')
     typer.echo(f"  project: {project or '(none)'}")
+    typer.echo(f"  identity: {identity}")
     if local:
         typer.echo("  local-only: yes (will not be sent to cloud)")
     if not yes and not typer.confirm("Save this to memory?", default=True):
         typer.echo("Discarded — nothing saved.")
         raise typer.Exit()
 
-    mem_id = _save(text, project, local_only=local)
+    mem_id = _save(text, project, local_only=local, identities=[identity], state=state)
     suffix = "  [local-only]" if local else ""
     typer.echo(f"  ✓ saved   {_disp(KAGE_HOME / f'memory/{mem_id}.md')}   [{mem_id}]   (local){suffix}")
 
@@ -855,6 +933,7 @@ def import_(
     folder: Path = typer.Argument(..., help="Folder of .md/.txt files to bulk-add (recursive)."),
     project: str = typer.Option(None, "--project", "-p", help="Tag all imported notes (default: the folder name)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be imported; write nothing."),
+    identity: str = typer.Option("personal", "--identity", "-i", help="Identity for all imported notes (default: personal)."),
 ) -> None:
     """Bulk-add the .md/.txt files in a folder (curated by which folder you point at)."""
     _require_init()
@@ -885,7 +964,7 @@ def import_(
         body = p.read_text(errors="replace").strip()
         if not body:
             continue
-        _save(body, proj, source=str(p), embed=False)
+        _save(body, proj, source=str(p), embed=False, identities=[identity])
         imported += 1
 
     typer.echo(f"  ✓ imported {imported} note(s) into project '{proj}'   (local)")
@@ -1044,22 +1123,24 @@ def reindex(
 def list_(
     project: str = typer.Option(None, "--project", "-p", help="Limit to a project."),
     limit: int = typer.Option(20, "--limit", "-n", help="Max to show."),
+    identity: str = typer.Option("personal", "--identity", "-i", help="Identity scope (default: personal)."),
 ) -> None:
     """List what kage has saved (most recent first) — so you can see before you search."""
     _require_init()
 
-    sql = "SELECT id, project, created_at, content_path FROM memories"
-    params: list = []
-    if project:
-        sql += " WHERE project = ?"
-        params.append(project)
-    sql += " ORDER BY created_at DESC LIMIT ?"
-    params.append(limit)
+    allowed = _allowed_note_ids(identity, project)
+    if not allowed:
+        typer.echo(f'Nothing saved yet. (identity: {identity})   Add one:  kage remember "..."')
+        raise typer.Exit()
+
+    placeholders = ",".join("?" * len(allowed))
+    sql = f"SELECT id, project, created_at, content_path FROM memories WHERE id IN ({placeholders}) ORDER BY created_at DESC LIMIT ?"
+    params: list = [*allowed, limit]
 
     conn = _connect()
     try:
         rows = conn.execute(sql, params).fetchall()
-        total = conn.execute("SELECT count(*) FROM memories").fetchone()[0]
+        total = conn.execute(f"SELECT count(*) FROM memories WHERE id IN ({placeholders})", list(allowed)).fetchone()[0]
     finally:
         conn.close()
 
@@ -1084,6 +1165,7 @@ def recall(
     project: str = typer.Option(None, "--project", "-p", help="Limit to a project (the partition wall)."),
     limit: int = typer.Option(5, "--limit", "-n", help="Max results."),
     pipe: bool = typer.Option(False, "--pipe", help="Copy the matched notes to the clipboard (paste into your AI)."),
+    identity: str = typer.Option("personal", "--identity", "-i", help="Identity scope (default: personal)."),
 ) -> None:
     """Search your memory (full-text) and surface the best matches."""
     _require_init()
@@ -1091,7 +1173,7 @@ def recall(
     if not query.split():
         typer.echo("Empty query.", err=True)
         raise typer.Exit(code=1)
-    rows = _search(query, project, limit)
+    rows = _search(query, project, limit, identity=identity)
 
     if not rows:
         typer.echo("No matches." + (f"  (project: {project})" if project else ""))
@@ -1129,18 +1211,19 @@ def ask(
     limit: int = typer.Option(5, "--limit", "-n", help="How many notes to pull as context."),
     no_sources: bool = typer.Option(False, "--no-sources", help="Suppress the Sources block."),
     always_ask: bool = typer.Option(False, "--always-ask", help="Re-prompt before each cloud dispatch (overrides session approval memory)."),
+    identity: str = typer.Option("personal", "--identity", "-i", help="Identity scope (default: personal)."),
 ) -> None:
     """Answer a question using your recalled notes — local model by default, --cloud to use a cloud provider."""
     _require_init()
 
-    rows = _search(question, project, limit, any_terms=True)
+    rows = _search(question, project, limit, any_terms=True, identity=identity)
     cfg = _config()
 
     # 3e disclosure gate — runs before context assembly, cloud path only
     provider_name: str = ""
     if cloud:
         provider_name = provider or cfg.get("cloud_provider", "claude")
-        allowed_rows, withheld = _disclosure_gate(rows, cfg)
+        allowed_rows, withheld = _disclosure_gate(rows, cfg, identity=identity, project=project)
         withheld_reasons = [w["reason"] for w in withheld]
         pii_hits = [p for w in withheld for p in w["pii_patterns"]]
 
@@ -1529,6 +1612,69 @@ def doctor() -> None:
     else:
         typer.echo("\n✗ some checks failed — see fixes above.\n")
         raise typer.Exit(code=1)
+
+
+def _migrate_identity_axis(dry_run: bool = False) -> dict:
+    conn = _connect()
+    try:
+        if not dry_run:
+            cur1 = conn.execute("INSERT OR IGNORE INTO memory_identities(mem_id, identity) SELECT id, 'personal' FROM memories")
+            identities_added = cur1.rowcount
+            cur2 = conn.execute("INSERT OR IGNORE INTO memory_projects(mem_id, project) SELECT id, project FROM memories WHERE project IS NOT NULL AND project != ''")
+            projects_added = cur2.rowcount
+            conn.execute("UPDATE memories SET state = 'baseline' WHERE (project IS NULL OR project = '') AND state = 'scoped'")
+            conn.commit()
+        else:
+            identities_added = conn.execute("SELECT COUNT(*) FROM memories m WHERE NOT EXISTS (SELECT 1 FROM memory_identities mi WHERE mi.mem_id = m.id AND mi.identity = 'personal')").fetchone()[0]
+            projects_added = conn.execute("SELECT COUNT(*) FROM memories m WHERE m.project IS NOT NULL AND m.project != '' AND NOT EXISTS (SELECT 1 FROM memory_projects mp WHERE mp.mem_id = m.id AND mp.project = m.project)").fetchone()[0]
+    finally:
+        conn.close()
+
+    frontmatter_updated = 0
+    md_files = sorted(MEMORY_DIR.glob("*.md"))
+    for md_path in md_files:
+        text = md_path.read_text()
+        parts = text.split("---\n", 2)
+        if len(parts) < 3:
+            continue
+        front = parts[1]
+        if "identities:" in front:
+            continue
+        project_val = ""
+        for line in front.splitlines():
+            if line.startswith("project:"):
+                project_val = line[len("project:"):].strip()
+                break
+        state_val = "scoped" if project_val else "baseline"
+        new_front = front.rstrip("\n") + f"\nidentities:\n  - personal\nstate: {state_val}\n"
+        if not dry_run:
+            md_path.write_text("---\n" + new_front + "---\n" + parts[2])
+        frontmatter_updated += 1
+
+    return {
+        "notes": len(md_files),
+        "identities_added": identities_added,
+        "projects_added": projects_added,
+        "frontmatter_updated": frontmatter_updated,
+    }
+
+
+@app.command()
+def migrate(
+    dry_run: bool = typer.Option(False, "--dry-run", "-n", help="Show what would change without writing."),
+) -> None:
+    if not dry_run:
+        typer.echo("This will update frontmatter for all notes in ~/.kage/memory and populate the identity axis join tables.")
+        typer.echo("Back up ~/.kage before proceeding.")
+        if not typer.confirm("Continue?", default=False):
+            raise typer.Exit()
+    stats = _migrate_identity_axis(dry_run=dry_run)
+    prefix = "[DRY RUN] " if dry_run else ""
+    typer.echo(f"{prefix}Migration complete:")
+    typer.echo(f"  notes found:          {stats['notes']}")
+    typer.echo(f"  identities added:     {stats['identities_added']}")
+    typer.echo(f"  projects added:       {stats['projects_added']}")
+    typer.echo(f"  frontmatter updated:  {stats['frontmatter_updated']}")
 
 
 @_mcp_app.command("serve")

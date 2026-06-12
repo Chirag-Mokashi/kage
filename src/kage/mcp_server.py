@@ -14,12 +14,12 @@ mcp = FastMCP("kage")
 
 
 @mcp.tool()
-def kage_recall(query: str, project: str | None = None, limit: int = 5) -> list[dict]:
-    """Search kage memory (project-partitioned, read-only).
+def kage_recall(query: str, project: str | None = None, limit: int = 5, identity: str = "personal") -> list[dict]:
+    """Search kage memory (identity + project partitioned, read-only).
 
-    Returns ranked notes matching the query, filtered to the declared project partition.
+    Returns ranked notes matching the query, filtered to the declared identity and project partition.
     """
-    rows = _cli._search(query, project, limit)
+    rows = _cli._search(query, project, limit, identity=identity)
     return [
         {
             "id": row[0],
@@ -51,7 +51,7 @@ def kage_remember(text: str, project: str | None = None, local: bool = False) ->
 
 
 @mcp.tool()
-def kage_ask(question: str, provider: str | None = None, project: str | None = None) -> dict:
+def kage_ask(question: str, provider: str | None = None, project: str | None = None, identity: str = "personal") -> dict:
     """Answer a question using kage memory as context.
 
     Omit provider to use the local Ollama model. Specify a provider name
@@ -59,14 +59,14 @@ def kage_ask(question: str, provider: str | None = None, project: str | None = N
     The 3e disclosure gate runs automatically — local-only notes and PII are
     withheld from cloud dispatch. Counts are reported in the response.
     """
-    rows = _cli._search(question, project, 5, any_terms=True)
+    rows = _cli._search(question, project, 5, any_terms=True, identity=identity)
     cfg = _cli._config()
 
     # 3e disclosure gate — MCP has no interactive prompt; auto-filter and report
     withheld_count = 0
     withheld_reasons: list[str] = []
     if provider:
-        allowed_rows, withheld = _cli._disclosure_gate(rows, cfg)
+        allowed_rows, withheld = _cli._disclosure_gate(rows, cfg, identity=identity, project=project)
         withheld_count = len(withheld)
         withheld_reasons = [w["reason"] for w in withheld]
         pii_hits = [p for w in withheld for p in w["pii_patterns"]]

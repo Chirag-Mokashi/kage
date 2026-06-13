@@ -273,3 +273,41 @@ def test_eval_identity_wall(wall_store, capsys):
     assert p2, "Personal note leaked into NEU identity search"
     assert p3, "NEU note not found with correct NEU identity"
     assert p4, "Personal note not found with correct personal identity"
+
+
+# ── Cycle 10: MRR regression guard + no-leak-on-switch invariant (Step 9) ────
+
+def test_eval_mrr_regression_guard(eval_store):
+    """MRR must stay >= 0.85 (hybrid mode). Acts as a hard regression gate for retrieval quality. Skipped when Ollama is unavailable. Baseline measured at 0.879 (Cycle 10)."""
+    try:
+        cli._embed("ping")
+    except cli.OllamaUnavailable:
+        pytest.skip("Ollama unavailable — MRR guard requires hybrid mode")
+    results = _run_cases(eval_store)
+    mrr = sum(1.0 / r["rank"] for r in results if r["rank"] is not None) / len(results)
+    assert mrr >= 0.85, f"MRR regression: {mrr:.3f} < 0.85"
+
+
+def test_eval_no_leak_on_switch(tmp_path, monkeypatch):
+    """No-leak-on-switch invariant (Cycle 10): PII in conversation turns is withheld when switching from local to cloud. The clean assistant turn passes through; the user turn with a phone number is blocked by the privacy gate."""
+    h = tmp_path / ".kage"
+    for attr, val in {
+        "KAGE_HOME":   h,
+        "MEMORY_DIR":  h / "memory",
+        "INDEX_DIR":   h / "indexes",
+        "DB_PATH":     h / "indexes" / "kage.db",
+        "CONFIG_PATH": h / "config.json",
+        "CHROMA_DIR":  h / "chroma",
+    }.items():
+        monkeypatch.setattr(cli, attr, val)
+    CliRunner().invoke(cli.app, ["init"])
+
+    session_id = cli._session_create("personal", None, "ollama")
+    cli._session_append(session_id, "user", "my phone is +919876543210", [], "ollama", "qwen3:14b", None, None)
+    cli._session_append(session_id, "assistant", "noted", [], "ollama", "qwen3:14b", None, 5)
+
+    new_dest, safe_turns, withheld = cli._session_switch(session_id, "claude", {}, "personal", None)
+
+    assert new_dest == "claude"
+    assert len(withheld) >= 1, "PII turn must be withheld when switching to cloud"
+    assert all(t["content"] != "my phone is +919876543210" for t in safe_turns), "PII content must not appear in safe turns"

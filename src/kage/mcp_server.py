@@ -51,14 +51,80 @@ def kage_remember(text: str, project: str | None = None, local: bool = False) ->
 
 
 @mcp.tool()
-def kage_ask(question: str, provider: str | None = None, project: str | None = None, identity: str = "personal") -> dict:
+def kage_ask(question: str, provider: str | None = None, project: str | None = None, identity: str = "personal", session_id: str | None = None) -> dict:
     """Answer a question using kage memory as context.
 
     Omit provider to use the local Ollama model. Specify a provider name
     (claude, openai, groq, etc.) to route through kage's cloud stack.
     The 3e disclosure gate runs automatically — local-only notes and PII are
     withheld from cloud dispatch. Counts are reported in the response.
+
+    Pass session_id (from _session_create) to enable stateful multi-turn
+    conversation. The session's pinned identity, project, and destination are
+    used; question and answer are appended to session history. Omit session_id
+    for stateless single-shot mode (existing behavior).
     """
+    if session_id is not None:
+        sess = _cli._session_load(session_id)
+        if sess is None:
+            return {"error": f"Session {session_id!r} not found", "answer": None, "session_id": session_id}
+        s_identity = sess["identity"]
+        s_project = sess["project"]
+        s_destination = sess["destination"]
+        cfg = _cli._config()
+        history = _cli._session_turns(session_id)
+        condensed = _cli._condense_query(history, question)
+        rows = _cli._search(condensed, s_project, 5, any_terms=True, identity=s_identity)
+        withheld_count = 0
+        if s_destination != "ollama":
+            all_turns = _cli._session_turns(session_id, token_budget=10_000_000)
+            safe_turns, withheld_turns = _cli._gate_conversation(all_turns, cfg, s_identity, s_project)
+            withheld_count = len(withheld_turns)
+            rows, row_withheld = _cli._disclosure_gate(rows, cfg, identity=s_identity, project=s_project)
+            withheld_count += len(row_withheld)
+            history_for_answer = safe_turns
+        else:
+            history_for_answer = history
+        context_parts: list[str] = []
+        source_ids: list[str] = []
+        note_ids_this_turn: list[str] = []
+        for note_id, _proj, _created, path, _snip, section_title, char_start, char_end in rows:
+            if char_start is not None and char_end is not None:
+                text = _cli._read_section(path, char_start, char_end)
+            else:
+                try:
+                    text = _cli._read_body(path)
+                except OSError:
+                    text = ""
+            if text:
+                context_parts.append(f"[{note_id}] {text}")
+                source_ids.append(note_id)
+                note_ids_this_turn.append(note_id)
+        context = "\n\n".join(context_parts)
+        try:
+            answer = next(iter(_cli._answer(condensed, history_for_answer, context, s_destination, cfg)))
+        except (_cli.OllamaUnavailable, _cli.CloudError) as exc:
+            return {"error": str(exc), "answer": None, "session_id": session_id}
+        if s_destination == "ollama":
+            model_name = cfg.get("ollama_model", "qwen3:14b")
+            used_provider = f"local:{model_name}"
+        else:
+            default_pcfg = _cli.DEFAULT_PROVIDERS.get(s_destination, {})
+            user_pcfg = cfg.get("providers", {}).get(s_destination, {})
+            pcfg = {**default_pcfg, **user_pcfg}
+            model_name = pcfg.get("model", s_destination)
+            used_provider = s_destination
+        est_tokens = len(answer) // 4
+        _cli._session_append(session_id, "user", question, note_ids_this_turn, s_destination, model_name, None, None)
+        _cli._session_append(session_id, "assistant", answer, [], s_destination, model_name, None, est_tokens)
+        return {
+            "answer": answer,
+            "sources": source_ids,
+            "provider": used_provider,
+            "withheld_count": withheld_count,
+            "session_id": session_id,
+        }
+
     rows = _cli._search(question, project, 5, any_terms=True, identity=identity)
     cfg = _cli._config()
 

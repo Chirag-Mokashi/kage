@@ -17,6 +17,8 @@ import sqlite3
 import subprocess
 import urllib.error
 import urllib.request
+import uuid
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -81,6 +83,30 @@ CREATE TABLE IF NOT EXISTS memory_identities (
 );
 CREATE INDEX IF NOT EXISTS idx_mem_projects_project    ON memory_projects(project);
 CREATE INDEX IF NOT EXISTS idx_mem_identities_identity ON memory_identities(identity);
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id  TEXT PRIMARY KEY,
+    created_at  TEXT NOT NULL,
+    identity    TEXT NOT NULL,
+    project     TEXT,
+    destination TEXT NOT NULL,
+    deleted     INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS session_turns (
+    session_id  TEXT NOT NULL,
+    idx         INTEGER NOT NULL,
+    parent_idx  INTEGER,
+    role        TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+    content     TEXT NOT NULL,
+    note_ids    TEXT NOT NULL DEFAULT '[]',
+    destination TEXT NOT NULL,
+    model       TEXT,
+    reason      TEXT,
+    tokens      INTEGER,
+    ts          TEXT NOT NULL,
+    deleted     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (session_id, idx),
+    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+);
 """
 
 
@@ -178,6 +204,124 @@ def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
+
+
+def _session_create(identity: str, project: str | None, destination: str) -> str:
+    session_id = str(uuid.uuid4())
+    created_at = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    conn = None
+    try:
+        conn = _connect()
+        conn.execute(
+            "INSERT INTO sessions(session_id, created_at, identity, project, destination) VALUES(?,?,?,?,?)",
+            (session_id, created_at, identity, project, destination),
+        )
+        conn.commit()
+    finally:
+        if conn:
+            conn.close()
+    return session_id
+
+
+def _session_load(session_id: str) -> dict | None:
+    conn = None
+    try:
+        conn = _connect()
+        row = conn.execute(
+            "SELECT session_id, created_at, identity, project, destination, deleted FROM sessions WHERE session_id=? AND deleted=0",
+            (session_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return dict(zip(["session_id", "created_at", "identity", "project", "destination", "deleted"], row))
+    finally:
+        if conn:
+            conn.close()
+
+
+def _session_append(
+    session_id: str,
+    role: str,
+    content: str,
+    note_ids: list[str],
+    destination: str,
+    model: str | None,
+    reason: str | None,
+    tokens: int | None,
+) -> int:
+    conn = None
+    try:
+        conn = _connect()
+        next_idx = conn.execute(
+            "SELECT COALESCE(MAX(idx), -1) FROM session_turns WHERE session_id=?",
+            (session_id,),
+        ).fetchone()[0] + 1
+        ts = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        conn.execute(
+            "INSERT INTO session_turns(session_id, idx, parent_idx, role, content, note_ids, destination, model, reason, tokens, ts) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (session_id, next_idx, None, role, content, json.dumps(note_ids), destination, model, reason, tokens, ts),
+        )
+        conn.commit()
+        return next_idx
+    finally:
+        if conn:
+            conn.close()
+
+
+def _session_turns(session_id: str, token_budget: int = 4000) -> list[dict]:
+    conn = None
+    try:
+        conn = _connect()
+        rows = conn.execute(
+            "SELECT idx, role, content, note_ids, destination, model, reason, tokens, ts FROM session_turns WHERE session_id=? AND deleted=0 ORDER BY idx ASC",
+            (session_id,),
+        ).fetchall()
+        kept = []
+        est_total = 0
+        for row in reversed(rows):
+            est = len(row[2]) // 4
+            if est_total + est > token_budget:
+                break
+            est_total += est
+            kept.append(row)
+        kept.reverse()
+        return [
+            {
+                "idx": r[0], "role": r[1], "content": r[2],
+                "note_ids": json.loads(r[3]), "destination": r[4],
+                "model": r[5], "reason": r[6], "tokens": r[7], "ts": r[8],
+            }
+            for r in kept
+        ]
+    finally:
+        if conn:
+            conn.close()
+
+
+_LEADING_PRONOUNS = {
+    "it", "its", "they", "them", "their", "this", "that", "these", "those",
+    "he", "she", "we", "what", "which", "how", "why", "when", "where", "who",
+}
+
+
+def _condense_query(history: list[dict], question: str) -> str:
+    words = question.split()
+    if len(words) > 10:
+        return question
+    first_word = re.sub(r"[^a-z]", "", words[0].lower())
+    if first_word not in _LEADING_PRONOUNS:
+        return question
+    has_proper_noun = any(
+        re.match(r"[A-Z][a-z]+", word) and word != words[0] and len(word) > 1
+        for word in words
+    )
+    if has_proper_noun:
+        return question
+    last_assistant = next((t for t in reversed(history) if t["role"] == "assistant"), None)
+    if last_assistant is None:
+        return question
+    context_snippet = last_assistant["content"][:120].rstrip()
+    return f"{context_snippet} — {question}"
 
 
 def _new_id() -> str:
@@ -616,6 +760,99 @@ def _call_cloud(provider_name: str, system: str, user_msg: str, cfg: dict) -> st
         raise CloudError(f"Provider '{provider_name}' request failed: {exc}") from exc
 
 
+def _call_cloud_chat(provider_name: str, system: str, messages: list[dict], cfg: dict) -> str:
+    """Multi-turn chat dispatch. messages = history + current user turn (no system message)."""
+    default_pcfg = DEFAULT_PROVIDERS.get(provider_name, {})
+    user_pcfg = cfg.get("providers", {}).get(provider_name, {})
+    if not default_pcfg and not user_pcfg:
+        raise CloudError(
+            f"Unknown provider '{provider_name}'. "
+            f"Add providers.{provider_name} to ~/.kage/config.json"
+        )
+    pcfg = {**default_pcfg, **user_pcfg}
+    key = os.environ.get(pcfg["api_key_env"], "")
+    if not key:
+        raise CloudError(f"{pcfg['api_key_env']} not set (provider: {provider_name})")
+    ptype = pcfg.get("type", "openai-compat")
+    model = pcfg.get("model", "")
+    try:
+        if ptype == "claude":
+            out = _post_json(
+                "https://api.anthropic.com/v1/messages",
+                {"model": model, "max_tokens": 1024, "system": system, "messages": messages},
+                headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
+            )
+            return out["content"][0]["text"].strip()
+        elif ptype in ("openai", "openai-compat"):
+            base = pcfg.get("base_url", "https://api.openai.com")
+            path = pcfg.get("chat_path", "/v1/chat/completions")
+            out = _post_json(
+                f"{base}{path}",
+                {"model": model, "max_tokens": 1024,
+                 "messages": [{"role": "system", "content": system}] + messages},
+                headers={"Authorization": f"Bearer {key}"},
+            )
+            return out["choices"][0]["message"]["content"].strip()
+        elif ptype == "gemini":
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta"
+                f"/models/{model}:generateContent?key={key}"
+            )
+            contents = [
+                {"role": "model" if m["role"] == "assistant" else "user",
+                 "parts": [{"text": m["content"]}]}
+                for m in messages
+            ]
+            out = _post_json(url, {
+                "systemInstruction": {"parts": [{"text": system}]},
+                "contents": contents,
+            })
+            candidates = out.get("candidates") or []
+            if not candidates or "content" not in candidates[0]:
+                raise CloudError(f"Gemini returned no content (provider: {provider_name})")
+            return candidates[0]["content"]["parts"][0]["text"].strip()
+        else:
+            raise CloudError(f"Unknown provider type '{ptype}'")
+    except (urllib.error.URLError, KeyError, IndexError, TimeoutError) as exc:
+        raise CloudError(f"Provider '{provider_name}' request failed: {exc}") from exc
+
+
+def _answer(
+    question: str,
+    history: list[dict],
+    context: str,
+    destination: str,
+    cfg: dict,
+) -> Iterator[str]:
+    system_prompt = (
+        "You are kage, a local context broker. Answer the user question using the provided context. "
+        "Be concise and accurate. If the context does not contain relevant information, say so."
+    )
+    user_content = f"Context:\n{context}\n\nQuestion: {question}" if context else question
+    messages = [
+        {"role": t["role"], "content": t["content"]} for t in history
+    ] + [{"role": "user", "content": user_content}]
+
+    if destination == "ollama":
+        ollama_url = cfg.get("ollama_url", "http://localhost:11434") + "/api/chat"
+        model = cfg.get("ollama_model", "qwen3:14b")
+        think = cfg.get("ollama_think", False)
+        payload: dict = {
+            "model": model,
+            "messages": [{"role": "system", "content": system_prompt}] + messages,
+            "stream": False,
+        }
+        if think is not None:
+            payload["think"] = think
+        try:
+            out = _post_json(ollama_url, payload)
+            yield out["message"]["content"].strip()
+        except (urllib.error.URLError, KeyError, TimeoutError) as exc:
+            raise OllamaUnavailable(str(exc)) from exc
+    else:
+        yield _call_cloud_chat(destination, system_prompt, messages, cfg)
+
+
 # ── Privacy gate (Layer 3e) ────────────────────────────────────────────────
 
 _PII_PATTERNS: list[dict] = [
@@ -749,6 +986,86 @@ def _disclosure_gate(rows: list, cfg: dict, identity: str = "personal", project:
         allowed.append(row)
 
     return allowed, withheld
+
+
+def _gate_conversation(
+    turns: list[dict],
+    cfg: dict,
+    identity: str,
+    project: str | None,
+) -> tuple[list[dict], list[dict]]:
+    """Filter session turns before cloud dispatch.
+
+    Checks per turn: (1) PII scan on content, (2) provenance — note_ids against identity wall + local_only.
+    Returns (safe_turns, withheld) where withheld entries = {turn_idx, reason, pii_patterns}.
+    Only call for cloud destinations; skip for ollama.
+    """
+    if not turns:
+        return [], []
+    extra_pii = cfg.get("pii_patterns", [])
+    identity_allowed = _allowed_note_ids(identity, project)
+    all_note_ids = list({nid for t in turns for nid in t["note_ids"]})
+    lo_map: dict[str, bool] = {}
+    if all_note_ids:
+        conn = _connect()
+        try:
+            placeholders = ",".join("?" * len(all_note_ids))
+            lo_map = {
+                r[0]: bool(r[1])
+                for r in conn.execute(
+                    f"SELECT id, local_only FROM memories WHERE id IN ({placeholders})",
+                    all_note_ids,
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+    safe: list[dict] = []
+    withheld: list[dict] = []
+    for turn in turns:
+        pii_hits = _pii_scan(turn["content"], extra_pii)
+        if pii_hits:
+            withheld.append({"turn_idx": turn["idx"], "reason": "pii_in_content", "pii_patterns": pii_hits})
+            continue
+        blocked = False
+        for nid in turn["note_ids"]:
+            if nid not in identity_allowed:
+                withheld.append({"turn_idx": turn["idx"], "reason": f"provenance:identity_wall:{identity}", "pii_patterns": []})
+                blocked = True
+                break
+            if lo_map.get(nid, False):
+                withheld.append({"turn_idx": turn["idx"], "reason": f"provenance:local_only:{nid}", "pii_patterns": []})
+                blocked = True
+                break
+        if blocked:
+            continue
+        safe.append(turn)
+    return safe, withheld
+
+
+def _session_switch(
+    session_id: str,
+    new_destination: str,
+    cfg: dict,
+    identity: str,
+    project: str | None,
+) -> tuple[str, list[dict], list[dict]]:
+    """Switch a session to a new destination, enforcing the no-leak-on-switch invariant.
+
+    Re-gates ALL turns against the new destination. Returns (new_destination, safe_turns, withheld)
+    so the caller knows exactly which history is safe to send to the new provider.
+    """
+    sess = _session_load(session_id)
+    if sess is None:
+        raise ValueError(f"Session {session_id!r} not found")
+    conn = _connect()
+    try:
+        conn.execute("UPDATE sessions SET destination=? WHERE session_id=?", (new_destination, session_id))
+        conn.commit()
+    finally:
+        conn.close()
+    turns = _session_turns(session_id, token_budget=10_000_000)
+    safe_turns, withheld = _gate_conversation(turns, cfg, identity, project)
+    return (new_destination, safe_turns, withheld)
 
 
 def _rrf_fuse(fts_rows: list, vec_rows: list, k: int = 60) -> list:
@@ -1675,6 +1992,139 @@ def migrate(
     typer.echo(f"  identities added:     {stats['identities_added']}")
     typer.echo(f"  projects added:       {stats['projects_added']}")
     typer.echo(f"  frontmatter updated:  {stats['frontmatter_updated']}")
+
+
+@app.command()
+def chat(
+    project: str = typer.Option(None, "--project", "-p", help="Pin context to a project."),
+    identity: str = typer.Option("personal", "--identity", "-i", help="Identity scope (pinned for session lifetime)."),
+    provider: str = typer.Option(None, "--provider", help="Starting destination: provider name or leave blank for ollama."),
+    limit: int = typer.Option(5, "--limit", "-n", help="Notes per turn."),
+) -> None:
+    """Dev/debug cockpit: stateful conversation with kage. Identity and project are pinned; destination is switchable via /use."""
+    _require_init()
+    cfg = _config()
+    destination = provider or "ollama"
+    session_id = _session_create(identity, project, destination)
+    _last_sources: list = []
+    typer.echo(f"kage chat  [{identity} · {project or 'all'} · {destination}]  /help for commands")
+    typer.echo("-" * 60)
+    while True:
+        try:
+            raw = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            typer.echo("\n[kage] bye.")
+            break
+        if not raw:
+            continue
+        if raw.startswith("/"):
+            parts = raw.split(maxsplit=1)
+            cmd = parts[0].lower()
+            arg = parts[1] if len(parts) > 1 else ""
+            if cmd == "/exit":
+                typer.echo("[kage] bye.")
+                break
+            elif cmd == "/help":
+                typer.echo("/help     show this")
+                typer.echo("/exit     quit")
+                typer.echo("/new      start a fresh session (identity+project stay pinned)")
+                typer.echo("/use <p>  switch destination to provider p (or ollama)")
+                typer.echo("/clear    clear screen")
+                typer.echo("/scope    show current session scope")
+                typer.echo("/sources  show sources from last turn")
+                typer.echo("/history  show turn history")
+            elif cmd == "/new":
+                session_id = _session_create(identity, project, destination)
+                _last_sources = []
+                typer.echo(f"[kage] New session: {session_id[:8]}")
+            elif cmd == "/use":
+                if not arg:
+                    typer.echo("[kage] Usage: /use <provider>  (e.g. /use claude, /use ollama)")
+                    continue
+                try:
+                    new_dest, safe_turns, withheld = _session_switch(session_id, arg.strip(), cfg, identity, project)
+                    destination = new_dest
+                    typer.echo(f"[kage] Switched to {destination}.")
+                    if withheld:
+                        typer.echo(f"  · {len(withheld)} turn(s) withheld from new destination (privacy gate).")
+                except ValueError as e:
+                    typer.echo(f"[kage] Error: {e}")
+            elif cmd == "/clear":
+                typer.echo("\033[2J\033[H", nl=False)
+            elif cmd == "/scope":
+                session = _session_load(session_id)
+                if session:
+                    typer.echo(f"  identity   {identity}")
+                    typer.echo(f"  project    {project or '(all)'}")
+                    typer.echo(f"  dest       {destination}")
+                    typer.echo(f"  session    {session_id[:8]}…")
+            elif cmd == "/sources":
+                if not _last_sources:
+                    typer.echo("[kage] No sources from last turn.")
+                else:
+                    typer.echo("Sources (last turn):")
+                    for note_id, path, section_title in _last_sources:
+                        label = f"§ {section_title}" if section_title else _disp(KAGE_HOME / path)
+                        typer.echo(f"  • {note_id}  {label}")
+            elif cmd == "/history":
+                turns = _session_turns(session_id, token_budget=10_000_000)
+                if not turns:
+                    typer.echo("[kage] No history yet.")
+                for turn in turns:
+                    content = turn["content"]
+                    content_short = content[:60].replace(chr(10), " ")
+                    typer.echo(f"  [{turn['idx']}] {turn['role']:9s} {content_short}{'…' if len(content) > 60 else ''}")
+            else:
+                typer.echo(f"[kage] Unknown command: {cmd}  (type /help)")
+            continue
+        history = _session_turns(session_id)
+        condensed = _condense_query(history, raw)
+        rows = _search(condensed, project, limit, any_terms=True, identity=identity)
+        if destination != "ollama":
+            all_turns = _session_turns(session_id, token_budget=10_000_000)
+            safe_turns, withheld_turns = _gate_conversation(all_turns, cfg, identity, project)
+            if withheld_turns:
+                typer.echo(f"[kage] {len(withheld_turns)} turn(s) withheld from {destination} (privacy gate).")
+            rows, _ = _disclosure_gate(rows, cfg, identity=identity, project=project)
+            history_for_answer = safe_turns
+        else:
+            history_for_answer = history
+        context_parts = []
+        _last_sources = []
+        note_ids_this_turn: list[str] = []
+        for note_id, proj, created, path, snip, section_title, char_start, char_end in rows:
+            if char_start is not None and char_end is not None:
+                text = _read_section(path, char_start, char_end)
+            else:
+                try:
+                    text = _read_body(path)
+                except OSError:
+                    text = ""
+            if text:
+                context_parts.append(f"[{note_id}] {text}")
+                _last_sources.append((note_id, path, section_title))
+                note_ids_this_turn.append(note_id)
+        context = "\n\n".join(context_parts)
+        try:
+            answer = next(iter(_answer(condensed, history_for_answer, context, destination, cfg)))
+        except OllamaUnavailable as e:
+            typer.echo(f"[kage] Ollama unavailable: {e}", err=True)
+            continue
+        except CloudError as e:
+            typer.echo(f"[kage] Cloud error: {e}", err=True)
+            continue
+        if destination == "ollama":
+            model_name = cfg.get("ollama_model", "qwen3:14b")
+        else:
+            default_pcfg = DEFAULT_PROVIDERS.get(destination, {})
+            user_pcfg = cfg.get("providers", {}).get(destination, {})
+            pcfg = {**default_pcfg, **user_pcfg}
+            model_name = pcfg.get("model", destination)
+        est_tokens = len(answer) // 4
+        _session_append(session_id, "user", raw, note_ids_this_turn, destination, model_name, None, None)
+        _session_append(session_id, "assistant", answer, [], destination, model_name, None, est_tokens)
+        typer.echo(answer)
+        typer.echo(f"\n[{model_name} · {destination} · ~{est_tokens}tok]")
 
 
 @_mcp_app.command("serve")

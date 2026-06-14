@@ -8,6 +8,7 @@ the save-wall (#16) and the project partition wall (#99).
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -3785,3 +3786,767 @@ def test_disclosure_gate_stage1_blocks_cross_identity(monkeypatch, tmp_path):
     blocked = [w for w in withheld if w["note_id"] == "blocked-note"]
     assert len(blocked) == 1
     assert blocked[0]["reason"] == "identity_wall:personal"
+
+
+# ── Cycle 10: session schema (Step 1) + session helpers (Step 2) ─────────────
+
+class TestSessionSchema:
+    def test_sessions_table_exists(self, monkeypatch, tmp_path):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        r = CliRunner()
+        r.invoke(cli.app, ["init"])
+        conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = cursor.fetchall()
+        conn.close()
+        assert any("sessions" in t for t in tables)
+
+    def test_session_turns_table_exists(self, monkeypatch, tmp_path):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        r = CliRunner()
+        r.invoke(cli.app, ["init"])
+        conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = cursor.fetchall()
+        conn.close()
+        assert any("session_turns" in t for t in tables)
+
+    def test_sessions_columns(self, monkeypatch, tmp_path):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        r = CliRunner()
+        r.invoke(cli.app, ["init"])
+        conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(sessions)")
+        columns = [row[1] for row in cursor.fetchall()]
+        conn.close()
+        assert columns == ['session_id', 'created_at', 'identity', 'project', 'destination', 'deleted']
+
+    def test_session_turns_columns(self, monkeypatch, tmp_path):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        r = CliRunner()
+        r.invoke(cli.app, ["init"])
+        conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(session_turns)")
+        columns = [row[1] for row in cursor.fetchall()]
+        conn.close()
+        assert columns == ['session_id', 'idx', 'parent_idx', 'role', 'content', 'note_ids', 'destination', 'model', 'reason', 'tokens', 'ts', 'deleted']
+
+    def test_session_turns_parent_idx_nullable(self, monkeypatch, tmp_path):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        r = CliRunner()
+        r.invoke(cli.app, ["init"])
+        conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(session_turns)")
+        for row in cursor.fetchall():
+            if row[1] == "parent_idx":
+                assert row[3] == 0
+        conn.close()
+
+    def test_session_turns_note_ids_default(self, monkeypatch, tmp_path):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        r = CliRunner()
+        r.invoke(cli.app, ["init"])
+        conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(session_turns)")
+        for row in cursor.fetchall():
+            if row[1] == "note_ids":
+                assert row[4] is not None
+                assert "'[]'" in row[4]
+        conn.close()
+
+    def test_schema_idempotent(self, monkeypatch, tmp_path):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        r = CliRunner()
+        r.invoke(cli.app, ["init"])
+        r.invoke(cli.app, ["init"])
+        conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = cursor.fetchall()
+        conn.close()
+        assert any("sessions" in t for t in tables)
+        assert any("session_turns" in t for t in tables)
+
+    def test_sessions_deleted_default_zero(self, monkeypatch, tmp_path):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        r = CliRunner()
+        r.invoke(cli.app, ["init"])
+        conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO sessions(session_id,created_at,identity,destination) VALUES('s1','2026-01-01','personal','ollama')")
+        cursor.execute("SELECT deleted FROM sessions WHERE session_id='s1'")
+        result = cursor.fetchone()[0]
+        conn.close()
+        assert result == 0
+
+    def test_session_turns_deleted_default_zero(self, monkeypatch, tmp_path):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        r = CliRunner()
+        r.invoke(cli.app, ["init"])
+        conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO sessions(session_id,created_at,identity,destination) VALUES('s1','2026-01-01','personal','ollama')")
+        cursor.execute("INSERT INTO session_turns(session_id,idx,role,content,destination,ts) VALUES('s1',0,'user','hello','ollama','2026-01-01')")
+        cursor.execute("SELECT deleted FROM session_turns WHERE session_id='s1' AND idx=0")
+        result = cursor.fetchone()[0]
+        conn.close()
+        assert result == 0
+
+
+class TestSessionHelpers:
+    def test_session_create_returns_uuid_string(self, tmp_path, monkeypatch):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        CliRunner().invoke(cli.app, ["init"])
+        session_id = cli._session_create("personal", None, "ollama")
+        assert isinstance(session_id, str)
+        assert len(session_id) == 36
+
+    def test_session_create_persists_to_db(self, tmp_path, monkeypatch):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        CliRunner().invoke(cli.app, ["init"])
+        session_id = cli._session_create("personal", None, "ollama")
+        conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
+        row = conn.execute("SELECT * FROM sessions WHERE session_id=?", (session_id,)).fetchone()
+        conn.close()
+        assert row is not None
+        assert row[2] == "personal"   # identity
+        assert row[4] == "ollama"     # destination
+
+    def test_session_load_returns_dict(self, tmp_path, monkeypatch):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        CliRunner().invoke(cli.app, ["init"])
+        session_id = cli._session_create("personal", None, "ollama")
+        result = cli._session_load(session_id)
+        assert isinstance(result, dict)
+        assert set(result.keys()) == {"session_id", "created_at", "identity", "project", "destination", "deleted"}
+
+    def test_session_load_returns_none_for_missing(self, tmp_path, monkeypatch):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        CliRunner().invoke(cli.app, ["init"])
+        assert cli._session_load("nonexistent-id") is None
+
+    def test_session_load_excludes_deleted(self, tmp_path, monkeypatch):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        CliRunner().invoke(cli.app, ["init"])
+        session_id = cli._session_create("personal", None, "ollama")
+        conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
+        conn.execute("UPDATE sessions SET deleted=1 WHERE session_id=?", (session_id,))
+        conn.commit()
+        conn.close()
+        assert cli._session_load(session_id) is None
+
+    def test_session_append_returns_zero_for_first_turn(self, tmp_path, monkeypatch):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        CliRunner().invoke(cli.app, ["init"])
+        session_id = cli._session_create("personal", None, "ollama")
+        idx = cli._session_append(session_id, "user", "hello", [], "ollama", None, None, None)
+        assert idx == 0
+
+    def test_session_append_increments_idx(self, tmp_path, monkeypatch):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        CliRunner().invoke(cli.app, ["init"])
+        session_id = cli._session_create("personal", None, "ollama")
+        idx1 = cli._session_append(session_id, "user", "hello", [], "ollama", None, None, None)
+        idx2 = cli._session_append(session_id, "assistant", "world", [], "ollama", None, None, None)
+        assert idx1 == 0
+        assert idx2 == 1
+
+    def test_session_append_serializes_note_ids(self, tmp_path, monkeypatch):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        CliRunner().invoke(cli.app, ["init"])
+        session_id = cli._session_create("personal", None, "ollama")
+        cli._session_append(session_id, "user", "hello", ["n1", "n2"], "ollama", None, None, None)
+        conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
+        raw = conn.execute("SELECT note_ids FROM session_turns WHERE session_id=?", (session_id,)).fetchone()[0]
+        conn.close()
+        assert json.loads(raw) == ["n1", "n2"]
+
+    def test_session_turns_returns_chronological(self, tmp_path, monkeypatch):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        CliRunner().invoke(cli.app, ["init"])
+        session_id = cli._session_create("personal", None, "ollama")
+        for content in ("a", "b", "c"):
+            cli._session_append(session_id, "user", content, [], "ollama", None, None, None)
+        turns = cli._session_turns(session_id)
+        assert [t["content"] for t in turns] == ["a", "b", "c"]
+
+    def test_session_turns_token_budget_drops_oldest(self, tmp_path, monkeypatch):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        CliRunner().invoke(cli.app, ["init"])
+        session_id = cli._session_create("personal", None, "ollama")
+        content = "x" * 400
+        cli._session_append(session_id, "user", content, [], "ollama", None, None, None)
+        cli._session_append(session_id, "assistant", content, [], "ollama", None, None, None)
+        cli._session_append(session_id, "user", content, [], "ollama", None, None, None)
+        turns = cli._session_turns(session_id, token_budget=150)
+        assert len(turns) < 3
+        assert turns[-1]["role"] == "user"
+
+
+class TestGateConversation:
+    @staticmethod
+    def make_turn(idx, content, note_ids=None, role="user"):
+        return {
+            "idx": idx, "role": role, "content": content,
+            "note_ids": note_ids or [], "destination": "claude",
+            "model": None, "reason": None, "tokens": None, "ts": "t",
+        }
+
+    class FakeConn:
+        def execute(self, sql, params):
+            self._params = list(params)
+            return self
+        def fetchall(self):
+            return [(nid, 0) for nid in self._params]
+        def close(self): pass
+
+    def test_empty_turns_returns_empty(self):
+        safe, withheld = cli._gate_conversation([], {}, "personal", None)
+        assert safe == [] and withheld == []
+
+    def test_safe_turn_no_notes(self, monkeypatch):
+        turn = self.make_turn(0, "hello world")
+        monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: set())
+        monkeypatch.setattr(cli, "_connect", lambda: self.FakeConn())
+        safe, withheld = cli._gate_conversation([turn], {}, "personal", None)
+        assert safe == [turn] and withheld == []
+
+    def test_pii_in_content_withheld(self, monkeypatch):
+        turn = self.make_turn(0, "4111 1111 1111 1111")
+        monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: set())
+        monkeypatch.setattr(cli, "_connect", lambda: self.FakeConn())
+        safe, withheld = cli._gate_conversation([turn], {}, "personal", None)
+        assert safe == []
+        assert len(withheld) == 1
+        assert withheld[0]["turn_idx"] == 0
+        assert withheld[0]["reason"] == "pii_in_content"
+
+    def test_provenance_identity_wall_withheld(self, monkeypatch):
+        turn = self.make_turn(0, "hello", note_ids=["note-x"])
+        monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: set())
+        monkeypatch.setattr(cli, "_connect", lambda: self.FakeConn())
+        safe, withheld = cli._gate_conversation([turn], {}, "personal", None)
+        assert safe == []
+        assert withheld[0]["reason"].startswith("provenance:identity_wall:")
+
+    def test_provenance_allowed_note_safe(self, monkeypatch):
+        turn = self.make_turn(0, "hello", note_ids=["note-x"])
+        monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: {"note-x"})
+        monkeypatch.setattr(cli, "_connect", lambda: self.FakeConn())
+        safe, withheld = cli._gate_conversation([turn], {}, "personal", None)
+        assert safe == [turn] and withheld == []
+
+    def test_provenance_local_only_withheld(self, monkeypatch):
+        class LocalConn:
+            def execute(self, sql, params): return self
+            def fetchall(self): return [("note-lo", 1)]
+            def close(self): pass
+        turn = self.make_turn(0, "hello", note_ids=["note-lo"])
+        monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: {"note-lo"})
+        monkeypatch.setattr(cli, "_connect", lambda: LocalConn())
+        safe, withheld = cli._gate_conversation([turn], {}, "personal", None)
+        assert safe == []
+        assert withheld[0]["reason"].startswith("provenance:local_only:")
+
+    def test_multiple_turns_filtered(self, monkeypatch):
+        turn0 = self.make_turn(0, "safe content")
+        turn1 = self.make_turn(1, "4111 1111 1111 1111")
+        turn2 = self.make_turn(2, "safe content")
+        monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: set())
+        monkeypatch.setattr(cli, "_connect", lambda: self.FakeConn())
+        safe, withheld = cli._gate_conversation([turn0, turn1, turn2], {}, "personal", None)
+        assert [t["idx"] for t in safe] == [0, 2]
+        assert withheld[0]["turn_idx"] == 1
+        assert withheld[0]["reason"] == "pii_in_content"
+
+    def test_withheld_does_not_affect_other_turns(self, monkeypatch):
+        turn0 = self.make_turn(0, "safe", note_ids=["bad-note"])
+        turn1 = self.make_turn(1, "also safe")
+        monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: set())
+        monkeypatch.setattr(cli, "_connect", lambda: self.FakeConn())
+        safe, withheld = cli._gate_conversation([turn0, turn1], {}, "personal", None)
+        assert [t["idx"] for t in safe] == [1]
+        assert withheld[0]["turn_idx"] == 0
+        assert withheld[0]["reason"].startswith("provenance:identity_wall:")
+
+
+class TestSessionSwitch:
+    def test_switch_raises_on_unknown_session(self, monkeypatch, tmp_path):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        CliRunner().invoke(cli.app, ["init"])
+        monkeypatch.setattr(cli, "_gate_conversation", lambda *a, **kw: ([], []))
+        with pytest.raises(ValueError):
+            cli._session_switch("no-such", "claude", {}, "personal", None)
+
+    def test_switch_updates_destination_in_db(self, monkeypatch, tmp_path):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        CliRunner().invoke(cli.app, ["init"])
+        monkeypatch.setattr(cli, "_gate_conversation", lambda *a, **kw: ([], []))
+        monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: set())
+        session_id = cli._session_create("personal", None, "ollama")
+        cli._session_switch(session_id, "claude", {}, "personal", None)
+        conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
+        result = conn.execute("SELECT destination FROM sessions WHERE session_id=?", (session_id,)).fetchone()
+        conn.close()
+        assert result[0] == "claude"
+
+    def test_switch_returns_new_destination(self, monkeypatch, tmp_path):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        CliRunner().invoke(cli.app, ["init"])
+        monkeypatch.setattr(cli, "_gate_conversation", lambda *a, **kw: ([], []))
+        session_id = cli._session_create("personal", None, "ollama")
+        dest, _, _ = cli._session_switch(session_id, "groq", {}, "personal", None)
+        assert dest == "groq"
+
+    def test_switch_re_gates_turns(self, monkeypatch, tmp_path):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        CliRunner().invoke(cli.app, ["init"])
+        monkeypatch.setattr(cli, "_gate_conversation", lambda *a, **kw: ([{"the": "turn"}], [{"withheld": True}]))
+        monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: set())
+        session_id = cli._session_create("personal", None, "ollama")
+        cli._session_append(session_id, "user", "hello", [], "ollama", None, None, None)
+        _, safe, withheld = cli._session_switch(session_id, "claude", {}, "personal", None)
+        assert safe == [{"the": "turn"}]
+        assert withheld == [{"withheld": True}]
+
+    def test_switch_no_leak_invariant(self, monkeypatch, tmp_path):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        CliRunner().invoke(cli.app, ["init"])
+        monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: set())
+        session_id = cli._session_create("personal", None, "ollama")
+        cli._session_append(session_id, "user", "4111 1111 1111 1111", [], "ollama", None, None, None)
+        _, safe, withheld = cli._session_switch(session_id, "claude", {}, "personal", None)
+        assert len(safe) == 0
+        assert len(withheld) == 1
+        assert withheld[0]["reason"] == "pii_in_content"
+
+
+class TestAnswerDispatcher:
+    def _fake_post(self, response: dict):
+        calls = []
+        def fake(url, payload, **kw):
+            calls.append((url, payload))
+            return response
+        return fake, calls
+
+    def test_answer_ollama_calls_api_chat(self, monkeypatch):
+        fake, calls = self._fake_post({"message": {"content": "  hello  "}})
+        monkeypatch.setattr(cli, "_post_json", fake)
+        result = list(cli._answer("q", [], "", "ollama", {}))
+        assert len(calls) == 1
+        assert calls[0][0].endswith("/api/chat")
+        assert result == ["hello"]
+
+    def test_answer_ollama_includes_history(self, monkeypatch):
+        fake, calls = self._fake_post({"message": {"content": "x"}})
+        monkeypatch.setattr(cli, "_post_json", fake)
+        history = [{"role": "user", "content": "prev", "idx": 0, "note_ids": [],
+                    "destination": "ollama", "model": None, "reason": None, "tokens": None, "ts": "t"}]
+        list(cli._answer("q", history, "", "ollama", {}))
+        payload = calls[0][1]
+        assert any(m["role"] == "user" and m["content"] == "prev" for m in payload["messages"])
+
+    def test_answer_ollama_injects_context(self, monkeypatch):
+        fake, calls = self._fake_post({"message": {"content": "x"}})
+        monkeypatch.setattr(cli, "_post_json", fake)
+        list(cli._answer("q", [], "some context", "ollama", {}))
+        payload = calls[0][1]
+        user_msgs = [m for m in payload["messages"] if m["role"] == "user"]
+        assert "some context" in user_msgs[-1]["content"]
+        assert "q" in user_msgs[-1]["content"]
+
+    def test_answer_no_context_sends_raw_question(self, monkeypatch):
+        fake, calls = self._fake_post({"message": {"content": "x"}})
+        monkeypatch.setattr(cli, "_post_json", fake)
+        list(cli._answer("my question", [], "", "ollama", {}))
+        payload = calls[0][1]
+        user_msgs = [m for m in payload["messages"] if m["role"] == "user"]
+        assert user_msgs[-1]["content"] == "my question"
+
+    def test_answer_yields_once(self, monkeypatch):
+        fake, _ = self._fake_post({"message": {"content": "x"}})
+        monkeypatch.setattr(cli, "_post_json", fake)
+        assert len(list(cli._answer("q", [], "", "ollama", {}))) == 1
+
+    def test_answer_ollama_raises_unavailable_on_error(self, monkeypatch):
+        def bad_post(url, payload, **kw):
+            raise urllib.error.URLError("down")
+        monkeypatch.setattr(cli, "_post_json", bad_post)
+        with pytest.raises(cli.OllamaUnavailable):
+            list(cli._answer("q", [], "", "ollama", {}))
+
+    def test_answer_cloud_delegates_to_call_cloud_chat(self, monkeypatch):
+        monkeypatch.setattr(cli, "_call_cloud_chat", lambda *a, **kw: "cloud answer")
+        assert list(cli._answer("q", [], "", "claude", {})) == ["cloud answer"]
+
+    def test_call_cloud_chat_unknown_provider_raises(self):
+        with pytest.raises(cli.CloudError):
+            cli._call_cloud_chat("no-such", "sys", [], {})
+
+    def test_call_cloud_chat_missing_key_raises(self, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        with pytest.raises(cli.CloudError):
+            cli._call_cloud_chat("claude", "sys", [], {})
+
+
+class TestCondenseQuery:
+    def test_long_question_returned_unchanged(self):
+        question = " ".join(["a"] * 11)
+        assert cli._condense_query([], question) == question
+
+    def test_no_leading_pronoun_returned_unchanged(self):
+        question = "Tell me more about it"
+        assert cli._condense_query([], question) == question
+
+    def test_proper_noun_returned_unchanged(self):
+        question = "How does Python work?"
+        history = [{"role": "assistant", "content": "Some previous content"}]
+        assert cli._condense_query(history, question) == question
+
+    def test_no_assistant_history_returned_unchanged(self):
+        question = "how does it work?"
+        history = [{"role": "user", "content": "something"}]
+        assert cli._condense_query(history, question) == question
+
+    def test_condenses_simple_followup(self):
+        question = "how does it work?"
+        history = [{"role": "assistant", "content": "This is about memory storage."}]
+        result = cli._condense_query(history, question)
+        assert result.startswith("This is about memory storage.")
+        assert " — " in result
+        assert result.endswith("how does it work?")
+
+    def test_uses_last_assistant_turn(self):
+        question = "what is it?"
+        history = [
+            {"role": "assistant", "content": "first answer"},
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "second answer"},
+        ]
+        result = cli._condense_query(history, question)
+        assert result.startswith("second answer")
+        assert " — " in result
+
+    def test_truncates_long_context_to_120(self):
+        question = "what is it?"
+        history = [{"role": "assistant", "content": "x" * 200}]
+        result = cli._condense_query(history, question)
+        assert len(result.split(" — ")[0]) == 120
+        assert result.endswith("what is it?")
+
+    def test_pronoun_with_punctuation(self):
+        question = "It is correct?"
+        history = [{"role": "assistant", "content": "Some previous content"}]
+        result = cli._condense_query(history, question)
+        assert " — " in result
+        assert result.endswith("It is correct?")
+
+    def test_first_word_titlecase_not_treated_as_proper_noun(self):
+        question = "What is it?"
+        history = [{"role": "assistant", "content": "context"}]
+        result = cli._condense_query(history, question)
+        assert result.startswith("context")
+        assert result.endswith("What is it?")
+
+
+# ── Cycle 10: kage chat cockpit (Step 7) ──────────────────────────────────────
+
+class TestChatCommand:
+    def _setup(self, tmp_path, monkeypatch):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        CliRunner().invoke(cli.app, ["init"])
+
+    def test_chat_exits_on_slash_exit(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        seq = iter(["/exit"])
+        monkeypatch.setattr("builtins.input", lambda _: next(seq))
+        result = CliRunner().invoke(cli.app, ["chat"], catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "[kage] bye." in result.output
+
+    def test_chat_exits_on_eof(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        def fake_input(_):
+            raise EOFError
+        monkeypatch.setattr("builtins.input", fake_input)
+        result = CliRunner().invoke(cli.app, ["chat"], catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "[kage] bye." in result.output
+
+    def test_chat_help_lists_commands(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        seq = iter(["/help", "/exit"])
+        monkeypatch.setattr("builtins.input", lambda _: next(seq))
+        result = CliRunner().invoke(cli.app, ["chat"], catch_exceptions=False)
+        assert "/use" in result.output
+        assert "/new" in result.output
+        assert "/scope" in result.output
+        assert "/sources" in result.output
+        assert "/history" in result.output
+
+    def test_chat_new_creates_fresh_session(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        seq = iter(["/new", "/exit"])
+        monkeypatch.setattr("builtins.input", lambda _: next(seq))
+        result = CliRunner().invoke(cli.app, ["chat"], catch_exceptions=False)
+        assert "[kage] New session:" in result.output
+
+    def test_chat_scope_shows_identity_project(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        seq = iter(["/scope", "/exit"])
+        monkeypatch.setattr("builtins.input", lambda _: next(seq))
+        result = CliRunner().invoke(cli.app, ["chat"], catch_exceptions=False)
+        assert "personal" in result.output
+        assert "(all)" in result.output
+
+    def test_chat_sources_empty_on_start(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        seq = iter(["/sources", "/exit"])
+        monkeypatch.setattr("builtins.input", lambda _: next(seq))
+        result = CliRunner().invoke(cli.app, ["chat"], catch_exceptions=False)
+        assert "No sources from last turn." in result.output
+
+    def test_chat_history_empty_on_start(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        seq = iter(["/history", "/exit"])
+        monkeypatch.setattr("builtins.input", lambda _: next(seq))
+        result = CliRunner().invoke(cli.app, ["chat"], catch_exceptions=False)
+        assert "No history yet." in result.output
+
+    def test_chat_unknown_command(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        seq = iter(["/bogus", "/exit"])
+        monkeypatch.setattr("builtins.input", lambda _: next(seq))
+        result = CliRunner().invoke(cli.app, ["chat"], catch_exceptions=False)
+        assert "Unknown command" in result.output
+
+    def test_chat_normal_turn_appends_session(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        seq = iter(["what is kage?", "/exit"])
+        monkeypatch.setattr("builtins.input", lambda _: next(seq))
+        monkeypatch.setattr("kage.cli._answer", lambda question, history, context, destination, cfg: iter(["hello world"]))
+        monkeypatch.setattr("kage.cli._search", lambda *args, **kwargs: [])
+        result = CliRunner().invoke(cli.app, ["chat"], catch_exceptions=False)
+        assert "hello world" in result.output
+        assert "tok]" in result.output
+
+    def test_chat_use_switches_destination(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        seq = iter(["/use claude", "/exit"])
+        monkeypatch.setattr("builtins.input", lambda _: next(seq))
+        monkeypatch.setattr("kage.cli._session_switch", lambda session_id, new_dest, cfg, identity, project: (new_dest, [], []))
+        result = CliRunner().invoke(cli.app, ["chat"], catch_exceptions=False)
+        assert "Switched to claude." in result.output
+
+
+# ── Cycle 10: MCP session_id (Step 8) ─────────────────────────────────────────
+
+def test_mcp_ask_session_not_found_returns_error(monkeypatch, tmp_path):
+    _mcp_home(monkeypatch, tmp_path)
+    result = mcp_server.kage_ask('hello', session_id='00000000-0000-0000-0000-000000000000')
+    assert result.get('answer') is None
+    assert 'error' in result
+    assert result.get('session_id') == '00000000-0000-0000-0000-000000000000'
+
+
+def test_mcp_ask_session_stateless_unchanged(monkeypatch, tmp_path):
+    _mcp_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, '_post_json', lambda url, payload, **kw: {'response': 'stateless ok'})
+    result = mcp_server.kage_ask('any question')
+    assert result['answer'] == 'stateless ok'
+    assert result['provider'].startswith('local:')
+
+
+def test_mcp_ask_session_ollama_returns_answer(monkeypatch, tmp_path):
+    _mcp_home(monkeypatch, tmp_path)
+    session_id = cli._session_create('personal', None, 'ollama')
+    monkeypatch.setattr(cli, '_answer', lambda question, history, context, destination, cfg: iter(['session answer']))
+    monkeypatch.setattr(cli, '_search', lambda *a, **kw: [])
+    result = mcp_server.kage_ask('hello', session_id=session_id)
+    assert result['answer'] == 'session answer'
+    assert result['session_id'] == session_id
+    assert result['provider'].startswith('local:')
+
+
+def test_mcp_ask_session_appends_turns_to_db(monkeypatch, tmp_path):
+    _mcp_home(monkeypatch, tmp_path)
+    session_id = cli._session_create('personal', None, 'ollama')
+    monkeypatch.setattr(cli, '_answer', lambda question, history, context, destination, cfg: iter(['hello back']))
+    monkeypatch.setattr(cli, '_search', lambda *a, **kw: [])
+    mcp_server.kage_ask('hello', session_id=session_id)
+    turns = cli._session_turns(session_id, token_budget=10_000_000)
+    assert len(turns) == 2
+    assert turns[0]['role'] == 'user'
+    assert turns[1]['role'] == 'assistant'
+    assert turns[1]['content'] == 'hello back'
+
+
+def test_mcp_ask_session_history_threaded(monkeypatch, tmp_path):
+    _mcp_home(monkeypatch, tmp_path)
+    session_id = cli._session_create('personal', None, 'ollama')
+    cli._session_append(session_id, 'assistant', 'prior answer', [], 'ollama', 'qwen3:14b', None, 10)
+    captured: dict = {}
+    def fake_answer(question, history, context, destination, cfg):
+        captured['history'] = history
+        return iter(['new answer'])
+    monkeypatch.setattr(cli, '_answer', fake_answer)
+    monkeypatch.setattr(cli, '_search', lambda *a, **kw: [])
+    mcp_server.kage_ask('follow up question', session_id=session_id)
+    assert len(captured['history']) >= 1
+    assert any(t['role'] == 'assistant' for t in captured['history'])

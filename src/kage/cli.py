@@ -12,6 +12,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -1693,6 +1694,41 @@ def _select_tool(arm_name: str, question: str, tools: list) -> tuple[str, dict]:
 async def _call_arm(arm_name: str, question: str, identity: str, timeout: float = 30.0) -> str | None:
     """Call one arm. Returns serialized text or None on any failure (graceful)."""
     ts = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    arm = _config().get("arms", {}).get(arm_name, {})
+    if arm.get("transport") == "shell":
+        cmd = arm.get("command", "")
+        if not cmd:
+            _write_audit({
+                "type": "arm_call",
+                "arm": arm_name,
+                "tool": "shell",
+                "identity": identity,
+                "ts": ts,
+                "success": False,
+            })
+            return None
+        try:
+            proc = subprocess.run(shlex.split(cmd), capture_output=True, text=True, timeout=timeout)
+            data = proc.stdout.strip() or None
+            _write_audit({
+                "type": "arm_call",
+                "arm": arm_name,
+                "tool": "shell",
+                "identity": identity,
+                "ts": ts,
+                "success": bool(data),
+            })
+            return data
+        except Exception:
+            _write_audit({
+                "type": "arm_call",
+                "arm": arm_name,
+                "tool": "shell",
+                "identity": identity,
+                "ts": ts,
+                "success": False,
+            })
+            return None
     try:
         async with asyncio.timeout(timeout):
             async with _connect_arm(arm_name) as (read, write):
@@ -1742,7 +1778,17 @@ def _detect_arms(question: str, identity: str) -> list[str]:
 
 
 async def _check_arm_health(arm_name: str) -> bool:
-    """Return True if the arm MCP server is reachable and authenticates."""
+    """Return True if the arm is reachable (shell: exit 0; MCP: initializes)."""
+    arm = _config().get("arms", {}).get(arm_name, {})
+    if arm.get("transport") == "shell":
+        cmd = arm.get("command", "")
+        if not cmd:
+            return False
+        try:
+            proc = subprocess.run(shlex.split(cmd), capture_output=True, text=True, timeout=10.0)
+            return proc.returncode == 0
+        except Exception:
+            return False
     try:
         async with asyncio.timeout(10.0):
             async with _connect_arm(arm_name) as (read, write):
@@ -1995,7 +2041,9 @@ def ask(
         typer.echo(f"[thinking]\n{thinking}\n")
     typer.echo(answer or "(no answer returned)")
 
-    if not no_sources and sources:
+    if arm_context:
+        typer.echo(f"\nSources: {', '.join(arm_names)} (live arm)")
+    elif not no_sources and sources:
         typer.echo("\nSources:")
         for note_id, path, section_title in sources:
             label = f"§ {section_title}" if section_title else _disp(KAGE_HOME / path)

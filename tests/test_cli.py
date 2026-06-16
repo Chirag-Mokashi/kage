@@ -4636,3 +4636,68 @@ class TestActiveContext:
         assert personal_id in personal_allowed
         assert neu_id not in personal_allowed
         assert neu_id in neu_allowed
+
+
+class TestArmShellTransport:
+    _SHELL_CFG = {
+        "arms": {
+            "calendar": {
+                "enabled": True,
+                "transport": "shell",
+                "command": "icalbuddy eventsToday",
+                "identity": "personal",
+                "permission": "read",
+            }
+        }
+    }
+
+    def test_call_arm_shell_returns_stdout(self, monkeypatch):
+        monkeypatch.setattr(cli, "_config", lambda: self._SHELL_CFG)
+        monkeypatch.setattr(cli, "_write_audit", lambda x: None)
+        mock_proc = mock.Mock()
+        mock_proc.stdout = "• Test event\n"
+        mock_proc.returncode = 0
+        monkeypatch.setattr(cli.subprocess, "run", lambda *a, **kw: mock_proc)
+        result = asyncio.run(cli._call_arm("calendar", "whats on my calendar", "personal"))
+        assert result == "• Test event"
+
+    def test_call_arm_shell_empty_command_returns_none(self, monkeypatch):
+        cfg = {"arms": {"calendar": {"enabled": True, "transport": "shell", "command": "", "identity": "personal", "permission": "read"}}}
+        monkeypatch.setattr(cli, "_config", lambda: cfg)
+        monkeypatch.setattr(cli, "_write_audit", lambda x: None)
+        result = asyncio.run(cli._call_arm("calendar", "whats on my calendar", "personal"))
+        assert result is None
+
+    def test_call_arm_shell_exception_returns_none(self, monkeypatch):
+        monkeypatch.setattr(cli, "_config", lambda: self._SHELL_CFG)
+        monkeypatch.setattr(cli, "_write_audit", lambda x: None)
+        def raise_fnf(*a, **kw): raise FileNotFoundError()
+        monkeypatch.setattr(cli.subprocess, "run", raise_fnf)
+        result = asyncio.run(cli._call_arm("calendar", "whats on my calendar", "personal"))
+        assert result is None
+
+    def test_call_arm_shell_empty_stdout_returns_none(self, monkeypatch):
+        monkeypatch.setattr(cli, "_config", lambda: self._SHELL_CFG)
+        monkeypatch.setattr(cli, "_write_audit", lambda x: None)
+        mock_proc = mock.Mock()
+        mock_proc.stdout = "  "
+        mock_proc.returncode = 0
+        monkeypatch.setattr(cli.subprocess, "run", lambda *a, **kw: mock_proc)
+        result = asyncio.run(cli._call_arm("calendar", "whats on my calendar", "personal"))
+        assert result is None
+
+    def test_check_arm_health_shell_returncode_zero(self, monkeypatch):
+        monkeypatch.setattr(cli, "_config", lambda: self._SHELL_CFG)
+        mock_proc = mock.Mock()
+        mock_proc.returncode = 0
+        monkeypatch.setattr(cli.subprocess, "run", lambda *a, **kw: mock_proc)
+        result = asyncio.run(cli._check_arm_health("calendar"))
+        assert result is True
+
+    def test_check_arm_health_shell_nonzero_returncode(self, monkeypatch):
+        monkeypatch.setattr(cli, "_config", lambda: self._SHELL_CFG)
+        mock_proc = mock.Mock()
+        mock_proc.returncode = 1
+        monkeypatch.setattr(cli.subprocess, "run", lambda *a, **kw: mock_proc)
+        result = asyncio.run(cli._check_arm_health("calendar"))
+        assert result is False

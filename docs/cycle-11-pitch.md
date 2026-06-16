@@ -1,8 +1,48 @@
 # Cycle 11 — kage as MCP Client
 
-*Status: PITCH v2 (cold-reviewed, all findings folded in). To be built per the locked
-7-step dev workflow: plan cloud → write local (Qwen3) → review cloud → plan tests cloud
-→ write tests local → review tests cloud → run tests local. Created 2026-06-16.*
+*Status: SHIPPED (2026-06-16). Built per the locked 7-step dev workflow: plan cloud →
+write local (Qwen3) → review cloud → plan tests cloud → write tests local → review tests
+cloud → run tests local. Created 2026-06-16.*
+
+---
+
+## SHIPPED OUTCOME — pivot to a local `shell` arm (2026-06-16)
+
+The MCP-client plumbing shipped as designed (dual-transport `_connect_arm`,
+`_detect_arms` routing, `_call_arm` graceful fallback, audit log, `kage arm auth`).
+**But the first live arm pivoted away from Google's remote MCPs.**
+
+**Why:** Google Calendar/Gmail MCP endpoints are gated behind the Workspace Developer
+Preview Program, which **rejects Gmail-domain accounts** — only Workspace-domain emails
+qualify. With no Workspace domain available, that path is blocked indefinitely.
+
+**The jugaad pivot:** macOS already syncs Google Calendar locally into Apple Calendar
+(via System Settings → Internet Accounts). A third transport — **`shell`** — runs a
+local command and injects its stdout. The first live arm reads the local calendar with
+`icalbuddy`, with **zero OAuth, zero API keys, zero cloud calls** — fully **Local**.
+
+```json
+"calendar": {
+  "enabled": true,
+  "transport": "shell",
+  "command": "/opt/homebrew/bin/icalbuddy eventsFrom:today to:tomorrow",
+  "identity": "personal",
+  "permission": "read"
+}
+```
+
+`_call_arm` and `_check_arm_health` gained a `shell` branch (subprocess, graceful
+fallback to None on any failure). Verified live: `kage ask "what's on my calendar
+tomorrow?"` returns real synced events. The SSE/stdio transports remain in the codebase,
+inert, for the day Google opens the MCPs publicly (or a community arm needs stdio).
+
+**Known limitation — macOS TCC:** the `shell` arm only fires from a context that holds
+Calendar permission (Terminal, launchd). It silently falls back to memory-only from IDE
+subprocesses (e.g. the Claude Code Bash tool) — a *testing* artifact, not a production
+blocker. **Future fix (later cycle):** a thin **signed Swift helper** that owns its own
+TCC grant and is invoked through this same `shell` transport — then permission persists
+across launchd/cron/automation contexts. That helper later grows into the menu-bar
+Aware surface.
 
 ---
 

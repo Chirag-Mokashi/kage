@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import asyncio
 import re
 import sqlite3
 import subprocess
@@ -2219,7 +2220,7 @@ def test_mcp_ask_local_returns_answer(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: {"response": "Paris."})
 
-    result = mcp_server.kage_ask("where is the eiffel tower")
+    result = asyncio.run(mcp_server.kage_ask("where is the eiffel tower"))
     assert result["answer"] == "Paris."
     assert isinstance(result["sources"], list)
     assert result["provider"].startswith("local:")
@@ -2231,7 +2232,7 @@ def test_mcp_ask_with_provider(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli, "_call_cloud", lambda name, sys, msg, cfg: "Yes, dogs are mammals.")
 
-    result = mcp_server.kage_ask("are dogs mammals", provider="claude")
+    result = asyncio.run(mcp_server.kage_ask("are dogs mammals", provider="claude"))
     assert result["answer"] == "Yes, dogs are mammals."
     assert result["provider"] == "claude"
 
@@ -2241,7 +2242,7 @@ def test_mcp_ask_cloud_error_returns_error_message(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: (_ for _ in ()).throw(cli.CloudError("bad key")))
 
-    result = mcp_server.kage_ask("q", provider="openai")
+    result = asyncio.run(mcp_server.kage_ask("q", provider="openai"))
     assert "bad key" in result["answer"]
     assert result["sources"] == []
 
@@ -2303,7 +2304,7 @@ def test_mcp_ask_uses_read_section_when_char_offsets_present(monkeypatch, tmp_pa
                         lambda path, cs, ce: read_calls.append((path, cs, ce)) or "section text")
     monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: {"response": "answer"})
 
-    result = mcp_server.kage_ask("what is intro")
+    result = asyncio.run(mcp_server.kage_ask("what is intro"))
     assert read_calls                     # _read_section was called (line 63)
     assert result["answer"] == "answer"
     assert "id1" in result["sources"]
@@ -2317,7 +2318,7 @@ def test_mcp_ask_handles_missing_markdown_gracefully(monkeypatch, tmp_path):
     ])
     monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: {"response": "fallback answer"})
 
-    result = mcp_server.kage_ask("q")      # _read_body raises OSError → text = "" → no source
+    result = asyncio.run(mcp_server.kage_ask("q"))      # _read_body raises OSError → text = "" → no source
     assert result["answer"] == "fallback answer"
     assert result["sources"] == []        # OSError path (lines 67-68) — no source added
 
@@ -2330,7 +2331,7 @@ def test_mcp_ask_local_unavailable_returns_error_dict(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_post_json",
                         lambda *a, **kw: (_ for _ in ()).throw(urllib.error.URLError("down")))
 
-    result = mcp_server.kage_ask("q")     # local Ollama down — lines 100-101
+    result = asyncio.run(mcp_server.kage_ask("q"))     # local Ollama down — lines 100-101
     assert result["answer"].startswith("Local model unavailable:")
     assert result["sources"] == []
     assert result["provider"] == "local"
@@ -3350,7 +3351,7 @@ def test_mcp_kage_ask_gate_withholds_local_only(monkeypatch, tmp_path):
     cloud_calls: list[str] = []
     monkeypatch.setattr(cli, "_call_cloud", lambda name, *a, **kw: cloud_calls.append(name) or "ans")
     monkeypatch.setattr(cli, "_post_json", lambda url, p, **kw: {"response": "local ans"})
-    result = mcp_server.kage_ask("what is my passport?", provider="groq")
+    result = asyncio.run(mcp_server.kage_ask("what is my passport?", provider="groq"))
     assert cloud_calls == []
     assert result["withheld_count"] == 1
 
@@ -3363,7 +3364,7 @@ def test_mcp_kage_ask_gate_allows_clean_note(monkeypatch, tmp_path):
     mem_id = cli._save("Python uses indentation", None)
     monkeypatch.setattr(cli, "_search", lambda *a, **kw: [_fake_row(mem_id)])
     monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: "cloud answer")
-    result = mcp_server.kage_ask("what about Python?", provider="groq")
+    result = asyncio.run(mcp_server.kage_ask("what about Python?", provider="groq"))
     assert result["withheld_count"] == 0
     assert result["answer"] == "cloud answer"
 
@@ -3374,7 +3375,7 @@ def test_mcp_kage_ask_audit_written(monkeypatch, tmp_path):
     h = _save_home(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
     monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: "answer")
-    mcp_server.kage_ask("q", provider="groq")
+    asyncio.run(mcp_server.kage_ask("q", provider="groq"))
     records = [_json.loads(l) for l in (h / "audit.jsonl").read_text().strip().splitlines()]
     assert records[0]["provider"] == "groq"
     assert records[0]["outcome"] == "dispatched_mcp"
@@ -4501,7 +4502,7 @@ class TestChatCommand:
 
 def test_mcp_ask_session_not_found_returns_error(monkeypatch, tmp_path):
     _mcp_home(monkeypatch, tmp_path)
-    result = mcp_server.kage_ask('hello', session_id='00000000-0000-0000-0000-000000000000')
+    result = asyncio.run(mcp_server.kage_ask('hello', session_id='00000000-0000-0000-0000-000000000000'))
     assert result.get('answer') is None
     assert 'error' in result
     assert result.get('session_id') == '00000000-0000-0000-0000-000000000000'
@@ -4510,7 +4511,7 @@ def test_mcp_ask_session_not_found_returns_error(monkeypatch, tmp_path):
 def test_mcp_ask_session_stateless_unchanged(monkeypatch, tmp_path):
     _mcp_home(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, '_post_json', lambda url, payload, **kw: {'response': 'stateless ok'})
-    result = mcp_server.kage_ask('any question')
+    result = asyncio.run(mcp_server.kage_ask('any question'))
     assert result['answer'] == 'stateless ok'
     assert result['provider'].startswith('local:')
 
@@ -4520,7 +4521,7 @@ def test_mcp_ask_session_ollama_returns_answer(monkeypatch, tmp_path):
     session_id = cli._session_create('personal', None, 'ollama')
     monkeypatch.setattr(cli, '_answer', lambda question, history, context, destination, cfg: iter(['session answer']))
     monkeypatch.setattr(cli, '_search', lambda *a, **kw: [])
-    result = mcp_server.kage_ask('hello', session_id=session_id)
+    result = asyncio.run(mcp_server.kage_ask('hello', session_id=session_id))
     assert result['answer'] == 'session answer'
     assert result['session_id'] == session_id
     assert result['provider'].startswith('local:')
@@ -4531,7 +4532,7 @@ def test_mcp_ask_session_appends_turns_to_db(monkeypatch, tmp_path):
     session_id = cli._session_create('personal', None, 'ollama')
     monkeypatch.setattr(cli, '_answer', lambda question, history, context, destination, cfg: iter(['hello back']))
     monkeypatch.setattr(cli, '_search', lambda *a, **kw: [])
-    mcp_server.kage_ask('hello', session_id=session_id)
+    asyncio.run(mcp_server.kage_ask('hello', session_id=session_id))
     turns = cli._session_turns(session_id, token_budget=10_000_000)
     assert len(turns) == 2
     assert turns[0]['role'] == 'user'
@@ -4549,7 +4550,7 @@ def test_mcp_ask_session_history_threaded(monkeypatch, tmp_path):
         return iter(['new answer'])
     monkeypatch.setattr(cli, '_answer', fake_answer)
     monkeypatch.setattr(cli, '_search', lambda *a, **kw: [])
-    mcp_server.kage_ask('follow up question', session_id=session_id)
+    asyncio.run(mcp_server.kage_ask('follow up question', session_id=session_id))
     assert len(captured['history']) >= 1
     assert any(t['role'] == 'assistant' for t in captured['history'])
 

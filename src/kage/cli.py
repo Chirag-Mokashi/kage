@@ -12,17 +12,24 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import sqlite3
 import subprocess
+import asyncio
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
+from contextlib import asynccontextmanager
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import typer
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+from mcp.client.sse import sse_client
 
 class OllamaUnavailable(Exception):
     """Raised when Ollama is unreachable or times out."""
@@ -41,6 +48,9 @@ app = typer.Typer(
 _mcp_app = typer.Typer(help="MCP server commands.")
 app.add_typer(_mcp_app, name="mcp")
 
+_arm_app = typer.Typer(help="Arm (MCP client) commands.")
+app.add_typer(_arm_app, name="arm")
+
 # ── Layout ────────────────────────────────────────────────────────────────
 KAGE_HOME = Path(os.environ.get("KAGE_HOME") or Path.home() / ".kage")  # override for relocation/tests
 MEMORY_DIR = KAGE_HOME / "memory"          # 5A: markdown source of truth (#70)
@@ -49,6 +59,16 @@ DB_PATH = INDEX_DIR / "kage.db"            # 5B: derived SQLite index (#71)
 CONFIG_PATH = KAGE_HOME / "config.json"
 CHROMA_DIR  = KAGE_HOME / "chroma"
 STATE_PATH  = KAGE_HOME / "state.json"
+
+# ── Arm routing ───────────────────────────────────────────────────────────
+# Arm names in config.json must match these keys exactly to trigger keyword routing.
+ARM_KEYWORDS: dict[str, list[str]] = {
+    "calendar": ["calendar", "schedule", "meeting", "event",
+                 "appointment", "today", "tomorrow", "this week"],
+    "gmail":    ["email", "mail", "inbox", "thread", "draft",
+                 "unread", "reply", "newsletter", "attachment"],
+}
+_arm_tool_cache: dict[str, list] = {}  # warm across calls in one process
 
 # v0.1 schema: memories + an FTS5 full-text index for `recall`.
 # Partition filtering (the wall) lives in SQL per #99; v0.1 = single project tag.
@@ -1602,6 +1622,244 @@ def recall(
         typer.echo(f"    {created}   {_disp(KAGE_HOME / path)}   [{mem_id}]\n")
 
 
+# ── Arm helpers (Cycle 11) ────────────────────────────────────────────────
+
+async def _get_google_token() -> str:
+    """Exchange Google OAuth refresh token for a short-lived access token."""
+    cfg = _config()
+    oauth = cfg.get("google_oauth", {})
+    client_id = oauth.get("client_id", "")
+    client_secret = oauth.get("client_secret", "")
+    refresh_token = oauth.get("refresh_token", "")
+    if not (client_id and client_secret and refresh_token):
+        raise RuntimeError("google_oauth credentials missing — run: kage arm auth")
+    payload = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token",
+    }
+    data = urllib.parse.urlencode(payload).encode()
+    req = urllib.request.Request(
+        "https://oauth2.googleapis.com/token",
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read())["access_token"]
+
+
+@asynccontextmanager
+async def _connect_arm(arm_name: str):
+    """Yield (read, write) streams for the named arm (sse or stdio transport)."""
+    arm = _config().get("arms", {}).get(arm_name, {})
+    transport = arm.get("transport", "stdio")
+    if transport == "sse":
+        token = await _get_google_token()
+        async with sse_client(
+            url=arm["mcp_url"],
+            headers={"Authorization": f"Bearer {token}"},
+        ) as streams:
+            yield streams
+    else:
+        server_params = StdioServerParameters(
+            command=arm["mcp_command"],
+            args=arm.get("mcp_args", []),
+        )
+        async with stdio_client(server_params) as streams:
+            yield streams
+
+
+def _serialize_arm_result(result) -> str | None:
+    """Extract text from a CallToolResult. Returns None if error or empty."""
+    if getattr(result, "isError", False):
+        return None
+    texts = [block.text for block in result.content if hasattr(block, "text")]
+    return "\n".join(texts) if texts else None
+
+
+def _select_tool(arm_name: str, question: str, tools: list) -> tuple[str, dict]:
+    """Pick the best tool from the arm's tool list and build params."""
+    preferred = {"calendar": "list_events", "gmail": "search_threads"}
+    pref = preferred.get(arm_name)
+    for t in tools:
+        if t.name == pref:
+            return t.name, {"query": question}
+    if tools:
+        return tools[0].name, {"query": question}
+    raise RuntimeError(f"Arm {arm_name!r} has no tools")
+
+
+async def _call_arm(arm_name: str, question: str, identity: str, timeout: float = 30.0) -> str | None:
+    """Call one arm. Returns serialized text or None on any failure (graceful)."""
+    ts = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    arm = _config().get("arms", {}).get(arm_name, {})
+    if arm.get("transport") == "shell":
+        cmd = arm.get("command", "")
+        if not cmd:
+            _write_audit({
+                "type": "arm_call",
+                "arm": arm_name,
+                "tool": "shell",
+                "identity": identity,
+                "ts": ts,
+                "success": False,
+            })
+            return None
+        try:
+            proc = subprocess.run(shlex.split(cmd), capture_output=True, text=True, timeout=timeout)
+            data = proc.stdout.strip() or None
+            _write_audit({
+                "type": "arm_call",
+                "arm": arm_name,
+                "tool": "shell",
+                "identity": identity,
+                "ts": ts,
+                "success": bool(data),
+            })
+            return data
+        except Exception:
+            _write_audit({
+                "type": "arm_call",
+                "arm": arm_name,
+                "tool": "shell",
+                "identity": identity,
+                "ts": ts,
+                "success": False,
+            })
+            return None
+    try:
+        async with asyncio.timeout(timeout):
+            async with _connect_arm(arm_name) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    if arm_name not in _arm_tool_cache:
+                        tools_result = await session.list_tools()
+                        _arm_tool_cache[arm_name] = tools_result.tools
+                    tool_name, params = _select_tool(
+                        arm_name, question, _arm_tool_cache[arm_name]
+                    )
+                    result = await session.call_tool(tool_name, params)
+                    data = _serialize_arm_result(result)
+                    _write_audit({
+                        "type": "arm_call",
+                        "arm": arm_name,
+                        "tool": tool_name,
+                        "identity": identity,
+                        "ts": ts,
+                        "success": data is not None,
+                    })
+                    return data
+    except Exception:
+        _write_audit({
+            "type": "arm_call",
+            "arm": arm_name,
+            "tool": "unknown",
+            "identity": identity,
+            "ts": ts,
+            "success": False,
+        })
+        return None
+
+
+def _detect_arms(question: str, identity: str) -> list[str]:
+    """Return list of arm names to call (all matching in config order)."""
+    arms = _config().get("arms", {})
+    q = question.lower()
+    return [
+        name for name, arm in arms.items()
+        if arm.get("enabled")
+        and isinstance(arm.get("identity"), str)
+        and arm["identity"] == identity
+        and arm.get("permission") == "read"
+        and any(kw in q for kw in ARM_KEYWORDS.get(name, []))
+    ]
+
+
+async def _check_arm_health(arm_name: str) -> bool:
+    """Return True if the arm is reachable (shell: exit 0; MCP: initializes)."""
+    arm = _config().get("arms", {}).get(arm_name, {})
+    if arm.get("transport") == "shell":
+        cmd = arm.get("command", "")
+        if not cmd:
+            return False
+        try:
+            proc = subprocess.run(shlex.split(cmd), capture_output=True, text=True, timeout=10.0)
+            return proc.returncode == 0
+        except Exception:
+            return False
+    try:
+        async with asyncio.timeout(10.0):
+            async with _connect_arm(arm_name) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    await session.list_tools()
+        return True
+    except Exception:
+        return False
+
+
+@_arm_app.command("auth")
+def arm_auth() -> None:
+    """One-time Google OAuth consent flow — stores refresh token in config."""
+    cfg = _config()
+    oauth = cfg.get("google_oauth", {})
+    client_id = oauth.get("client_id", "")
+    client_secret = oauth.get("client_secret", "")
+    if not client_id or not client_secret:
+        typer.echo(
+            "✗ google_oauth.client_id and google_oauth.client_secret must be set in config.json first.\n"
+            "  1. Google Cloud Console → APIs & Services → Credentials\n"
+            "  2. Create OAuth client ID (type: Desktop app)\n"
+            "  3. Add client_id and client_secret to ~/.kage/config.json under 'google_oauth'"
+        )
+        raise typer.Exit(code=1)
+    scopes = " ".join([
+        "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/gmail.readonly",
+    ])
+    auth_url = (
+        "https://accounts.google.com/o/oauth2/v2/auth"
+        f"?client_id={client_id}"
+        "&redirect_uri=urn:ietf:wg:oauth:2.0:oob"
+        "&response_type=code"
+        f"&scope={urllib.parse.quote(scopes)}"
+        "&access_type=offline"
+        "&prompt=consent"
+    )
+    typer.echo(f"\nOpen this URL in your browser:\n\n  {auth_url}\n")
+    code = typer.prompt("Paste the authorization code here")
+    payload = {
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
+        "grant_type": "authorization_code",
+    }
+    data = urllib.parse.urlencode(payload).encode()
+    req = urllib.request.Request(
+        "https://oauth2.googleapis.com/token",
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            tokens = json.loads(resp.read())
+    except Exception as exc:
+        typer.echo(f"✗ Token exchange failed: {exc}")
+        raise typer.Exit(code=1)
+    refresh_token = tokens.get("refresh_token")
+    if not refresh_token:
+        typer.echo("✗ No refresh_token in response — ensure prompt=consent in the auth URL.")
+        raise typer.Exit(code=1)
+    cfg.setdefault("google_oauth", {})
+    cfg["google_oauth"]["refresh_token"] = refresh_token
+    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+    typer.echo("✓ Refresh token saved to config.json — Google arms are ready.")
+
+
 @app.command()
 def ask(
     question: str = typer.Argument(..., help="Your question."),
@@ -1712,13 +1970,38 @@ def ask(
             sources.append((note_id, path, section_title))
     context = "\n\n".join(context_parts) or "(no relevant notes found)"
 
-    system = (
-        "You are kage, the user's personal memory assistant. "
-        "Answer ONLY using the CONTEXT below — the user's own saved notes. "
-        "If the answer is not in the context, say exactly: "
-        "'I don't know — nothing in your notes covers this.' "
-        "Do not use general knowledge. Be concise."
-    )
+    # ── Arm calls (Cycle 11) ──────────────────────────────────────────────
+    arm_names = _detect_arms(question, identity)
+    arm_results: list[str] = []
+    if arm_names:
+        async def _arm_flow() -> None:
+            for _arm_name in arm_names:
+                _result = await _call_arm(_arm_name, question, identity)
+                if _result:
+                    arm_results.append(f"[{_arm_name}]\n{_result}")
+        asyncio.run(_arm_flow())
+    arm_context = "\n\n".join(arm_results) if arm_results else ""
+
+    if arm_context:
+        system = (
+            "You are kage, the user's personal context broker.\n\n"
+            f"MEMORY (user's saved notes):\n{context}\n\n"
+            f"ARM DATA (live data from connected services):\n{arm_context}\n\n"
+            "Answer using MEMORY and ARM DATA. Clearly distinguish:\n"
+            "- facts from saved notes (cite 'from your notes')\n"
+            "- live data from a connected service (cite 'from your calendar' or 'from your email')\n"
+            "If neither contains the answer, say so explicitly."
+        )
+        effective_context = ""
+    else:
+        system = (
+            "You are kage, the user's personal memory assistant. "
+            "Answer ONLY using the CONTEXT below — the user's own saved notes. "
+            "If the answer is not in the context, say exactly: "
+            "'I don't know — nothing in your notes covers this.' "
+            "Do not use general knowledge. Be concise."
+        )
+        effective_context = context
     thinking = ""
 
     if cloud:
@@ -1727,11 +2010,12 @@ def ask(
         pcfg = {**default_pcfg, **user_pcfg}
         model = pcfg.get("model", provider_name)
         typer.echo(f"· asking {model} via {provider_name} ({len(rows)} note(s) as context)…\n")
+        user_msg = question if arm_context else f"CONTEXT:\n{effective_context}\n\nQUESTION: {question}"
         try:
             answer = _call_cloud(
                 provider_name,
                 system,
-                f"CONTEXT:\n{context}\n\nQUESTION: {question}",
+                user_msg,
                 cfg,
             )
         except CloudError as e:
@@ -1741,7 +2025,10 @@ def ask(
         model = cfg.get("model", "qwen3:14b")
         url = cfg.get("ollama_url", "http://localhost:11434") + "/api/generate"
         typer.echo(f"· asking {model} ({len(rows)} note(s) as context)…\n")
-        prompt = f"{system}\n\nCONTEXT (the user's notes):\n{context}\n\nQUESTION: {question}"
+        if effective_context:
+            prompt = f"{system}\n\nCONTEXT (the user's notes):\n{effective_context}\n\nQUESTION: {question}"
+        else:
+            prompt = f"{system}\n\nQUESTION: {question}"
         try:
             out = _post_json(url, {"model": model, "prompt": prompt, "stream": False, "think": think})
         except urllib.error.URLError:
@@ -1754,7 +2041,9 @@ def ask(
         typer.echo(f"[thinking]\n{thinking}\n")
     typer.echo(answer or "(no answer returned)")
 
-    if not no_sources and sources:
+    if arm_context:
+        typer.echo(f"\nSources: {', '.join(arm_names)} (live arm)")
+    elif not no_sources and sources:
         typer.echo("\nSources:")
         for note_id, path, section_title in sources:
             label = f"§ {section_title}" if section_title else _disp(KAGE_HOME / path)
@@ -1885,6 +2174,15 @@ def status(
     typer.echo(f"  model    {_cfg.get('model', 'qwen3:14b')} local · {cloud_model} via {provider_name} (--cloud)")
     free_gb = shutil.disk_usage(KAGE_HOME).free / 1e9
     typer.echo(f"  disk     {free_gb:.0f} GB free")
+    arms_cfg = _cfg.get("arms", {})
+    if arms_cfg:
+        typer.echo("  arms")
+        for arm_name, arm in arms_cfg.items():
+            enabled = arm.get("enabled", False)
+            transport = arm.get("transport", "stdio")
+            permission = arm.get("permission", "read")
+            mark = "✓" if enabled else "·"
+            typer.echo(f"    {mark} {arm_name:<12}  {transport:<5}  {permission}")
     typer.echo("  ✓ everything local — nothing has left this Mac\n")
 
 
@@ -2012,6 +2310,24 @@ def doctor() -> None:
     typer.echo(f"  {'✓' if audit_ok else '⚠'} audit log  {_disp(KAGE_HOME / 'audit.jsonl')}")
     if not audit_ok:
         typer.echo("      → check write permissions on ~/.kage")
+
+    # Advisory — arm health
+    arms_cfg = cfg.get("arms", {})
+    if arms_cfg:
+        typer.echo("\n  Arms:")
+        for arm_name, arm in arms_cfg.items():
+            if not arm.get("enabled", False):
+                typer.echo(f"    · {arm_name:<12}  disabled")
+                continue
+            ok = asyncio.run(_check_arm_health(arm_name))
+            if ok:
+                typer.echo(f"    ✓ {arm_name:<12}  reachable")
+            else:
+                arm_transport = arm.get("transport", "stdio")
+                if arm_transport == "sse" and not cfg.get("google_oauth", {}).get("refresh_token"):
+                    typer.echo(f"    ✗ {arm_name:<12}  missing google_oauth credentials (run: kage arm auth)")
+                else:
+                    typer.echo(f"    ✗ {arm_name:<12}  unreachable")
 
     if all_ok:
         typer.echo("\n✓ kage looks healthy.\n")

@@ -53,7 +53,7 @@ def kage_remember(text: str, project: str | None = None, local: bool = False, id
 
 
 @mcp.tool()
-def kage_ask(question: str, provider: str | None = None, project: str | None = None, identity: str | None = None, session_id: str | None = None) -> dict:
+async def kage_ask(question: str, provider: str | None = None, project: str | None = None, identity: str | None = None, session_id: str | None = None) -> dict:
     """Answer a question using kage memory as context.
 
     Omit provider to use the local Ollama model. Specify a provider name
@@ -167,19 +167,44 @@ def kage_ask(question: str, provider: str | None = None, project: str | None = N
             context_parts.append(f"[{note_id}] {text}")
             sources.append(note_id)
     context = "\n\n".join(context_parts) or "(no relevant notes found)"
-    system = (
-        "You are kage, the user's personal memory assistant. "
-        "Answer ONLY using the CONTEXT below — the user's own saved notes. "
-        "If the answer is not in the context, say exactly: "
-        "'I don't know — nothing in your notes covers this.' "
-        "Do not use general knowledge. Be concise."
-    )
+
+    # Arm calls (Cycle 11) — async, safe because kage_ask is async def
+    arm_names = _cli._detect_arms(question, identity)
+    arm_results: list[str] = []
+    for arm_name in arm_names:
+        result = await _cli._call_arm(arm_name, question, identity)
+        if result:
+            arm_results.append(f"[{arm_name}]\n{result}")
+    arm_context = "\n\n".join(arm_results) if arm_results else ""
+
+    if arm_context:
+        system = (
+            "You are kage, the user's personal context broker.\n\n"
+            f"MEMORY (user's saved notes):\n{context}\n\n"
+            f"ARM DATA (live data from connected services):\n{arm_context}\n\n"
+            "Answer using MEMORY and ARM DATA. Clearly distinguish:\n"
+            "- facts from saved notes (cite 'from your notes')\n"
+            "- live data from a connected service (cite 'from your calendar' or 'from your email')\n"
+            "If neither contains the answer, say so explicitly."
+        )
+        effective_context = ""
+    else:
+        system = (
+            "You are kage, the user's personal memory assistant. "
+            "Answer ONLY using the CONTEXT below — the user's own saved notes. "
+            "If the answer is not in the context, say exactly: "
+            "'I don't know — nothing in your notes covers this.' "
+            "Do not use general knowledge. Be concise."
+        )
+        effective_context = context
+
     if provider:
+        user_msg = question if arm_context else f"CONTEXT:\n{effective_context}\n\nQUESTION: {question}"
         try:
             answer = _cli._call_cloud(
                 provider,
                 system,
-                f"CONTEXT:\n{context}\n\nQUESTION: {question}",
+                user_msg,
                 cfg,
             )
             used_provider = provider
@@ -189,7 +214,10 @@ def kage_ask(question: str, provider: str | None = None, project: str | None = N
     else:
         model = cfg.get("model", "qwen3:14b")
         url = cfg.get("ollama_url", "http://localhost:11434") + "/api/generate"
-        prompt = f"{system}\n\nCONTEXT (the user's notes):\n{context}\n\nQUESTION: {question}"
+        if effective_context:
+            prompt = f"{system}\n\nCONTEXT (the user's notes):\n{effective_context}\n\nQUESTION: {question}"
+        else:
+            prompt = f"{system}\n\nQUESTION: {question}"
         try:
             out = _cli._post_json(url, {"model": model, "prompt": prompt, "stream": False})
             answer = out.get("response", "").strip()

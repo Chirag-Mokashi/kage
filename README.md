@@ -118,6 +118,27 @@ kage doctor                         Health checks: store, DB, Ollama, providers,
                                     privacy gate config, audit log.
 
 kage mcp serve                      Start the MCP server (stdio transport).
+
+kage arm auth                       One-time Google OAuth consent (for remote SSE arms).
+```
+
+Arms are configured under `arms` in `~/.kage/config.json`. Each arm declares a
+`transport` (`shell` for a local command, `stdio` for a local MCP process, `sse` for a
+remote MCP server), an `identity`, and a `permission` (read-only enforced today). When a
+question matches an arm's keywords, kage calls it and injects the live result as context —
+falling back to memory-only if the arm is unavailable. Every arm call is recorded in the
+audit log. The first shipped arm reads the local macOS Calendar:
+
+```json
+"arms": {
+  "calendar": {
+    "enabled": true,
+    "transport": "shell",
+    "command": "/opt/homebrew/bin/icalbuddy eventsFrom:today to:tomorrow",
+    "identity": "personal",
+    "permission": "read"
+  }
+}
 ```
 
 ---
@@ -278,12 +299,12 @@ kage today is a passive broker — it answers when called. The target is an acti
   Cycle 9   Identity axis (THE WEDGE)  SHIPPED — identity × project wall, real data
   Cycle 10  Stateful sessions          SHIPPED — kage chat REPL, safe model-switching
   Cycle 10.5 Active context            SHIPPED — kage use / where, resolver, MCP wired
-  Cycle 11  kage as MCP client         kage calls Gmail, files, web, git itself
+  Cycle 11  kage as MCP client         SHIPPED — arm routing + local shell arm (calendar)
   Cycle 12  Layer 4 auto-routing       Intent → model selection, automatic
   Cycle 13  Agent loop                 Multi-step planning and execution
 ```
 
-After Cycle 11, external UIs (Odysseus, Claude Code) become optional rendering surfaces. kage calls the tools directly; the UI just shows the result.
+Cycle 11 shipped the MCP-client plumbing (dual-transport arm routing, graceful fallback, audit log) plus a third **`shell`** transport. The first live arm reads the local macOS Calendar via `icalbuddy` — zero OAuth, zero cloud — turning the passive forwarder into an active mediator. External UIs (Odysseus, Claude Code) become optional rendering surfaces; kage calls the tools directly and the UI just shows the result.
 
 ---
 
@@ -310,7 +331,7 @@ src/kage/
 └── mcp_server.py     MCP server (FastMCP, stdio)
 
 tests/
-├── test_cli.py       338 tests, ~100% line coverage
+├── test_cli.py       353 tests, ~100% line coverage
 └── eval_retrieval.py Retrieval eval harness (MRR, recall@k, identity wall invariants)
 
 docs/

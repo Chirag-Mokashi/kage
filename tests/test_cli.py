@@ -125,7 +125,7 @@ def test_doctor_warns_on_pending_embeddings(monkeypatch, tmp_path):
     for attr, val in {
         "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
         "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
     }.items():
         monkeypatch.setattr(cli, attr, val)
     r = CliRunner()
@@ -153,7 +153,7 @@ def test_doctor_warns_on_embed_model_mismatch(monkeypatch, tmp_path):
     for attr, val in {
         "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
         "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
     }.items():
         monkeypatch.setattr(cli, attr, val)
     r = CliRunner()
@@ -198,6 +198,7 @@ def test_import_skips_embedding(monkeypatch, tmp_path):
         "DB_PATH": home / "indexes" / "kage.db",
         "CONFIG_PATH": home / "config.json",
         "CHROMA_DIR": home / "chroma",
+        "STATE_PATH": home / "state.json",
     }.items():
         monkeypatch.setattr(cli, attr, val)
 
@@ -236,6 +237,7 @@ def test_import_prints_reindex_hint(monkeypatch, tmp_path):
         "DB_PATH": home / "indexes" / "kage.db",
         "CONFIG_PATH": home / "config.json",
         "CHROMA_DIR": home / "chroma",
+        "STATE_PATH": home / "state.json",
     }.items():
         monkeypatch.setattr(cli, attr, val)
 
@@ -596,7 +598,7 @@ def _wall_home(monkeypatch, tmp_path):
     for attr, val in {
         "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
         "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
     }.items():
         monkeypatch.setattr(cli, attr, val)
     CliRunner().invoke(cli.app, ["init"])
@@ -713,7 +715,7 @@ def _mp_home(monkeypatch, tmp_path):
     for attr, val in {
         "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
         "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
     }.items():
         monkeypatch.setattr(cli, attr, val)
     CliRunner().invoke(cli.app, ["init"])
@@ -1138,7 +1140,7 @@ def _save_home(monkeypatch, tmp_path):
     for attr, val in {
         "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
         "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
     }.items():
         monkeypatch.setattr(cli, attr, val)
     CliRunner().invoke(cli.app, ["init"])
@@ -1357,7 +1359,7 @@ def _reindex_home(monkeypatch, tmp_path):
     for attr, val in {
         "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
         "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
     }.items():
         monkeypatch.setattr(cli, attr, val)
     r = CliRunner()
@@ -1532,7 +1534,7 @@ def _step12_home(monkeypatch, tmp_path):
     for attr, val in {
         "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
         "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
     }.items():
         monkeypatch.setattr(cli, attr, val)
     r = CliRunner()
@@ -2147,7 +2149,7 @@ def _mcp_home(monkeypatch, tmp_path):
     for attr, val in {
         "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
         "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
     }.items():
         monkeypatch.setattr(cli, attr, val)
     CliRunner().invoke(cli.app, ["init"])
@@ -2344,7 +2346,7 @@ def test_init_rerun_shows_config_existed(monkeypatch, tmp_path):
     for attr, val in {
         "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
         "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
     }.items():
         monkeypatch.setattr(cli, attr, val)
     r = CliRunner()
@@ -2370,7 +2372,7 @@ def test_init_migration_adds_needs_embed_in_process(monkeypatch, tmp_path):
     for attr, val in {
         "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
         "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
     }.items():
         monkeypatch.setattr(cli, attr, val)
     result = CliRunner().invoke(cli.app, ["init"])
@@ -2389,7 +2391,7 @@ def test_require_init_exits_when_db_missing(monkeypatch, tmp_path):
     for attr, val in {
         "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
         "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
     }.items():
         monkeypatch.setattr(cli, attr, val)
     r = CliRunner().invoke(cli.app, ["status"])
@@ -2883,7 +2885,7 @@ def test_doctor_sqlite_error_marks_db_check_failed(monkeypatch, tmp_path):
     for attr, val in {
         "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
         "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
     }.items():
         monkeypatch.setattr(cli, attr, val)
     monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
@@ -2914,7 +2916,7 @@ def test_doctor_sqlite_error_in_chunks_check_is_silenced(monkeypatch, tmp_path):
     for attr, val in {
         "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
         "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
     }.items():
         monkeypatch.setattr(cli, attr, val)
     monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
@@ -3796,7 +3798,7 @@ class TestSessionSchema:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         r = CliRunner()
@@ -3813,7 +3815,7 @@ class TestSessionSchema:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         r = CliRunner()
@@ -3830,7 +3832,7 @@ class TestSessionSchema:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         r = CliRunner()
@@ -3847,7 +3849,7 @@ class TestSessionSchema:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         r = CliRunner()
@@ -3864,7 +3866,7 @@ class TestSessionSchema:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         r = CliRunner()
@@ -3882,7 +3884,7 @@ class TestSessionSchema:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         r = CliRunner()
@@ -3901,7 +3903,7 @@ class TestSessionSchema:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         r = CliRunner()
@@ -3920,7 +3922,7 @@ class TestSessionSchema:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         r = CliRunner()
@@ -3938,7 +3940,7 @@ class TestSessionSchema:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         r = CliRunner()
@@ -3959,7 +3961,7 @@ class TestSessionHelpers:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         CliRunner().invoke(cli.app, ["init"])
@@ -3972,7 +3974,7 @@ class TestSessionHelpers:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         CliRunner().invoke(cli.app, ["init"])
@@ -3989,7 +3991,7 @@ class TestSessionHelpers:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         CliRunner().invoke(cli.app, ["init"])
@@ -4003,7 +4005,7 @@ class TestSessionHelpers:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         CliRunner().invoke(cli.app, ["init"])
@@ -4014,7 +4016,7 @@ class TestSessionHelpers:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         CliRunner().invoke(cli.app, ["init"])
@@ -4030,7 +4032,7 @@ class TestSessionHelpers:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         CliRunner().invoke(cli.app, ["init"])
@@ -4043,7 +4045,7 @@ class TestSessionHelpers:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         CliRunner().invoke(cli.app, ["init"])
@@ -4058,7 +4060,7 @@ class TestSessionHelpers:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         CliRunner().invoke(cli.app, ["init"])
@@ -4074,7 +4076,7 @@ class TestSessionHelpers:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         CliRunner().invoke(cli.app, ["init"])
@@ -4089,7 +4091,7 @@ class TestSessionHelpers:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         CliRunner().invoke(cli.app, ["init"])
@@ -4196,7 +4198,7 @@ class TestSessionSwitch:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         CliRunner().invoke(cli.app, ["init"])
@@ -4209,7 +4211,7 @@ class TestSessionSwitch:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         CliRunner().invoke(cli.app, ["init"])
@@ -4227,7 +4229,7 @@ class TestSessionSwitch:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         CliRunner().invoke(cli.app, ["init"])
@@ -4241,7 +4243,7 @@ class TestSessionSwitch:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         CliRunner().invoke(cli.app, ["init"])
@@ -4258,7 +4260,7 @@ class TestSessionSwitch:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         CliRunner().invoke(cli.app, ["init"])
@@ -4407,7 +4409,7 @@ class TestChatCommand:
         for attr, val in {
             "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
             "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
         }.items():
             monkeypatch.setattr(cli, attr, val)
         CliRunner().invoke(cli.app, ["init"])
@@ -4550,3 +4552,86 @@ def test_mcp_ask_session_history_threaded(monkeypatch, tmp_path):
     mcp_server.kage_ask('follow up question', session_id=session_id)
     assert len(captured['history']) >= 1
     assert any(t['role'] == 'assistant' for t in captured['history'])
+
+
+# ── Cycle 10.5 — Active Context ──────────────────────────────────────────────
+
+class TestActiveContext:
+    def _setup(self, monkeypatch, tmp_path):
+        h = tmp_path / ".kage"
+        for attr, val in {
+            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
+            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
+            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
+            "STATE_PATH": h / "state.json",
+        }.items():
+            monkeypatch.setattr(cli, attr, val)
+        CliRunner().invoke(cli.app, ["init"])
+        return h
+
+    def test_read_active_returns_empty_when_missing(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        assert cli._read_active() == {}
+
+    def test_read_active_returns_empty_on_corrupt_json(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        (h / "state.json").write_text("not valid json{")
+        assert cli._read_active() == {}
+
+    def test_write_active_creates_file(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        cli._write_active({"identity": "neu"})
+        assert (h / "state.json").exists()
+        assert json.loads((h / "state.json").read_text()) == {"identity": "neu"}
+
+    def test_resolve_context_explicit_wins(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        (h / "state.json").write_text(json.dumps({"identity": "neu", "project": "hsi"}))
+        identity, project, source = cli._resolve_context("personal", "other")
+        assert identity == "personal"
+        assert project == "other"
+        assert source == "explicit"
+
+    def test_resolve_context_sticky(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        (h / "state.json").write_text(json.dumps({"identity": "neu", "project": "hsi"}))
+        identity, project, source = cli._resolve_context(None, None)
+        assert identity == "neu"
+        assert project == "hsi"
+        assert source == "sticky"
+
+    def test_resolve_context_fallback(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        identity, project, source = cli._resolve_context(None, None)
+        assert identity == "personal"
+        assert project is None
+        assert source == "fallback"
+
+    def test_kage_use_sets_context(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        r = CliRunner()
+        result = r.invoke(cli.app, ["use", "neu/kaggle-capstone"])
+        assert result.exit_code == 0
+        state = json.loads((h / "state.json").read_text())
+        assert state["identity"] == "neu"
+        assert state["project"] == "kaggle-capstone"
+
+    def test_kage_where_shows_resolved_context(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        r = CliRunner()
+        r.invoke(cli.app, ["use", "neu/kaggle-capstone"])
+        result = r.invoke(cli.app, ["where"])
+        assert result.exit_code == 0
+        assert "neu" in result.output
+        assert "sticky" in result.output
+
+    def test_wall_holds_under_active_context(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        cli._write_active({"identity": "neu", "project": "kaggle-capstone"})
+        neu_id = cli._save("kaggle capstone note", "kaggle-capstone", identities=["neu"])
+        personal_id = cli._save("personal diary entry", None, identities=["personal"])
+        personal_allowed = cli._allowed_note_ids("personal", None)
+        neu_allowed = cli._allowed_note_ids("neu", "kaggle-capstone")
+        assert personal_id in personal_allowed
+        assert neu_id not in personal_allowed
+        assert neu_id in neu_allowed

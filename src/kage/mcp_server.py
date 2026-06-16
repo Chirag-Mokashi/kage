@@ -14,11 +14,12 @@ mcp = FastMCP("kage")
 
 
 @mcp.tool()
-def kage_recall(query: str, project: str | None = None, limit: int = 5, identity: str = "personal") -> list[dict]:
+def kage_recall(query: str, project: str | None = None, limit: int = 5, identity: str | None = None) -> list[dict]:
     """Search kage memory (identity + project partitioned, read-only).
 
     Returns ranked notes matching the query, filtered to the declared identity and project partition.
     """
+    identity, project, source = _cli._resolve_context(identity, project)
     rows = _cli._search(query, project, limit, identity=identity)
     return [
         {
@@ -32,7 +33,7 @@ def kage_recall(query: str, project: str | None = None, limit: int = 5, identity
 
 
 @mcp.tool()
-def kage_remember(text: str, project: str | None = None, local: bool = False) -> dict:
+def kage_remember(text: str, project: str | None = None, local: bool = False, identity: str | None = None) -> dict:
     """Save a note to kage memory.
 
     Write-gated: disabled by default. Enable by setting mcp_allow_writes: true
@@ -40,18 +41,19 @@ def kage_remember(text: str, project: str | None = None, local: bool = False) ->
     Set local=true to mark the note local-only (never sent to cloud providers).
     """
     cfg = _cli._config()
+    identity, project, source = _cli._resolve_context(identity, project)
     if not cfg.get("mcp_allow_writes", False):
         return {
             "saved": False,
             "id": None,
             "reason": "writes disabled — set mcp_allow_writes in config",
         }
-    mem_id = _cli._save(text, project, local_only=local)
+    mem_id = _cli._save(text, project, local_only=local, identities=[identity])
     return {"saved": True, "id": mem_id, "reason": "saved", "local_only": local}
 
 
 @mcp.tool()
-def kage_ask(question: str, provider: str | None = None, project: str | None = None, identity: str = "personal", session_id: str | None = None) -> dict:
+def kage_ask(question: str, provider: str | None = None, project: str | None = None, identity: str | None = None, session_id: str | None = None) -> dict:
     """Answer a question using kage memory as context.
 
     Omit provider to use the local Ollama model. Specify a provider name
@@ -64,6 +66,7 @@ def kage_ask(question: str, provider: str | None = None, project: str | None = N
     used; question and answer are appended to session history. Omit session_id
     for stateless single-shot mode (existing behavior).
     """
+    identity, project, source = _cli._resolve_context(identity, project)
     if session_id is not None:
         sess = _cli._session_load(session_id)
         if sess is None:

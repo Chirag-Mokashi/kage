@@ -48,6 +48,7 @@ INDEX_DIR = KAGE_HOME / "indexes"
 DB_PATH = INDEX_DIR / "kage.db"            # 5B: derived SQLite index (#71)
 CONFIG_PATH = KAGE_HOME / "config.json"
 CHROMA_DIR  = KAGE_HOME / "chroma"
+STATE_PATH  = KAGE_HOME / "state.json"
 
 # v0.1 schema: memories + an FTS5 full-text index for `recall`.
 # Partition filtering (the wall) lives in SQL per #99; v0.1 = single project tag.
@@ -116,6 +117,39 @@ def _disp(p: Path) -> str:
         return "~/" + str(p.relative_to(Path.home()))
     except ValueError:
         return str(p)
+
+
+def _read_active() -> dict:
+    try:
+        return json.loads(STATE_PATH.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_active(state: dict) -> None:
+    tmp = STATE_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(state, indent=2) + "\n")
+    os.replace(tmp, STATE_PATH)
+
+
+def _resolve_context(
+    arg_identity: str | None,
+    arg_project: str | None,
+) -> tuple[str, str | None, str]:
+    active = _read_active()
+    if arg_identity:
+        identity = arg_identity
+        project = arg_project
+        source = "explicit"
+    elif active.get("identity"):
+        identity = active.get("identity")
+        project = arg_project if arg_project is not None else active.get("project")
+        source = "sticky"
+    else:
+        identity = "personal"
+        project = arg_project
+        source = "fallback"
+    return (identity, project, source)
 
 
 @app.callback()
@@ -1218,17 +1252,64 @@ def _ollama_status(cfg: dict, model: str) -> tuple[bool, str]:
     return False, f"Ollama up, but {model} not pulled"
 
 
+@app.command(name="use")
+def use_(
+    context: str | None = typer.Argument(None, help="Identity or identity/project. Use --clear to reset."),
+    clear: bool = typer.Option(False, "--clear", help="Reset active context to fallback (personal / no project)."),
+) -> None:
+    """Set the active identity and project so you don't have to pass --identity/--project on every call."""
+    _require_init()
+    if clear:
+        _write_active({})
+        typer.echo("  ✓ active context cleared  (fallback: personal / no project)")
+        return
+    if not context:
+        typer.echo("Provide an identity (e.g. kage use neu  or  kage use neu/project).", err=True)
+        raise typer.Exit(code=1)
+    parts = context.split("/", 1)
+    if len(parts) == 2 and "/" in parts[1]:
+        typer.echo("Project name cannot contain '/'. Use: kage use identity/project", err=True)
+        raise typer.Exit(code=1)
+    identity = parts[0].strip()
+    project = parts[1].strip() if len(parts) == 2 else None
+    if not identity:
+        typer.echo("Identity cannot be empty.", err=True)
+        raise typer.Exit(code=1)
+    active = _read_active()
+    active["identity"] = identity
+    if project is not None:
+        active["project"] = project
+    else:
+        active.pop("project", None)
+    _write_active(active)
+    proj_display = f"/{project}" if project else ""
+    typer.echo(f"  ✓ active context → {identity}{proj_display}")
+
+
+@app.command()
+def where() -> None:
+    """Show the resolved active context and where it came from."""
+    _require_init()
+    identity, project, source = _resolve_context(None, None)
+    proj_display = f"/{project}" if project else "  (no project)"
+    typer.echo(f"\n  identity : {identity}")
+    typer.echo(f"  project  : {project or '(none)'}")
+    typer.echo(f"  source   : {source}")
+    typer.echo(f"\n  resolved → {identity}{proj_display}  [{source}]\n")
+
+
 @app.command()
 def remember(
     text: str = typer.Argument(..., help="The note to remember."),
     project: str = typer.Option(None, "--project", "-p", help="Tag this memory to a project."),
     local: bool = typer.Option(False, "--local", help="Mark note local-only — never sent to cloud providers."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirm prompt (for scripts/tests)."),
-    identity: str = typer.Option("personal", "--identity", "-i", help="Identity this note belongs to (default: personal)."),
+    identity: str = typer.Option(None, "--identity", "-i", help="Identity this note belongs to (default: personal)."),
     state: str = typer.Option(None, "--state", help="State: scoped, baseline, or pending. Inferred if omitted."),
 ) -> None:
     """Save a note to memory (markdown + index). Confirms before writing (the wall, #16)."""
     _require_init()
+    identity, project, source = _resolve_context(identity, project)
 
     # The wall (#16): show it and confirm BEFORE anything is written.
     typer.echo(f'\n  "{text}"')
@@ -1250,10 +1331,11 @@ def import_(
     folder: Path = typer.Argument(..., help="Folder of .md/.txt files to bulk-add (recursive)."),
     project: str = typer.Option(None, "--project", "-p", help="Tag all imported notes (default: the folder name)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be imported; write nothing."),
-    identity: str = typer.Option("personal", "--identity", "-i", help="Identity for all imported notes (default: personal)."),
+    identity: str = typer.Option(None, "--identity", "-i", help="Identity for all imported notes (default: personal)."),
 ) -> None:
     """Bulk-add the .md/.txt files in a folder (curated by which folder you point at)."""
     _require_init()
+    identity, project, source = _resolve_context(identity, project)
 
     folder = folder.expanduser()
     if not folder.is_dir():
@@ -1440,10 +1522,11 @@ def reindex(
 def list_(
     project: str = typer.Option(None, "--project", "-p", help="Limit to a project."),
     limit: int = typer.Option(20, "--limit", "-n", help="Max to show."),
-    identity: str = typer.Option("personal", "--identity", "-i", help="Identity scope (default: personal)."),
+    identity: str = typer.Option(None, "--identity", "-i", help="Identity scope (default: personal)."),
 ) -> None:
     """List what kage has saved (most recent first) — so you can see before you search."""
     _require_init()
+    identity, project, source = _resolve_context(identity, project)
 
     allowed = _allowed_note_ids(identity, project)
     if not allowed:
@@ -1482,10 +1565,11 @@ def recall(
     project: str = typer.Option(None, "--project", "-p", help="Limit to a project (the partition wall)."),
     limit: int = typer.Option(5, "--limit", "-n", help="Max results."),
     pipe: bool = typer.Option(False, "--pipe", help="Copy the matched notes to the clipboard (paste into your AI)."),
-    identity: str = typer.Option("personal", "--identity", "-i", help="Identity scope (default: personal)."),
+    identity: str = typer.Option(None, "--identity", "-i", help="Identity scope (default: personal)."),
 ) -> None:
     """Search your memory (full-text) and surface the best matches."""
     _require_init()
+    identity, project, source = _resolve_context(identity, project)
 
     if not query.split():
         typer.echo("Empty query.", err=True)
@@ -1528,10 +1612,11 @@ def ask(
     limit: int = typer.Option(5, "--limit", "-n", help="How many notes to pull as context."),
     no_sources: bool = typer.Option(False, "--no-sources", help="Suppress the Sources block."),
     always_ask: bool = typer.Option(False, "--always-ask", help="Re-prompt before each cloud dispatch (overrides session approval memory)."),
-    identity: str = typer.Option("personal", "--identity", "-i", help="Identity scope (default: personal)."),
+    identity: str = typer.Option(None, "--identity", "-i", help="Identity scope (default: personal)."),
 ) -> None:
     """Answer a question using your recalled notes — local model by default, --cloud to use a cloud provider."""
     _require_init()
+    identity, project, source = _resolve_context(identity, project)
 
     rows = _search(question, project, limit, any_terms=True, identity=identity)
     cfg = _config()
@@ -1781,7 +1866,11 @@ def status(
     db_kb = DB_PATH.stat().st_size / 1024 if DB_PATH.exists() else 0.0
     lo_suffix = f"  ({local_only_total} local-only)" if local_only_total else ""
 
+    _ac_identity, _ac_project, _ac_source = _resolve_context(None, None)
+    _ac_display = f"{_ac_identity}" + (f"/{_ac_project}" if _ac_project else "")
+
     typer.echo("\nkage status")
+    typer.echo(f"  context  {_ac_display}  [{_ac_source}]")
     typer.echo(f"  store    {_disp(KAGE_HOME)}   (config v{version})")
     typer.echo(f"  memory   {total} note(s) across {len(by_proj)} project(s){lo_suffix}")
     for p, c in by_proj:

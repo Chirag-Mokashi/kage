@@ -60,14 +60,20 @@ Every design decision must be checked against this list. Operational definitions
 
 **Working CLI exists.** The repository is no longer purely Stage 0 planning: `src/kage/cli.py` implements the headless local broker thin slice and several follow-on cycles.
 
-Current implemented surface:
+Current implemented surface (through Cycle 11, v0.11.0):
 - local markdown source of truth under `~/.kage/memory`
 - SQLite FTS5 index and project partition filter
 - ChromaDB chunk/vector index with `kage reindex`
-- `remember`, `import`, `recall`, `ask`, `list`, `forget`, `status`, `doctor`
+- recursive chunking + bge-reranker retrieval (Cycle 8)
+- identity × project wall (Cycle 9); active context via `kage use` / `where` (Cycle 10.5)
+- stateful sessions + `kage chat` REPL, safe model-switching (Cycle 10)
+- 3e disclosure gate — local-only notes + PII withheld from cloud dispatch (Cycle 7)
+- `remember`, `import`, `recall`, `ask`, `list`, `forget`, `status`, `doctor`, `chat`, `use`, `where`, `arm`
 - local Ollama answering by default
 - cloud answering via named providers (`claude`, `openai`, `gemini`, `groq`, `perplexity`, plus user config)
-- black-box and unit tests in `tests/test_cli.py`
+- **MCP client / arm routing (Cycle 11):** `_detect_arms` keyword routing, `_call_arm` graceful fallback, audit log. Three transports — `shell` (local command), `stdio` (local MCP process), `sse` (remote MCP). First live arm reads the local macOS Calendar via `icalbuddy` (`shell`, zero OAuth/cloud). Google remote SSE arms remain inert (Workspace Developer Preview rejects Gmail-domain accounts). TCC note: `shell` arm fires only from a context holding Calendar permission (Terminal/launchd); future fix = signed Swift helper invoked through the same `shell` transport.
+- MCP server (`kage mcp serve`) exposing `kage_recall`, `kage_remember`, `kage_ask`, `kage_status` (Cycle 6)
+- 353 tests in `tests/test_cli.py`
 
 The long-term blueprint still matters for direction, but docs that say "no code yet" or "Stage 1 has not started" are historical/stale unless explicitly marked current. For implementation truth, inspect `README.md`, `src/kage/cli.py`, and `tests/test_cli.py`.
 

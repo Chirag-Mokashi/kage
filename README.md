@@ -19,11 +19,11 @@ kage is defined at three nested levels, all simultaneously true:
 
 ---
 
-## Current state — v0.9
+## Current state — v0.10.1
 
 kage ships as a headless CLI and MCP server. The full UI layer (via Odysseus integration) is in progress.
 
-**Honest status:** today kage is a *context-gated forwarder with a hard identity wall* — it retrieves your notes, enforces the identity × project partition before any note reaches retrieval, gates what may leave your machine, and forwards a single grounded query to the model *you* select. The full *broker* behavior (automatic model routing, active context detection, conversational interface) is on the roadmap below — designed, not yet shipped. The BROKER level above describes the direction; this section describes what runs today.
+**Honest status:** today kage is a *context-gated forwarder with a hard identity wall and stateful sessions* — it retrieves your notes, enforces the identity × project partition before any note reaches retrieval, gates what may leave your machine, holds multi-turn conversation state, and forwards a grounded query to the model *you* select (switchable mid-session, with the privacy gate re-run on switch). The full *broker* behavior (automatic model routing, active context detection) is on the roadmap below — designed, not yet shipped. The BROKER level above describes the direction; this section describes what runs today.
 
 ```
   ┌─────────────────────────────────────────────────────────────┐
@@ -84,6 +84,10 @@ uv run kage init
 ## Commands
 
 ```
+kage use <identity>[/project]       Set active context — honored by every surface.
+kage use --clear                    Reset to fallback (personal / no project).
+kage where                          Show resolved context + its source.
+
 kage remember "<text>"              Save a note. --project X to partition it.
                                     --identity X to assign an identity (default: personal).
                                     --state to set scoped/baseline/pending explicitly.
@@ -272,7 +276,8 @@ kage today is a passive broker — it answers when called. The target is an acti
 ```
   Cycle 8   Retrieval quality          SHIPPED — recursive chunking + bge-reranker
   Cycle 9   Identity axis (THE WEDGE)  SHIPPED — identity × project wall, real data
-  Cycle 10  kage chat + streaming      Conversational interface, stateful turns
+  Cycle 10  Stateful sessions          SHIPPED — kage chat REPL, safe model-switching
+  Cycle 10.5 Active context            SHIPPED — kage use / where, resolver, MCP wired
   Cycle 11  kage as MCP client         kage calls Gmail, files, web, git itself
   Cycle 12  Layer 4 auto-routing       Intent → model selection, automatic
   Cycle 13  Agent loop                 Multi-step planning and execution
@@ -305,12 +310,12 @@ src/kage/
 └── mcp_server.py     MCP server (FastMCP, stdio)
 
 tests/
-├── test_cli.py       273 tests, ~100% line coverage
+├── test_cli.py       338 tests, ~100% line coverage
 └── eval_retrieval.py Retrieval eval harness (MRR, recall@k, identity wall invariants)
 
 docs/
 ├── blueprint.md      Long-term architecture and planning state
-├── cycle-9-pitch.md  Identity axis design (most recent cycle)
+├── cycle-10-pitch.md Stateful session engine design (most recent cycle)
 └── ...               Historical cycle pitches and research
 ```
 

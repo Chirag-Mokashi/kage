@@ -304,7 +304,7 @@ kage today is a passive broker — it answers when called. The target is an acti
   Cycle 13  Agent loop                 Multi-step planning and execution
 ```
 
-Cycle 11 shipped the MCP-client plumbing (dual-transport arm routing, graceful fallback, audit log) plus a third **`shell`** transport. The first live arm reads the local macOS Calendar via `icalbuddy` — zero OAuth, zero cloud — turning the passive forwarder into an active mediator. External UIs (Odysseus, Claude Code) become optional rendering surfaces; kage calls the tools directly and the UI just shows the result.
+Cycle 11 shipped the MCP-client plumbing (dual-transport arm routing, graceful fallback, audit log) plus a third **`shell`** transport. The first live arm reads the local macOS Calendar via `icalbuddy` — zero OAuth, zero cloud. This upgrades kage from a passive *forwarder* (answers from memory only) to a passive *fetcher* (pulls live external data into an answer) — but it is **still not a mediator**: it acts only when you call it, never on its own initiative. The active, proactive mediator — kage acting *for* you autonomously (scheduled triggers, agent loop) — is later (Cycles 12–13). External UIs (Odysseus, Claude Code) become optional rendering surfaces; kage calls the tools directly and the UI just shows the result.
 
 ---
 

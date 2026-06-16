@@ -48,9 +48,10 @@ Aware surface.
 
 ## One line
 
-kage reaches out — for the first time it calls external MCP servers, turning passive
-forwarder into active mediator. First arms: Google Calendar and Gmail (read-only,
-verify-then-unlock model).
+kage reaches out — for the first time it calls external services, upgrading from a passive
+*forwarder* (memory-only answers) to a passive *fetcher* (pulls live data into an answer).
+Still NOT a mediator: it acts only when called, never on its own — the proactive mediator
+comes later (Cycles 12–13). First live arm: local macOS Calendar (`shell` transport).
 
 ## Appetite
 

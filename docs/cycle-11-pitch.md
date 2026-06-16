@@ -78,8 +78,17 @@ is a characteristic requirement, not just caution.
 ### Fix 1 — Transport architecture: Google's official MCPs are remote SSE
 
 `@google/mcp-server-calendar` and `@google/mcp-server-gmail` do NOT exist on npm.
-Google's official Calendar and Gmail MCPs are **remote MCP servers** (HTTP/SSE at
-`calendarmcp.googleapis.com` and `gmailmcp.googleapis.com`) — not local stdio processes.
+Google's official Calendar and Gmail MCPs are **remote MCP servers** (Streamable HTTP at
+`calendarmcp.googleapis.com/mcp/v1` and `gmailmcp.googleapis.com/mcp/v1`) — not local
+stdio processes.
+
+**Developer Preview gate (discovered 2026-06-16):** These endpoints are gated behind the
+Google Workspace Developer Preview Program. Before calls work, the GCP project must be:
+1. Enrolled at `developers.google.com/workspace/preview` (manual review, ~2 days)
+2. MCP service APIs enabled: `calendarmcp.googleapis.com` + `gmailmcp.googleapis.com`
+   (via GCP Console → APIs & Services → Enable APIs, or `gcloud services enable`)
+
+Until enrolled, all calls return 404 regardless of token validity.
 
 `_call_arm` must support two transports:
 
@@ -96,14 +105,14 @@ Config schema gains a `transport` field:
     "calendar": {
       "enabled": true,
       "transport": "sse",
-      "mcp_url": "https://calendarmcp.googleapis.com",
+      "mcp_url": "https://calendarmcp.googleapis.com/mcp/v1",
       "identity": "personal",
       "permission": "read"
     },
     "gmail": {
       "enabled": true,
       "transport": "sse",
-      "mcp_url": "https://gmailmcp.googleapis.com",
+      "mcp_url": "https://gmailmcp.googleapis.com/mcp/v1",
       "identity": "personal",
       "permission": "read"
     }
@@ -448,7 +457,9 @@ arm entry in config → identity wall routes it automatically → no core change
 
 ## Decisions locked for this cycle
 
-- First arms: Google Calendar + Gmail (official remote SSE MCPs, shared OAuth)
+- First arms: Google Calendar + Gmail (official remote Streamable HTTP MCPs, shared OAuth)
+- Endpoints: `calendarmcp.googleapis.com/mcp/v1`, `gmailmcp.googleapis.com/mcp/v1`
+- **Live test blocked** until GCP project enrolled in Google Workspace Developer Preview
 - Transport: `sse` for Google arms; `stdio` for future community arms
 - Permission model: read-only; `"write"` permission rejected in `_detect_arms`
 - Verify gate: explicit human sign-off required before write scope is ever added

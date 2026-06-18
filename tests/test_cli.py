@@ -3019,6 +3019,13 @@ def test_pii_scan_upi_ignores_email():
     assert "UPI ID" not in cli._pii_scan("email john@gmail.com today")
 
 
+def test_pii_scan_upi_short_handle_caught():
+    # security baseline (Slice 0): privacy gate must not leak short UPI handles;
+    # FN (leak) is worse than FP (over-withhold), so the username floor is {2,}.
+    assert "UPI ID" in cli._pii_scan("refund to ab@hdfc")
+    assert "UPI ID" not in cli._pii_scan("rate is 5@bar")  # 1-char username still dropped
+
+
 def test_pii_scan_ipv4_removed():
     assert "IPv4 address" not in cli._pii_scan("connect to 192.168.1.1 please")
 

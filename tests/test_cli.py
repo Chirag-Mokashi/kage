@@ -23,7 +23,7 @@ import pytest
 from typer.testing import CliRunner
 from unittest import mock
 
-from kage import cli
+from kage import cli, cloud
 
 
 def run(args, home, stdin=None):
@@ -1939,10 +1939,13 @@ def test_call_cloud_missing_env_var(monkeypatch):
     assert "OPENAI_API_KEY" in str(e.value)
 
 
+# Cycle 12 Slice 1: cloud dispatch moved to kage.cloud.CloudClient, so these provider-
+# dispatch tests now patch cloud._post_json (the http call site in cloud.py). They still
+# enter via cli._call_cloud (a call-time forwarder → runtime.cloud.complete).
 def test_call_cloud_claude_uses_anthropic_url(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     calls = []
-    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append((url, kw)) or {"content": [{"text": "ans"}]})
+    monkeypatch.setattr(cloud, "_post_json", lambda url, payload, **kw: calls.append((url, kw)) or {"content": [{"text": "ans"}]})
     result = cli._call_cloud("claude", "sys", "msg", {})
     assert result == "ans"
     assert "anthropic.com" in calls[0][0]
@@ -1952,7 +1955,7 @@ def test_call_cloud_claude_uses_anthropic_url(monkeypatch):
 def test_call_cloud_openai_uses_bearer_auth(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "oai-key")
     calls = []
-    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append((url, kw)) or {"choices": [{"message": {"content": "ans"}}]})
+    monkeypatch.setattr(cloud, "_post_json", lambda url, payload, **kw: calls.append((url, kw)) or {"choices": [{"message": {"content": "ans"}}]})
     result = cli._call_cloud("openai", "sys", "msg", {})
     assert result == "ans"
     assert "openai.com/v1/chat/completions" in calls[0][0]
@@ -1962,7 +1965,7 @@ def test_call_cloud_openai_uses_bearer_auth(monkeypatch):
 def test_call_cloud_groq_url_has_v1_path(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "groq-key")
     calls = []
-    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append(url) or {"choices": [{"message": {"content": "ans"}}]})
+    monkeypatch.setattr(cloud, "_post_json", lambda url, payload, **kw: calls.append(url) or {"choices": [{"message": {"content": "ans"}}]})
     cli._call_cloud("groq", "sys", "msg", {})
     assert calls[0] == "https://api.groq.com/openai/v1/chat/completions"
 
@@ -1970,7 +1973,7 @@ def test_call_cloud_groq_url_has_v1_path(monkeypatch):
 def test_call_cloud_perplexity_url_has_no_v1(monkeypatch):
     monkeypatch.setenv("PERPLEXITY_API_KEY", "ppl-key")
     calls = []
-    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append(url) or {"choices": [{"message": {"content": "ans"}}]})
+    monkeypatch.setattr(cloud, "_post_json", lambda url, payload, **kw: calls.append(url) or {"choices": [{"message": {"content": "ans"}}]})
     cli._call_cloud("perplexity", "sys", "msg", {})
     assert calls[0] == "https://api.perplexity.ai/chat/completions"
 
@@ -1978,7 +1981,7 @@ def test_call_cloud_perplexity_url_has_no_v1(monkeypatch):
 def test_call_cloud_gemini_key_in_url(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "gem-key")
     calls = []
-    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append(url) or {"candidates": [{"content": {"parts": [{"text": "ans"}]}}]})
+    monkeypatch.setattr(cloud, "_post_json", lambda url, payload, **kw: calls.append(url) or {"candidates": [{"content": {"parts": [{"text": "ans"}]}}]})
     result = cli._call_cloud("gemini", "sys", "msg", {})
     assert result == "ans"
     assert "?key=gem-key" in calls[0]
@@ -1987,7 +1990,7 @@ def test_call_cloud_gemini_key_in_url(monkeypatch):
 
 def test_call_cloud_gemini_safety_block_raises(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "gem-key")
-    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: {"candidates": [{}]})
+    monkeypatch.setattr(cloud, "_post_json", lambda *a, **kw: {"candidates": [{}]})
     with pytest.raises(cli.CloudError):
         cli._call_cloud("gemini", "sys", "msg", {})
 
@@ -1995,7 +1998,7 @@ def test_call_cloud_gemini_safety_block_raises(monkeypatch):
 def test_call_cloud_user_config_partial_override_keeps_defaults(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "oai-key")
     calls = []
-    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append(payload) or {"choices": [{"message": {"content": "ans"}}]})
+    monkeypatch.setattr(cloud, "_post_json", lambda url, payload, **kw: calls.append(payload) or {"choices": [{"message": {"content": "ans"}}]})
     cfg = {"providers": {"openai": {"model": "gpt-4o-mini"}}}
     cli._call_cloud("openai", "sys", "msg", cfg)
     assert calls[0]["model"] == "gpt-4o-mini"
@@ -2005,7 +2008,7 @@ def test_call_cloud_network_error_raises_cloud_error(monkeypatch):
     import urllib.error
     monkeypatch.setenv("OPENAI_API_KEY", "oai-key")
     def bad_post(*a, **kw): raise urllib.error.URLError("timeout")
-    monkeypatch.setattr(cli, "_post_json", bad_post)
+    monkeypatch.setattr(cloud, "_post_json", bad_post)
     with pytest.raises(cli.CloudError, match="request failed"):
         cli._call_cloud("openai", "sys", "msg", {})
 

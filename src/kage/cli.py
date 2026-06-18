@@ -35,8 +35,9 @@ class OllamaUnavailable(Exception):
     """Raised when Ollama is unreachable or times out."""
 
 
-class CloudError(Exception):
-    """Raised when a cloud provider call fails."""
+# CloudError + DEFAULT_PROVIDERS now live in kage.cloud (Cycle 12 Slice 1); re-export so
+# cli.CloudError / cli.DEFAULT_PROVIDERS stay the public/test surface.
+from kage.cloud import CloudError, DEFAULT_PROVIDERS  # noqa: E402,F401
 
 
 app = typer.Typer(
@@ -630,15 +631,10 @@ def _post_json(url: str, payload: dict, headers: dict | None = None, timeout: in
     return _http._post_json(url, payload, headers, timeout)
 
 
-DEFAULT_PROVIDERS: dict[str, dict] = {
-    "claude":     {"type": "claude",        "api_key_env": "ANTHROPIC_API_KEY",  "model": "claude-sonnet-4-6"},
-    "openai":     {"type": "openai",        "api_key_env": "OPENAI_API_KEY",     "model": "gpt-4o"},
-    "gemini":     {"type": "gemini",        "api_key_env": "GEMINI_API_KEY",     "model": "gemini-2.0-flash"},
-    "groq":       {"type": "openai-compat", "api_key_env": "GROQ_API_KEY",       "model": "llama-3.3-70b-versatile",
-                   "base_url": "https://api.groq.com/openai", "chat_path": "/v1/chat/completions"},
-    "perplexity": {"type": "openai-compat", "api_key_env": "PERPLEXITY_API_KEY", "model": "llama-3.1-sonar-large-128k-online",
-                   "base_url": "https://api.perplexity.ai",   "chat_path": "/chat/completions"},
-}
+# Cloud dispatch lives in kage.cloud.CloudClient (Cycle 12 Slice 1). These call-time
+# forwarders route to runtime.cloud — the swappable egress sink (RecordingCloud in tests) —
+# while existing cli._call_cloud / cli._call_cloud_chat patches keep working unchanged.
+from kage import runtime  # noqa: E402
 
 
 def _call_cloud(provider_name: str, system: str, user_msg: str, cfg: dict) -> str:
@@ -647,60 +643,8 @@ def _call_cloud(provider_name: str, system: str, user_msg: str, cfg: dict) -> st
 
 
 def _call_cloud_chat(provider_name: str, system: str, messages: list[dict], cfg: dict) -> str:
-    """Multi-turn chat dispatch. messages = history + current user turn (no system message)."""
-    default_pcfg = DEFAULT_PROVIDERS.get(provider_name, {})
-    user_pcfg = cfg.get("providers", {}).get(provider_name, {})
-    if not default_pcfg and not user_pcfg:
-        raise CloudError(
-            f"Unknown provider '{provider_name}'. "
-            f"Add providers.{provider_name} to ~/.kage/config.json"
-        )
-    pcfg = {**default_pcfg, **user_pcfg}
-    key = os.environ.get(pcfg["api_key_env"], "")
-    if not key:
-        raise CloudError(f"{pcfg['api_key_env']} not set (provider: {provider_name})")
-    ptype = pcfg.get("type", "openai-compat")
-    model = pcfg.get("model", "")
-    try:
-        if ptype == "claude":
-            out = _post_json(
-                "https://api.anthropic.com/v1/messages",
-                {"model": model, "max_tokens": 1024, "system": system, "messages": messages},
-                headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
-            )
-            return out["content"][0]["text"].strip()
-        elif ptype in ("openai", "openai-compat"):
-            base = pcfg.get("base_url", "https://api.openai.com")
-            path = pcfg.get("chat_path", "/v1/chat/completions")
-            out = _post_json(
-                f"{base}{path}",
-                {"model": model, "max_tokens": 1024,
-                 "messages": [{"role": "system", "content": system}] + messages},
-                headers={"Authorization": f"Bearer {key}"},
-            )
-            return out["choices"][0]["message"]["content"].strip()
-        elif ptype == "gemini":
-            url = (
-                f"https://generativelanguage.googleapis.com/v1beta"
-                f"/models/{model}:generateContent?key={key}"
-            )
-            contents = [
-                {"role": "model" if m["role"] == "assistant" else "user",
-                 "parts": [{"text": m["content"]}]}
-                for m in messages
-            ]
-            out = _post_json(url, {
-                "systemInstruction": {"parts": [{"text": system}]},
-                "contents": contents,
-            })
-            candidates = out.get("candidates") or []
-            if not candidates or "content" not in candidates[0]:
-                raise CloudError(f"Gemini returned no content (provider: {provider_name})")
-            return candidates[0]["content"]["parts"][0]["text"].strip()
-        else:
-            raise CloudError(f"Unknown provider type '{ptype}'")
-    except (urllib.error.URLError, KeyError, IndexError, TimeoutError) as exc:
-        raise CloudError(f"Provider '{provider_name}' request failed: {exc}") from exc
+    """Multi-turn chat dispatch → the cloud egress sink (runtime.cloud.complete)."""
+    return runtime.cloud.complete(provider_name, system, messages, cfg)
 
 
 def _answer(

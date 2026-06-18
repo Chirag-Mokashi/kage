@@ -492,6 +492,9 @@ def _chunk_note(body: str) -> list[dict]:
     Header sections kept as-is when <= TARGET. Oversized sections (and
     headerless notes > TARGET) split recursively: paragraph -> sentence -> window.
     """
+    # ponytail: the recursive split (paragraph -> sentence -> hard window) only
+    # fires for sections > _CHUNK_TARGET (1500 chars). Most notes take the fast
+    # path below; this depth is banked against corpus growth, not load-bearing today.
     sections = _split_on_headers(body)
     result = []
     for section in sections:
@@ -761,57 +764,8 @@ DEFAULT_PROVIDERS: dict[str, dict] = {
 
 
 def _call_cloud(provider_name: str, system: str, user_msg: str, cfg: dict) -> str:
-    """Dispatch to a named cloud provider. Raises CloudError on any failure."""
-    default_pcfg = DEFAULT_PROVIDERS.get(provider_name, {})
-    user_pcfg = cfg.get("providers", {}).get(provider_name, {})
-    if not default_pcfg and not user_pcfg:
-        raise CloudError(
-            f"Unknown provider '{provider_name}'. "
-            f"Add providers.{provider_name} to ~/.kage/config.json"
-        )
-    pcfg = {**default_pcfg, **user_pcfg}
-    key = os.environ.get(pcfg["api_key_env"], "")
-    if not key:
-        raise CloudError(f"{pcfg['api_key_env']} not set (provider: {provider_name})")
-    ptype = pcfg.get("type", "openai-compat")
-    model = pcfg.get("model", "")
-    try:
-        if ptype == "claude":
-            out = _post_json(
-                "https://api.anthropic.com/v1/messages",
-                {"model": model, "max_tokens": 1024, "system": system,
-                 "messages": [{"role": "user", "content": user_msg}]},
-                headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
-            )
-            return out["content"][0]["text"].strip()
-        elif ptype in ("openai", "openai-compat"):
-            base = pcfg.get("base_url", "https://api.openai.com")
-            path = pcfg.get("chat_path", "/v1/chat/completions")
-            out = _post_json(
-                f"{base}{path}",
-                {"model": model, "max_tokens": 1024,
-                 "messages": [{"role": "system", "content": system},
-                               {"role": "user", "content": user_msg}]},
-                headers={"Authorization": f"Bearer {key}"},
-            )
-            return out["choices"][0]["message"]["content"].strip()
-        elif ptype == "gemini":
-            url = (
-                f"https://generativelanguage.googleapis.com/v1beta"
-                f"/models/{model}:generateContent?key={key}"
-            )
-            out = _post_json(url, {
-                "systemInstruction": {"parts": [{"text": system}]},
-                "contents": [{"parts": [{"text": user_msg}]}],
-            })
-            candidates = out.get("candidates") or []
-            if not candidates or "content" not in candidates[0]:
-                raise CloudError(f"Gemini returned no content (provider: {provider_name})")
-            return candidates[0]["content"]["parts"][0]["text"].strip()
-        else:
-            raise CloudError(f"Unknown provider type '{ptype}'")
-    except (urllib.error.URLError, KeyError, IndexError, TimeoutError) as exc:
-        raise CloudError(f"Provider '{provider_name}' request failed: {exc}") from exc
+    """Single-message dispatch — thin wrapper over _call_cloud_chat."""
+    return _call_cloud_chat(provider_name, system, [{"role": "user", "content": user_msg}], cfg)
 
 
 def _call_cloud_chat(provider_name: str, system: str, messages: list[dict], cfg: dict) -> str:
@@ -1624,6 +1578,15 @@ def recall(
 
 # ── Arm helpers (Cycle 11) ────────────────────────────────────────────────
 
+# ── DORMANT (Cycle 11) — do not delete ──────────────────────────────────────
+# Google OAuth + remote SSE arm transport (this token helper, the `sse` branch
+# in _connect_arm, and arm_auth below). Kept importable & test-covered, NOT
+# removed: Workspace Developer Preview rejects Gmail-domain accounts, so the SSE
+# arms (Calendar/Gmail) never complete a live call. The live calendar arm uses
+# the `shell` transport (icalbuddy) and needs none of this.
+# FLIPS LIVE when: a valid google_oauth.refresh_token exists (via `kage arm auth`)
+# AND an arm is enabled with transport "sse". Restoring OAuth from scratch later
+# is the expensive path — that's why it stays.
 async def _get_google_token() -> str:
     """Exchange Google OAuth refresh token for a short-lived access token."""
     cfg = _config()
@@ -1656,6 +1619,7 @@ async def _connect_arm(arm_name: str):
     arm = _config().get("arms", {}).get(arm_name, {})
     transport = arm.get("transport", "stdio")
     if transport == "sse":
+        # DORMANT (Cycle 11) — see _get_google_token banner. Inert until a refresh_token exists.
         token = await _get_google_token()
         async with sse_client(
             url=arm["mcp_url"],
@@ -1800,6 +1764,7 @@ async def _check_arm_health(arm_name: str) -> bool:
         return False
 
 
+# DORMANT (Cycle 11) — see _get_google_token banner. Inert until a refresh_token exists.
 @_arm_app.command("auth")
 def arm_auth() -> None:
     """One-time Google OAuth consent flow — stores refresh token in config."""

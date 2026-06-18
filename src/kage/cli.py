@@ -621,15 +621,13 @@ def _config() -> dict:
         return {}
 
 
+# _post_json lives in kage.http (Cycle 12 Slice 1). Call-time forwarder so in-cli
+# callers and the ~39 cli._post_json test patches keep working during transition.
+from kage import http as _http  # noqa: E402
+
+
 def _post_json(url: str, payload: dict, headers: dict | None = None, timeout: int = 120) -> dict:
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "User-Agent": "kage/0.5", **(headers or {})},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read())
+    return _http._post_json(url, payload, headers, timeout)
 
 
 DEFAULT_PROVIDERS: dict[str, dict] = {

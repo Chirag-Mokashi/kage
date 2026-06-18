@@ -880,7 +880,7 @@ _PII_PATTERNS: list[dict] = [
     {"name": "Indian PIN code",  "pattern": r"(?i)\bpin\s*(?:code)?\s*[:=]?\s*[1-9][0-9]{5}\b"},
     # FINANCIAL
     {"name": "Credit/debit card", "pattern": r"\b(?:\d{4}[\s-]?){3}\d{4}\b"},
-    {"name": "UPI ID",           "pattern": r"\b[a-zA-Z0-9._-]+@[a-zA-Z]+\b"},
+    {"name": "UPI ID",           "pattern": r"\b[a-zA-Z0-9._-]{3,}@[a-zA-Z]{2,}\b(?!\.[a-zA-Z])"},
     {"name": "CVV",              "pattern": r"(?i)cvv\s*[:=]\s*\d{3,4}"},
     # CREDENTIALS AND KEYS
     {"name": "Password field",   "pattern": r"(?i)(password|passwd|pwd|secret)\s*[:=]\s*\S+"},
@@ -894,7 +894,8 @@ _PII_PATTERNS: list[dict] = [
     {"name": "SSH private key",  "pattern": r"-----BEGIN [A-Z ]+ PRIVATE KEY-----"},
     {"name": ".env secret",      "pattern": r"(?i)\b(SECRET|TOKEN|KEY|PASS)\s*=\s*\S{8,}"},
     # NETWORK AND SYSTEM
-    {"name": "IPv4 address",     "pattern": r"\b(?:\d{1,3}\.){3}\d{1,3}\b"},
+    # IPv4 removed (audit WI-3): private IPs aren't sensitive and it false-matched
+    # 4-part version strings like 1.2.3.4. IPv6/MAC kept (distinctive, low FP).
     {"name": "IPv6 address",     "pattern": r"\b([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b"},
     {"name": "MAC address",      "pattern": r"([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}"},
     # LOCATION

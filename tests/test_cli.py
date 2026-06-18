@@ -3011,6 +3011,18 @@ def test_pii_scan_matches_email():
     assert "Email" in cli._pii_scan("reach me at user@example.com please")
 
 
+def test_pii_scan_matches_upi():
+    assert "UPI ID" in cli._pii_scan("pay me at 9876543210@ybl now")
+
+
+def test_pii_scan_upi_ignores_email():
+    assert "UPI ID" not in cli._pii_scan("email john@gmail.com today")
+
+
+def test_pii_scan_ipv4_removed():
+    assert "IPv4 address" not in cli._pii_scan("connect to 192.168.1.1 please")
+
+
 def test_pii_scan_matches_aws_key():
     assert "AWS access key" in cli._pii_scan("AKIAIOSFODNN7EXAMPLE")
 

@@ -26,7 +26,7 @@ _PII_PATTERNS: list[dict] = [
     {"name": "Indian PIN code",  "pattern": r"(?i)\bpin\s*(?:code)?\s*[:=]?\s*[1-9][0-9]{5}\b"},
     # FINANCIAL
     {"name": "Credit/debit card", "pattern": r"\b(?:\d{4}[\s-]?){3}\d{4}\b"},
-    {"name": "UPI ID",           "pattern": r"\b[a-zA-Z0-9._-]{3,}@[a-zA-Z]{2,}\b(?!\.[a-zA-Z])"},
+    {"name": "UPI ID",           "pattern": r"\b[a-zA-Z0-9._-]{2,}@[a-zA-Z]{2,}\b(?!\.[a-zA-Z])"},
     {"name": "CVV",              "pattern": r"(?i)cvv\s*[:=]\s*\d{3,4}"},
     # CREDENTIALS AND KEYS
     {"name": "Password field",   "pattern": r"(?i)(password|passwd|pwd|secret)\s*[:=]\s*\S+"},

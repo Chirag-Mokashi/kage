@@ -23,7 +23,34 @@ import pytest
 from typer.testing import CliRunner
 from unittest import mock
 
-from kage import cli, cloud
+from kage import cli, cloud, runtime
+from kage.cloud import CloudClient
+
+
+# ── Test fakes ──────────────────────────────────────────────────────────────
+
+class RecordingCloud(CloudClient):
+    """CloudClient drop-in that records complete() calls instead of hitting the network.
+
+    Swap into the seam: monkeypatch.setattr(runtime, "cloud", RecordingCloud())
+    Assert invariants: assert "sensitive" not in rec.all_text()
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def complete(self, _provider_name: str, system: str, messages: list[dict], _cfg: dict) -> str:
+        self.calls.append({"system": system, "messages": list(messages)})
+        return "FAKE_ANSWER"
+
+    def all_text(self) -> str:
+        """Concatenate all text in all recorded complete() calls."""
+        parts: list[str] = []
+        for call in self.calls:
+            parts.append(call["system"])
+            for msg in call["messages"]:
+                parts.append(msg.get("content", ""))
+        return "\n".join(parts)
 
 
 def run(args, home, stdin=None):
@@ -4723,3 +4750,121 @@ class TestArmShellTransport:
         monkeypatch.setattr(cli.subprocess, "run", lambda *a, **kw: mock_proc)
         result = asyncio.run(cli._check_arm_health("calendar"))
         assert result is False
+
+
+# ── Egress golden tests (Slice 1g) ──────────────────────────────────────────
+# Invariant: withheld note content must NEVER appear in runtime.cloud.complete() payloads.
+# RecordingCloud replaces the live seam; all_text() concatenates every complete() call.
+
+def test_egress_golden_clean_note_reaches_cloud(monkeypatch, tmp_path):
+    """Positive control: clean note content reaches the cloud seam."""
+    _save_home(monkeypatch, tmp_path)
+    note_id = cli._save("safe content about databases", "proj", embed=False)
+    row = (note_id, "proj", "2026-01-01T00:00:00+00:00", f"memory/{note_id}.md", "snip", None, None, None)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [row])
+    monkeypatch.setattr(cli, "_config", lambda: {"require_approval": False, "cloud_provider": "claude"})
+    monkeypatch.setattr(cli, "_detect_arms", lambda *a, **kw: [])
+    rec = RecordingCloud()
+    monkeypatch.setattr(runtime, "cloud", rec)
+    CliRunner().invoke(cli.app, ["ask", "--cloud", "what do you know?"])
+    assert rec.calls, "RecordingCloud should have been called"
+    assert "safe content about databases" in rec.all_text()
+
+
+def test_egress_golden_local_only_withheld(monkeypatch, tmp_path):
+    """local_only=True note must never reach the cloud sink."""
+    _save_home(monkeypatch, tmp_path)
+    clean_id = cli._save("safe content about databases", "proj", embed=False)
+    secret_id = cli._save("SECRET local banking PIN 9999", "proj", embed=False, local_only=True)
+    clean_row = (clean_id, "proj", "2026-01-01T00:00:00+00:00", f"memory/{clean_id}.md", "snip", None, None, None)
+    secret_row = (secret_id, "proj", "2026-01-01T00:00:00+00:00", f"memory/{secret_id}.md", "snip", None, None, None)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [clean_row, secret_row])
+    monkeypatch.setattr(cli, "_config", lambda: {"require_approval": False, "cloud_provider": "claude"})
+    monkeypatch.setattr(cli, "_detect_arms", lambda *a, **kw: [])
+    rec = RecordingCloud()
+    monkeypatch.setattr(runtime, "cloud", rec)
+    CliRunner().invoke(cli.app, ["ask", "--cloud", "what do you know?"])
+    assert rec.calls, "cloud should have been called (clean note still goes through)"
+    assert "safe content about databases" in rec.all_text(), "clean note must reach cloud"
+    assert "SECRET local banking PIN 9999" not in rec.all_text(), "local_only content must be withheld"
+
+
+def test_egress_golden_pii_withheld(monkeypatch, tmp_path):
+    """Note containing PII (UPI ID) must never reach the cloud sink."""
+    _save_home(monkeypatch, tmp_path)
+    clean_id = cli._save("safe content about databases", "proj", embed=False)
+    pii_id = cli._save("transfer to 9876543210@ybl for payment", "proj", embed=False)
+    clean_row = (clean_id, "proj", "2026-01-01T00:00:00+00:00", f"memory/{clean_id}.md", "snip", None, None, None)
+    pii_row = (pii_id, "proj", "2026-01-01T00:00:00+00:00", f"memory/{pii_id}.md", "snip", None, None, None)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [clean_row, pii_row])
+    monkeypatch.setattr(cli, "_config", lambda: {"require_approval": False, "cloud_provider": "claude"})
+    monkeypatch.setattr(cli, "_detect_arms", lambda *a, **kw: [])
+    rec = RecordingCloud()
+    monkeypatch.setattr(runtime, "cloud", rec)
+    CliRunner().invoke(cli.app, ["ask", "--cloud", "what do you know?"])
+    assert rec.calls
+    assert "safe content about databases" in rec.all_text()
+    assert "9876543210@ybl" not in rec.all_text(), "PII must be withheld from cloud"
+
+
+def test_egress_golden_all_withheld_no_cloud_call(monkeypatch, tmp_path):
+    """When ALL notes are withheld, runtime.cloud.complete must never be called."""
+    _save_home(monkeypatch, tmp_path)
+    secret_id = cli._save("SECRET local banking PIN 9999", "proj", embed=False, local_only=True)
+    secret_row = (secret_id, "proj", "2026-01-01T00:00:00+00:00", f"memory/{secret_id}.md", "snip", None, None, None)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [secret_row])
+    monkeypatch.setattr(cli, "_config", lambda: {"require_approval": False, "cloud_provider": "claude"})
+    monkeypatch.setattr(cli, "_detect_arms", lambda *a, **kw: [])
+    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: {"response": "ollama fallback"})
+    rec = RecordingCloud()
+    monkeypatch.setattr(runtime, "cloud", rec)
+    CliRunner().invoke(cli.app, ["ask", "--cloud", "what do you know?"])
+    assert not rec.calls, "cloud must NOT be called when all notes are withheld"
+
+
+def test_egress_golden_identity_wall_withheld(monkeypatch, tmp_path):
+    """Note owned by 'work' identity must not reach cloud when querying as 'personal'."""
+    _save_home(monkeypatch, tmp_path)
+    clean_id = cli._save("safe content about databases", "proj", embed=False)
+    work_id = cli._save("WORK SECRET confidential memo", "proj", embed=False, identities=["work"])
+    clean_row = (clean_id, "proj", "2026-01-01T00:00:00+00:00", f"memory/{clean_id}.md", "snip", None, None, None)
+    work_row = (work_id, "proj", "2026-01-01T00:00:00+00:00", f"memory/{work_id}.md", "snip", None, None, None)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [clean_row, work_row])
+    monkeypatch.setattr(cli, "_config", lambda: {"require_approval": False, "cloud_provider": "claude"})
+    monkeypatch.setattr(cli, "_detect_arms", lambda *a, **kw: [])
+    rec = RecordingCloud()
+    monkeypatch.setattr(runtime, "cloud", rec)
+    # ask with no --identity flag → _resolve_context falls back to "personal"
+    CliRunner().invoke(cli.app, ["ask", "--cloud", "what do you know?"])
+    assert rec.calls, "cloud should be called (clean personal note goes through)"
+    assert "safe content about databases" in rec.all_text()
+    assert "WORK SECRET confidential memo" not in rec.all_text(), "cross-identity note must be withheld"
+
+
+def test_egress_golden_local_only_project_withheld(monkeypatch, tmp_path):
+    """Note in a local_only_projects project must not reach cloud."""
+    _save_home(monkeypatch, tmp_path)
+    clean_id = cli._save("safe content about databases", "proj", embed=False)
+    secret_id = cli._save("classified project notes", "secret-proj", embed=False)
+    clean_row = (clean_id, "proj", "2026-01-01T00:00:00+00:00", f"memory/{clean_id}.md", "snip", None, None, None)
+    secret_row = (secret_id, "secret-proj", "2026-01-01T00:00:00+00:00", f"memory/{secret_id}.md", "snip", None, None, None)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [clean_row, secret_row])
+    monkeypatch.setattr(cli, "_config", lambda: {
+        "require_approval": False,
+        "cloud_provider": "claude",
+        "local_only_projects": ["secret-proj"],
+    })
+    monkeypatch.setattr(cli, "_detect_arms", lambda *a, **kw: [])
+    rec = RecordingCloud()
+    monkeypatch.setattr(runtime, "cloud", rec)
+    CliRunner().invoke(cli.app, ["ask", "--cloud", "what do you know?"])
+    assert rec.calls, "cloud should be called (clean note goes through)"
+    assert "safe content about databases" in rec.all_text()
+    assert "classified project notes" not in rec.all_text(), "local_only_projects note must be withheld"
+
+
+# ponytail: chat-path and arm-context golden tests deferred.
+# _gate_conversation (chat) and arm-injected context (arm_context branch) are
+# untested here. The gate functions themselves have unit tests; the missing coverage
+# is the full gate→sink chain for those two paths. Add when Slice 4 extracts
+# privacy.py and session.py — cleaner seam to mock at that point.

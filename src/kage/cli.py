@@ -393,135 +393,15 @@ def _read_body(rel_path: str) -> str:
     return text.strip()
 
 
-_CHUNK_TARGET  = 1500
-_CHUNK_MIN     = 100
-_CHUNK_OVERLAP = 150
+# Chunking lives in kage.chunk (audit WI-4). Re-exported here so cli.* stays the
+# test/patch surface and in-module callers (_save, reindex) remain patchable.
+from kage.chunk import (  # noqa: E402,F401  (re-export shim — used via cli.* in tests)
+    _CHUNK_TARGET, _CHUNK_MIN, _CHUNK_OVERLAP,
+    _split_on_headers, _hard_windows, _window_by_pieces, _chunk_note,
+)
+
 _RERANK_POOL   = 25
 _reranker_cache: list = [False, None]   # [loaded_flag, instance_or_None]
-
-
-def _split_on_headers(body: str) -> list[dict]:
-    """Split body on ## / ### headers; return sections with char offsets. No size filtering."""
-    chunks = []
-    lines = body.splitlines()
-    prev_header_pos = -1
-
-    for i, line in enumerate(lines):
-        if line.startswith("## ") or line.startswith("### "):
-            if prev_header_pos != -1:
-                char_start = sum(len(l) + 1 for l in lines[: prev_header_pos + 1])
-                char_end = min(sum(len(l) + 1 for l in lines[:i]), len(body))
-                if char_end - char_start >= 100:
-                    chunks.append({
-                        "title": lines[prev_header_pos].lstrip("#").strip(),
-                        "char_start": char_start,
-                        "char_end": char_end,
-                    })
-            prev_header_pos = i
-
-    if prev_header_pos != -1:
-        char_start = sum(len(l) + 1 for l in lines[: prev_header_pos + 1])
-        char_end = len(body)
-        if char_end - char_start >= 100:
-            chunks.append({
-                "title": lines[prev_header_pos].lstrip("#").strip(),
-                "char_start": char_start,
-                "char_end": char_end,
-            })
-
-    if not chunks:
-        return [{"title": "", "char_start": 0, "char_end": len(body)}]
-
-    return chunks
-
-
-def _hard_windows(text: str, base: int, title: str) -> list[dict]:
-    """Slice text into fixed-size windows of TARGET chars with OVERLAP."""
-    result = []
-    pos = 0
-    while pos < len(text):
-        end = min(pos + _CHUNK_TARGET, len(text))
-        if end - pos >= _CHUNK_MIN:
-            result.append({"title": title, "char_start": base + pos, "char_end": base + end})
-        pos += _CHUNK_TARGET - _CHUNK_OVERLAP
-    if not result:
-        result.append({"title": title, "char_start": base, "char_end": base + len(text)})
-    return result
-
-
-def _window_by_pieces(pieces: list[str], text: str, base: int, title: str) -> list[dict]:
-    """Group pieces (splits of text) into TARGET-sized windows with OVERLAP."""
-    positions: list[int] = []
-    cursor = 0
-    for piece in pieces:
-        pos = text.find(piece, cursor)
-        if pos == -1:
-            pos = cursor
-        positions.append(pos)
-        cursor = pos + len(piece)
-
-    result: list[dict] = []
-    i = 0
-    while i < len(pieces):
-        w_start = positions[i]
-        w_end = positions[i] + len(pieces[i])
-        j = i + 1
-        while j < len(pieces):
-            candidate_end = positions[j] + len(pieces[j])
-            if candidate_end - w_start > _CHUNK_TARGET:
-                break
-            w_end = candidate_end
-            j += 1
-        if w_end - w_start >= _CHUNK_MIN:
-            result.append({"title": title, "char_start": base + w_start, "char_end": base + w_end})
-        if j >= len(pieces):
-            break
-        overlap_target = w_end - _CHUNK_OVERLAP
-        next_i = j
-        for k in range(j - 1, i, -1):
-            if positions[k] <= overlap_target:
-                next_i = k + 1
-                break
-        i = max(next_i, i + 1)
-    return result
-
-
-def _chunk_note(body: str) -> list[dict]:
-    """Split a note body into retrieval chunks with char offsets into body.
-
-    Header sections kept as-is when <= TARGET. Oversized sections (and
-    headerless notes > TARGET) split recursively: paragraph -> sentence -> window.
-    """
-    # ponytail: the recursive split (paragraph -> sentence -> hard window) only
-    # fires for sections > _CHUNK_TARGET (1500 chars). Most notes take the fast
-    # path below; this depth is banked against corpus growth, not load-bearing today.
-    sections = _split_on_headers(body)
-    result = []
-    for section in sections:
-        char_start = section["char_start"]
-        char_end = section["char_end"]
-        text = body[char_start:char_end]
-        if len(text) < _CHUNK_MIN:
-            continue
-        if len(text) <= _CHUNK_TARGET:
-            result.append(section)
-            continue
-        pieces = [p for p in re.split(r'\n\n+', text) if p]
-        if len(pieces) > 1:
-            windows = _window_by_pieces(pieces, text, char_start, section["title"])
-            if windows:
-                result.extend(windows)
-                continue
-        pieces = [p for p in re.split(r'(?<=[.!?]) +', text) if p]
-        if len(pieces) > 1:
-            windows = _window_by_pieces(pieces, text, char_start, section["title"])
-            if windows:
-                result.extend(windows)
-                continue
-        result.extend(_hard_windows(text, char_start, section["title"]))
-    if not result:
-        result.append({"title": "", "char_start": 0, "char_end": len(body)})
-    return result
 
 
 def _read_section(content_path: str, char_start: int, char_end: int) -> str:
@@ -863,56 +743,10 @@ def _answer(
 
 # ── Privacy gate (Layer 3e) ────────────────────────────────────────────────
 
-_PII_PATTERNS: list[dict] = [
-    # INDIAN IDENTITY DOCUMENTS
-    {"name": "Aadhaar",          "pattern": r"\b\d{4}[\s-]\d{4}[\s-]\d{4}\b"},
-    {"name": "PAN card",         "pattern": r"\b[A-Z]{5}[0-9]{4}[A-Z]\b"},
-    {"name": "Passport (IN)",    "pattern": r"\b[A-Z][0-9]{7}\b"},
-    {"name": "Voter ID (IN)",    "pattern": r"\b[A-Z]{3}[0-9]{7}\b"},
-    {"name": "Driving licence",  "pattern": r"\b[A-Z]{2}[0-9]{2}[\s-]?[0-9]{4,11}\b"},
-    {"name": "GSTIN",            "pattern": r"\b[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]\b"},
-    {"name": "IFSC code",        "pattern": r"\b[A-Z]{4}0[A-Z0-9]{6}\b"},
-    {"name": "Vehicle reg (IN)", "pattern": r"\b[A-Z]{2}[\s-]?\d{2}[\s-]?[A-Z]{1,2}[\s-]?\d{4}\b"},
-    # CONTACT INFORMATION
-    {"name": "Email",            "pattern": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"},
-    {"name": "Phone (IN)",       "pattern": r"\b(\+91[\s-]?)?[6-9]\d{9}\b"},
-    {"name": "Phone (intl)",     "pattern": r"\+[1-9]\d{1,14}\b"},
-    {"name": "Indian PIN code",  "pattern": r"(?i)\bpin\s*(?:code)?\s*[:=]?\s*[1-9][0-9]{5}\b"},
-    # FINANCIAL
-    {"name": "Credit/debit card", "pattern": r"\b(?:\d{4}[\s-]?){3}\d{4}\b"},
-    {"name": "UPI ID",           "pattern": r"\b[a-zA-Z0-9._-]{3,}@[a-zA-Z]{2,}\b(?!\.[a-zA-Z])"},
-    {"name": "CVV",              "pattern": r"(?i)cvv\s*[:=]\s*\d{3,4}"},
-    # CREDENTIALS AND KEYS
-    {"name": "Password field",   "pattern": r"(?i)(password|passwd|pwd|secret)\s*[:=]\s*\S+"},
-    {"name": "OpenAI key",       "pattern": r"\bsk-[A-Za-z0-9]{20,}\b"},
-    {"name": "Google key",       "pattern": r"\bAIza[A-Za-z0-9_-]{35}\b"},
-    {"name": "GitHub PAT",       "pattern": r"\bghp_[A-Za-z0-9]{36}\b"},
-    {"name": "GitHub OAuth",     "pattern": r"\bgho_[A-Za-z0-9]{36}\b"},
-    {"name": "AWS access key",   "pattern": r"\bAKIA[0-9A-Z]{16}\b"},
-    {"name": "Bearer token",     "pattern": r"(?i)bearer\s+[A-Za-z0-9\-._~+/]+=*"},
-    {"name": "JWT token",        "pattern": r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"},
-    {"name": "SSH private key",  "pattern": r"-----BEGIN [A-Z ]+ PRIVATE KEY-----"},
-    {"name": ".env secret",      "pattern": r"(?i)\b(SECRET|TOKEN|KEY|PASS)\s*=\s*\S{8,}"},
-    # NETWORK AND SYSTEM
-    # IPv4 removed (audit WI-3): private IPs aren't sensitive and it false-matched
-    # 4-part version strings like 1.2.3.4. IPv6/MAC kept (distinctive, low FP).
-    {"name": "IPv6 address",     "pattern": r"\b([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b"},
-    {"name": "MAC address",      "pattern": r"([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}"},
-    # LOCATION
-    {"name": "GPS coordinates",  "pattern": r"-?\d{1,3}\.\d{4,},\s*-?\d{1,3}\.\d{4,}"},
-]
-
-
-def _pii_scan(text: str, extra_patterns: list[dict] | None = None) -> list[str]:
-    """Scan text for PII patterns; return list of matched pattern names (empty = clean)."""
-    hits = []
-    for entry in (_PII_PATTERNS + (extra_patterns or [])):
-        try:
-            if re.search(entry["pattern"], text):
-                hits.append(entry["name"])
-        except re.error:
-            pass  # skip malformed user-supplied patterns
-    return hits
+# PII detection table + scanner live in kage.pii (audit WI-4). Re-exported so
+# cli._PII_PATTERNS / cli._pii_scan stay the test surface; the gate logic below
+# (_disclosure_gate, _gate_conversation) stays here.
+from kage.pii import _PII_PATTERNS, _pii_scan  # noqa: E402,F401
 
 
 def _write_audit(record: dict) -> None:

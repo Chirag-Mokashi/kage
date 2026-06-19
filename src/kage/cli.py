@@ -36,6 +36,7 @@ from kage import runtime
 from kage.context import _read_active, _write_active, _resolve_context  # noqa: F401
 from kage import notes as _notes
 from kage import privacy as _privacy
+from kage import retrieval as _retrieval
 
 
 # CloudError + DEFAULT_PROVIDERS now live in kage.cloud (Cycle 12 Slice 1); re-export so
@@ -283,8 +284,8 @@ from kage.chunk import (  # noqa: E402,F401  (re-export shim — used via cli.* 
     _split_on_headers, _hard_windows, _window_by_pieces, _chunk_note,
 )
 
-_RERANK_POOL   = 25
-_reranker_cache: list = [False, None]   # [loaded_flag, instance_or_None]
+_RERANK_POOL: int = _retrieval._RERANK_POOL        # re-export (read-only alias)
+_reranker_cache: list = _retrieval._reranker_cache  # same list object — tests mutate [0]/[1] in-place
 
 
 def _read_section(content_path: str, char_start: int, char_end: int) -> str:
@@ -584,19 +585,7 @@ def _session_switch(
 
 
 def _rrf_fuse(fts_rows: list, vec_rows: list, k: int = 60) -> list:
-    """Merge FTS5 and vector candidates via Reciprocal Rank Fusion; caller slices to limit."""
-    fts_n, vec_n = len(fts_rows), len(vec_rows)
-    fts_rank = {row[0]: i for i, row in enumerate(fts_rows)}
-    vec_rank = {row[0]: i for i, row in enumerate(vec_rows)}
-    rows_by_id = {row[0]: row for row in (*vec_rows, *fts_rows)}  # fts last → fts row wins for shared IDs
-
-    scores: dict[str, float] = {}
-    for mem_id in rows_by_id:
-        r_fts = fts_rank.get(mem_id, fts_n)   # missing → large rank penalty
-        r_vec = vec_rank.get(mem_id, vec_n)
-        scores[mem_id] = 1.0 / (k + r_fts) + 1.0 / (k + r_vec)
-
-    return [rows_by_id[mid] for mid in sorted(scores, key=scores.__getitem__, reverse=True)]
+    return _retrieval._rrf_fuse(fts_rows, vec_rows, k)
 
 
 def _embed(text: str) -> list[float]:
@@ -610,38 +599,11 @@ def _get_chroma():
 
 
 def _get_reranker():
-    """Lazy-load bge-reranker-v2-m3; return None if sentence-transformers not installed."""
-    if _reranker_cache[0]:
-        return _reranker_cache[1]
-    _reranker_cache[0] = True
-    try:
-        from sentence_transformers import CrossEncoder
-        _reranker_cache[1] = CrossEncoder("BAAI/bge-reranker-v2-m3")
-    except Exception:
-        _reranker_cache[1] = None
-    return _reranker_cache[1]
+    return _retrieval._get_reranker()
 
 
 def _rerank(rows: list, query: str, top_n: int) -> list:
-    reranker = _get_reranker()
-    if reranker is None or not rows:
-        return rows[:top_n]
-    texts = []
-    for row in rows:
-        char_start, char_end = row[6], row[7]
-        if char_start is not None and char_end is not None:
-            try:
-                body = _read_body(row[3])
-                text = body[char_start:char_end][:512]
-            except OSError:
-                text = row[4] or ""
-        else:
-            text = row[4] or ""
-        texts.append(text)
-    pairs = [[query, t] for t in texts]
-    scores = reranker.predict(pairs).tolist()
-    ranked = sorted(zip(scores, rows), key=lambda x: x[0], reverse=True)
-    return [r for _, r in ranked[:top_n]]
+    return _retrieval._rerank(rows, query, top_n)
 
 
 def _search_vec(query_vec: list[float], project: str | None, limit: int, identity: str = "personal") -> list:

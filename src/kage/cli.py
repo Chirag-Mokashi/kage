@@ -58,7 +58,6 @@ INDEX_DIR = KAGE_HOME / "indexes"
 DB_PATH = INDEX_DIR / "kage.db"            # 5B: derived SQLite index (#71)
 CONFIG_PATH = KAGE_HOME / "config.json"
 CHROMA_DIR  = KAGE_HOME / "chroma"
-STATE_PATH  = KAGE_HOME / "state.json"
 
 # ── Arm routing ───────────────────────────────────────────────────────────
 # Arm names in config.json must match these keys exactly to trigger keyword routing.
@@ -138,38 +137,6 @@ def _disp(p: Path) -> str:
     except ValueError:
         return str(p)
 
-
-def _read_active() -> dict:
-    try:
-        return json.loads(STATE_PATH.read_text())
-    except (OSError, ValueError):
-        return {}
-
-
-def _write_active(state: dict) -> None:
-    tmp = STATE_PATH.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state, indent=2) + "\n")
-    os.replace(tmp, STATE_PATH)
-
-
-def _resolve_context(
-    arg_identity: str | None,
-    arg_project: str | None,
-) -> tuple[str, str | None, str]:
-    active = _read_active()
-    if arg_identity:
-        identity = arg_identity
-        project = arg_project
-        source = "explicit"
-    elif active.get("identity"):
-        identity = active.get("identity")
-        project = arg_project if arg_project is not None else active.get("project")
-        source = "sticky"
-    else:
-        identity = "personal"
-        project = arg_project
-        source = "fallback"
-    return (identity, project, source)
 
 
 @app.callback()
@@ -583,6 +550,7 @@ def _post_json(url: str, payload: dict, headers: dict | None = None, timeout: in
 # forwarders route to runtime.cloud — the swappable egress sink (RecordingCloud in tests) —
 # while existing cli._call_cloud / cli._call_cloud_chat patches keep working unchanged.
 from kage import runtime  # noqa: E402
+from kage.context import _read_active, _write_active, _resolve_context  # noqa: F401,E402
 
 
 def _call_cloud(provider_name: str, system: str, user_msg: str, cfg: dict) -> str:

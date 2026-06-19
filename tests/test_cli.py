@@ -24,6 +24,7 @@ from typer.testing import CliRunner
 from unittest import mock
 
 from kage import cli, cloud, runtime
+from kage import embed as _embed_module
 from kage.cloud import CloudClient
 
 
@@ -51,6 +52,34 @@ class RecordingCloud(CloudClient):
             for msg in call["messages"]:
                 parts.append(msg.get("content", ""))
         return "\n".join(parts)
+
+
+class FakeEmbedder:
+    def __init__(self, vec=None, raises=None, status_val=None):
+        self._vec = vec if vec is not None else [0.1]
+        self._raises = raises
+        self._status = status_val
+
+    def embed(self, text: str, cfg: dict) -> list[float]:
+        if self._raises is not None:
+            raise self._raises
+        return list(self._vec)
+
+    def status(self, cfg: dict, model: str) -> tuple[bool, str]:
+        if self._status is not None:
+            return self._status
+        return True, "fake embedder up"
+
+
+class FakeVectorIndex:
+    def __init__(self, collection=None, raises=None):
+        self._coll = collection
+        self._raises = raises
+
+    def collection(self, chroma_dir, embed_model: str):
+        if self._raises is not None:
+            raise self._raises
+        return self._coll
 
 
 def run(args, home, stdin=None):
@@ -472,7 +501,7 @@ def test_get_chroma_raises_on_model_mismatch(monkeypatch):
 # ── _embed (Step 3) ─────────────────────────────────────────────────────────
 
 def test_embed_returns_floats(monkeypatch):
-    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: {"embeddings": [[0.1, 0.2, 0.3]]})
+    monkeypatch.setattr(_embed_module, "_post_json", lambda url, payload, **kw: {"embeddings": [[0.1, 0.2, 0.3]]})
     assert cli._embed("hello") == [0.1, 0.2, 0.3]
 
 
@@ -481,7 +510,7 @@ def test_embed_truncates_long_input(monkeypatch):
     def fake_post(url, payload, **kw):
         captured["payload"] = payload
         return {"embeddings": [[0.1]]}
-    monkeypatch.setattr(cli, "_post_json", fake_post)
+    monkeypatch.setattr(_embed_module, "_post_json", fake_post)
     cli._embed("x" * 40000)
     assert len(captured["payload"]["input"]) == 6000
 
@@ -489,7 +518,7 @@ def test_embed_truncates_long_input(monkeypatch):
 def test_embed_raises_on_urlerror(monkeypatch):
     def raise_it(*a, **kw):
         raise urllib.error.URLError("down")
-    monkeypatch.setattr(cli, "_post_json", raise_it)
+    monkeypatch.setattr(_embed_module, "_post_json", raise_it)
     with pytest.raises(cli.OllamaUnavailable):
         cli._embed("test")
 
@@ -497,7 +526,7 @@ def test_embed_raises_on_urlerror(monkeypatch):
 def test_embed_raises_on_timeout(monkeypatch):
     def raise_it(*a, **kw):
         raise TimeoutError()
-    monkeypatch.setattr(cli, "_post_json", raise_it)
+    monkeypatch.setattr(_embed_module, "_post_json", raise_it)
     with pytest.raises(cli.OllamaUnavailable):
         cli._embed("test")
 
@@ -2470,7 +2499,7 @@ def test_embed_raises_on_http_400(monkeypatch):
     """Lines 466-467: HTTP 400 from embed endpoint must raise OllamaUnavailable with 'HTTP 400'."""
     import urllib.error as _ue
     err = _ue.HTTPError(url="http://x", code=400, msg="Bad Request", hdrs={}, fp=None)
-    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: (_ for _ in ()).throw(err))
+    monkeypatch.setattr(_embed_module, "_post_json", lambda *a, **kw: (_ for _ in ()).throw(err))
     with pytest.raises(cli.OllamaUnavailable, match="HTTP 400"):
         cli._embed("test")
 
@@ -2479,7 +2508,7 @@ def test_embed_raises_on_non_400_http_error(monkeypatch):
     """Line 468: non-400 HTTPError must re-raise as OllamaUnavailable."""
     import urllib.error as _ue
     err = _ue.HTTPError(url="http://x", code=500, msg="Server Error", hdrs={}, fp=None)
-    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: (_ for _ in ()).throw(err))
+    monkeypatch.setattr(_embed_module, "_post_json", lambda *a, **kw: (_ for _ in ()).throw(err))
     with pytest.raises(cli.OllamaUnavailable):
         cli._embed("test")
 

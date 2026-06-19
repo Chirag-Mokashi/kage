@@ -31,8 +31,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
 
-class OllamaUnavailable(Exception):
-    """Raised when Ollama is unreachable or times out."""
+from kage.embed import OllamaUnavailable  # re-export; tests use cli.OllamaUnavailable
 
 
 # CloudError + DEFAULT_PROVIDERS now live in kage.cloud (Cycle 12 Slice 1); re-export so
@@ -871,46 +870,12 @@ def _rrf_fuse(fts_rows: list, vec_rows: list, k: int = 60) -> list:
 
 def _embed(text: str) -> list[float]:
     """Embed text via Ollama /api/embed; raises OllamaUnavailable on failure."""
-    cfg = _config()
-    model = cfg.get("embed_model", "nomic-embed-text")
-    url = cfg.get("ollama_url", "http://localhost:11434") + "/api/embed"
-    try:
-        out = _post_json(url, {"model": model, "input": text[:6000]}, timeout=10)
-        return out["embeddings"][0]
-    except urllib.error.HTTPError as e:
-        if e.code == 400:
-            raise OllamaUnavailable(f"embed input too long for model (HTTP 400)") from e
-        raise OllamaUnavailable(str(e)) from e
-    except (urllib.error.URLError, TimeoutError) as e:
-        raise OllamaUnavailable(str(e)) from e
-    except (KeyError, IndexError) as e:
-        raise OllamaUnavailable(f"unexpected embed response: {e}") from e
+    return runtime.embed.embed(text, _config())
 
 
 def _get_chroma():
-    import chromadb
     cfg = _config()
-    embed_model = cfg.get("embed_model", "nomic-embed-text")
-    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-    collection = client.get_or_create_collection(
-        name="chunks",
-        metadata={"embed_model": embed_model, "schema_version": "4"},
-    )
-    stored_model = (collection.metadata or {}).get("embed_model")
-    stored_schema = (collection.metadata or {}).get("schema_version")
-    if stored_model is not None and stored_model != embed_model:
-        typer.echo(
-            f"  ⚠ embed model changed ({stored_model} → {embed_model}) — run: kage reindex --force",
-            err=True,
-        )
-        raise OllamaUnavailable("embed model mismatch — run: kage reindex --force")
-    if stored_schema is None or stored_schema != "4":
-        typer.echo(
-            f"  ⚠ schema version mismatch (v{stored_schema or 'unknown'} → v4) — run: kage reindex --force",
-            err=True,
-        )
-        raise OllamaUnavailable("schema version mismatch — run: kage reindex --force")
-    return collection
+    return runtime.vector.collection(CHROMA_DIR, cfg.get("embed_model", "nomic-embed-text"))
 
 
 def _get_reranker():
@@ -992,15 +957,7 @@ def _search_vec(query_vec: list[float], project: str | None, limit: int, identit
 
 def _ollama_status(cfg: dict, model: str) -> tuple[bool, str]:
     """Is Ollama reachable and the model pulled? (advisory — only `ask` needs it)."""
-    url = cfg.get("ollama_url", "http://localhost:11434") + "/api/tags"
-    try:
-        with urllib.request.urlopen(url, timeout=4) as resp:
-            names = {m.get("name", "") for m in json.loads(resp.read()).get("models", [])}
-    except (urllib.error.URLError, TimeoutError, ValueError):
-        return False, "Ollama not reachable"
-    if model in names:
-        return True, f"Ollama up, {model} ready"
-    return False, f"Ollama up, but {model} not pulled"
+    return runtime.embed.status(cfg, model)
 
 
 @app.command(name="use")

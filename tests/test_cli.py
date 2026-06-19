@@ -3992,15 +3992,15 @@ class TestGateConversation:
 
     def test_safe_turn_no_notes(self, monkeypatch):
         turn = self.make_turn(0, "hello world")
-        monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: set())
-        monkeypatch.setattr(cli, "_connect", lambda: self.FakeConn())
+        monkeypatch.setattr(runtime.store, "allowed_note_ids", lambda *a: set())
+        monkeypatch.setattr(runtime.store, "connect", lambda: self.FakeConn())
         safe, withheld = cli._gate_conversation([turn], {}, "personal", None)
         assert safe == [turn] and withheld == []
 
     def test_pii_in_content_withheld(self, monkeypatch):
         turn = self.make_turn(0, "4111 1111 1111 1111")
-        monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: set())
-        monkeypatch.setattr(cli, "_connect", lambda: self.FakeConn())
+        monkeypatch.setattr(runtime.store, "allowed_note_ids", lambda *a: set())
+        monkeypatch.setattr(runtime.store, "connect", lambda: self.FakeConn())
         safe, withheld = cli._gate_conversation([turn], {}, "personal", None)
         assert safe == []
         assert len(withheld) == 1
@@ -4009,8 +4009,8 @@ class TestGateConversation:
 
     def test_provenance_identity_wall_withheld(self, monkeypatch):
         turn = self.make_turn(0, "hello", note_ids=["note-x"])
-        monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: set())
-        monkeypatch.setattr(cli, "_connect", lambda: self.FakeConn())
+        monkeypatch.setattr(runtime.store, "allowed_note_ids", lambda *a: set())
+        monkeypatch.setattr(runtime.store, "connect", lambda: self.FakeConn())
         safe, withheld = cli._gate_conversation([turn], {}, "personal", None)
         assert safe == []
         assert withheld[0]["reason"].startswith("provenance:identity_wall:")
@@ -4038,8 +4038,8 @@ class TestGateConversation:
         turn0 = self.make_turn(0, "safe content")
         turn1 = self.make_turn(1, "4111 1111 1111 1111")
         turn2 = self.make_turn(2, "safe content")
-        monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: set())
-        monkeypatch.setattr(cli, "_connect", lambda: self.FakeConn())
+        monkeypatch.setattr(runtime.store, "allowed_note_ids", lambda *a: set())
+        monkeypatch.setattr(runtime.store, "connect", lambda: self.FakeConn())
         safe, withheld = cli._gate_conversation([turn0, turn1, turn2], {}, "personal", None)
         assert [t["idx"] for t in safe] == [0, 2]
         assert withheld[0]["turn_idx"] == 1
@@ -4048,8 +4048,8 @@ class TestGateConversation:
     def test_withheld_does_not_affect_other_turns(self, monkeypatch):
         turn0 = self.make_turn(0, "safe", note_ids=["bad-note"])
         turn1 = self.make_turn(1, "also safe")
-        monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: set())
-        monkeypatch.setattr(cli, "_connect", lambda: self.FakeConn())
+        monkeypatch.setattr(runtime.store, "allowed_note_ids", lambda *a: set())
+        monkeypatch.setattr(runtime.store, "connect", lambda: self.FakeConn())
         safe, withheld = cli._gate_conversation([turn0, turn1], {}, "personal", None)
         assert [t["idx"] for t in safe] == [1]
         assert withheld[0]["turn_idx"] == 0

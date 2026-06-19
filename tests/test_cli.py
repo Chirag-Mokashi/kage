@@ -24,6 +24,7 @@ from typer.testing import CliRunner
 from unittest import mock
 
 from kage import cli, cloud, runtime
+from kage import privacy as kage_privacy
 from kage import embed as _embed_module
 from kage.config import Config
 from kage.store import Store
@@ -4094,8 +4095,7 @@ class TestSessionSwitch:
         h = tmp_path / ".kage"
 
         CliRunner().invoke(cli.app, ["init"])
-        monkeypatch.setattr(cli, "_gate_conversation", lambda *a, **kw: ([{"the": "turn"}], [{"withheld": True}]))
-        monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: set())
+        monkeypatch.setattr(kage_privacy, "_gate_conversation", lambda *a, **kw: ([{"the": "turn"}], [{"withheld": True}]))
         session_id = cli._session_create("personal", None, "ollama")
         cli._session_append(session_id, "user", "hello", [], "ollama", None, None, None)
         _, safe, withheld = cli._session_switch(session_id, "claude", {}, "personal", None)

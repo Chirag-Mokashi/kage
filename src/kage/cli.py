@@ -34,6 +34,8 @@ from mcp.client.sse import sse_client
 from kage.embed import OllamaUnavailable  # re-export; tests use cli.OllamaUnavailable
 from kage import runtime
 from kage.context import _read_active, _write_active, _resolve_context  # noqa: F401
+from kage import notes as _notes
+from kage import privacy as _privacy
 
 
 # CloudError + DEFAULT_PROVIDERS now live in kage.cloud (Cycle 12 Slice 1); re-export so
@@ -271,13 +273,7 @@ def _new_id() -> str:
 
 
 def _read_body(rel_path: str) -> str:
-    """Read a memory's body from its markdown file (source of truth), minus frontmatter."""
-    text = (KAGE_HOME / rel_path).read_text()
-    if text.startswith("---"):
-        close = text.find("\n---", 3)
-        if close != -1:
-            text = text[close + 4 :]
-    return text.strip()
+    return _notes._read_body(rel_path)
 
 
 # Chunking lives in kage.chunk (audit WI-4). Re-exported here so cli.* stays the
@@ -292,12 +288,7 @@ _reranker_cache: list = [False, None]   # [loaded_flag, instance_or_None]
 
 
 def _read_section(content_path: str, char_start: int, char_end: int) -> str:
-    """Return the body slice [char_start:char_end] from a note; empty string on read error."""
-    try:
-        body = _read_body(content_path)
-        return body[char_start:char_end]
-    except OSError:
-        return ""
+    return _notes._read_section(content_path, char_start, char_end)
 
 
 def _save(
@@ -542,91 +533,19 @@ def _answer(
 # ── Privacy gate (Layer 3e) ────────────────────────────────────────────────
 
 # PII detection table + scanner live in kage.pii (audit WI-4). Re-exported so
-# cli._PII_PATTERNS / cli._pii_scan stay the test surface; the gate logic below
-# (_disclosure_gate, _gate_conversation) stays here.
-from kage.pii import _PII_PATTERNS, _pii_scan  # noqa: E402,F401
+# cli._PII_PATTERNS / cli._pii_scan stay the test surface (unit tests call them directly).
+from kage.pii import _PII_PATTERNS, _pii_scan  # noqa: F401
 
 
 def _write_audit(record: dict) -> None:
-    """Append one JSON record to the audit log. Best-effort — never raises."""
-    try:
-        with open(KAGE_HOME / "audit.jsonl", "a") as f:
-            f.write(json.dumps(record) + "\n")
-    except OSError:
-        pass
+    _privacy._write_audit(record)
 
 
 _session_approvals: dict[str, bool] = {}
 
 
 def _disclosure_gate(rows: list, cfg: dict, identity: str = "personal", project: str | None = None) -> tuple[list, list[dict]]:
-    """Filter rows before cloud dispatch. Returns (allowed_rows, withheld_list).
-
-    withheld_list entries: {"note_id": str, "reason": str, "pii_patterns": list[str]}
-    Per-provider trust tiers are deferred (v2).
-    """
-    if not rows:
-        return [], []
-
-    note_ids = [row[0] for row in rows]
-    local_only_projects: list[str] = cfg.get("local_only_projects", [])
-    extra_pii: list[dict] = cfg.get("pii_patterns", [])
-
-    # Stage 1: identity wall — second independent wall before cloud dispatch
-    identity_allowed = _allowed_note_ids(identity, project)
-
-    conn = _connect()
-    try:
-        placeholders = ",".join("?" * len(note_ids))
-        lo_map: dict[str, bool] = {
-            r[0]: bool(r[1])
-            for r in conn.execute(
-                f"SELECT id, local_only FROM memories WHERE id IN ({placeholders})",
-                note_ids,
-            ).fetchall()
-        }
-    finally:
-        conn.close()
-
-    allowed: list = []
-    withheld: list[dict] = []
-    for row in rows:
-        note_id: str = row[0]
-        project_val: str | None = row[1]
-
-        if note_id not in identity_allowed:
-            withheld.append({"note_id": note_id, "reason": f"identity_wall:{identity}", "pii_patterns": []})
-            continue
-
-        if lo_map.get(note_id, False):
-            withheld.append({"note_id": note_id, "reason": "local_only:flag", "pii_patterns": []})
-            continue
-
-        if project_val and project_val in local_only_projects:
-            withheld.append({
-                "note_id": note_id,
-                "reason": f"local_only:project:{project_val}",
-                "pii_patterns": [],
-            })
-            continue
-
-        path, char_start, char_end = row[3], row[6], row[7]
-        if char_start is not None and char_end is not None:
-            text = _read_section(path, char_start, char_end)
-        else:
-            try:
-                text = _read_body(path)
-            except OSError:
-                text = ""
-
-        pii_hits = _pii_scan(text, extra_pii)
-        if pii_hits:
-            withheld.append({"note_id": note_id, "reason": "pii_detected", "pii_patterns": pii_hits})
-            continue
-
-        allowed.append(row)
-
-    return allowed, withheld
+    return _privacy._disclosure_gate(rows, cfg, identity, project)
 
 
 def _gate_conversation(
@@ -635,52 +554,7 @@ def _gate_conversation(
     identity: str,
     project: str | None,
 ) -> tuple[list[dict], list[dict]]:
-    """Filter session turns before cloud dispatch.
-
-    Checks per turn: (1) PII scan on content, (2) provenance — note_ids against identity wall + local_only.
-    Returns (safe_turns, withheld) where withheld entries = {turn_idx, reason, pii_patterns}.
-    Only call for cloud destinations; skip for ollama.
-    """
-    if not turns:
-        return [], []
-    extra_pii = cfg.get("pii_patterns", [])
-    identity_allowed = _allowed_note_ids(identity, project)
-    all_note_ids = list({nid for t in turns for nid in t["note_ids"]})
-    lo_map: dict[str, bool] = {}
-    if all_note_ids:
-        conn = _connect()
-        try:
-            placeholders = ",".join("?" * len(all_note_ids))
-            lo_map = {
-                r[0]: bool(r[1])
-                for r in conn.execute(
-                    f"SELECT id, local_only FROM memories WHERE id IN ({placeholders})",
-                    all_note_ids,
-                ).fetchall()
-            }
-        finally:
-            conn.close()
-    safe: list[dict] = []
-    withheld: list[dict] = []
-    for turn in turns:
-        pii_hits = _pii_scan(turn["content"], extra_pii)
-        if pii_hits:
-            withheld.append({"turn_idx": turn["idx"], "reason": "pii_in_content", "pii_patterns": pii_hits})
-            continue
-        blocked = False
-        for nid in turn["note_ids"]:
-            if nid not in identity_allowed:
-                withheld.append({"turn_idx": turn["idx"], "reason": f"provenance:identity_wall:{identity}", "pii_patterns": []})
-                blocked = True
-                break
-            if lo_map.get(nid, False):
-                withheld.append({"turn_idx": turn["idx"], "reason": f"provenance:local_only:{nid}", "pii_patterns": []})
-                blocked = True
-                break
-        if blocked:
-            continue
-        safe.append(turn)
-    return safe, withheld
+    return _privacy._gate_conversation(turns, cfg, identity, project)
 
 
 def _session_switch(

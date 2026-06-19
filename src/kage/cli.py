@@ -59,9 +59,6 @@ CONFIG_PATH = KAGE_HOME / "config.json"
 CHROMA_DIR  = KAGE_HOME / "chroma"
 
 # ── Arm routing forwarders ────────────────────────────────────────────────
-ARM_KEYWORDS: dict[str, list[str]] = _arms.ARM_KEYWORDS
-_arm_tool_cache: dict[str, list] = _arms._arm_tool_cache
-
 async def _call_arm(*a, **kw): return await _arms._call_arm(*a, **kw)
 def _detect_arms(*a, **kw): return _arms._detect_arms(*a, **kw)
 async def _check_arm_health(*a, **kw): return await _arms._check_arm_health(*a, **kw)

@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import sqlite3
 
-import pytest
-
 from kage import arms as _arms
 from kage import cloud as _cloud
 from kage.config import Config
@@ -97,13 +95,22 @@ def test_builtin_provider_types_registered():
 
 def test_register_provider_type_custom(monkeypatch):
     calls = []
-    def fake_dispatch(pcfg, key, system, messages):
-        calls.append((pcfg, key, system, messages))
-        return "fake-response"
-    monkeypatch.setitem(_cloud._PROVIDER_REGISTRY, "test-type", fake_dispatch)
-    result = fake_dispatch({"model": "m"}, "k", "sys", [{"role": "user", "content": "q"}])
-    assert result == "fake-response"
-    assert calls[0][1] == "k"
+    def fake_dispatch(_pcfg, key, _system, _messages):
+        calls.append(key)
+        return "custom-response"
+    monkeypatch.setenv("KAGE_TEST_KEY", "my-key")
+    _cloud.register_provider_type("custom-type-test", fake_dispatch)
+    try:
+        result = _cloud.CloudClient().complete(
+            "custom-provider-test",
+            "sys",
+            [{"role": "user", "content": "q"}],
+            {"providers": {"custom-provider-test": {"type": "custom-type-test", "api_key_env": "KAGE_TEST_KEY"}}},
+        )
+        assert result == "custom-response"
+        assert calls[0] == "my-key"
+    finally:
+        del _cloud._PROVIDER_REGISTRY["custom-type-test"]
 
 
 # ── Slice 5: ArmRegistry ─────────────────────────────────────────────────────
@@ -120,11 +127,15 @@ def test_builtin_transport_handlers_registered():
         assert transport in _arms._TRANSPORT_HANDLERS
 
 
-def test_register_arm_adds_keywords(monkeypatch):
-    monkeypatch.setitem(_arms.ARM_KEYWORDS, "test-arm", [])
-    _arms.ARM_KEYWORDS["test-arm"] = ["zyx-unique-kw"]
-    assert "zyx-unique-kw" in _arms.ARM_KEYWORDS["test-arm"]
-    del _arms.ARM_KEYWORDS["test-arm"]
+def test_register_arm_adds_keywords():
+    async def _stub(_n, _c, _q, _i, _t): return None
+    _arms.register_arm("test-arm-kw", ["zyx-unique-kw"], "test-transport-kw", _stub)
+    try:
+        assert _arms.ARM_KEYWORDS["test-arm-kw"] == ["zyx-unique-kw"]
+        assert _arms._TRANSPORT_HANDLERS["test-transport-kw"] is _stub
+    finally:
+        del _arms.ARM_KEYWORDS["test-arm-kw"]
+        del _arms._TRANSPORT_HANDLERS["test-transport-kw"]
 
 
 def test_register_arm_custom_transport():

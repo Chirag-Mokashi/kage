@@ -131,7 +131,7 @@ def register_arm(
     handler: Callable,
 ) -> None:
     ARM_KEYWORDS[name] = keywords
-    _TRANSPORT_HANDLERS.setdefault(transport, handler)
+    _TRANSPORT_HANDLERS[transport] = handler
 
 
 register_arm('calendar', ['calendar', 'schedule', 'meeting', 'event', 'appointment', 'today', 'tomorrow', 'this week'], 'shell', _call_arm_shell)

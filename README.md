@@ -19,7 +19,7 @@ kage is defined at three nested levels, all simultaneously true:
 
 ---
 
-## Current state — v0.10.1
+## Current state — v0.12.0
 
 kage ships as a headless CLI and MCP server. The full UI layer (via Odysseus integration) is in progress.
 
@@ -295,16 +295,19 @@ Set a different model in `~/.kage/config.json`:
 kage today is a passive broker — it answers when called. The target is an active mediator — it orchestrates.
 
 ```
-  Cycle 8   Retrieval quality          SHIPPED — recursive chunking + bge-reranker
-  Cycle 9   Identity axis (THE WEDGE)  SHIPPED — identity × project wall, real data
-  Cycle 10  Stateful sessions          SHIPPED — kage chat REPL, safe model-switching
-  Cycle 10.5 Active context            SHIPPED — kage use / where, resolver, MCP wired
-  Cycle 11  kage as MCP client         SHIPPED — arm routing + local shell arm (calendar)
-  Cycle 12  Layer 4 auto-routing       Intent → model selection, automatic
-  Cycle 13  Agent loop                 Multi-step planning and execution
+  Cycle 8    Retrieval quality          SHIPPED — recursive chunking + bge-reranker
+  Cycle 9    Identity axis (THE WEDGE)  SHIPPED — identity × project wall, real data
+  Cycle 10   Stateful sessions          SHIPPED — kage chat REPL, safe model-switching
+  Cycle 10.5 Active context             SHIPPED — kage use / where, resolver, MCP wired
+  Cycle 11   kage as MCP client         SHIPPED — arm routing + local shell arm (calendar)
+  Cycle 12   Modularity                 SHIPPED — injectable seams, 16 modules, registries
+  Cycle 13   Layer 4 auto-routing       Intent → model selection, automatic
+  Cycle 14   Agent loop                 Multi-step planning and execution
 ```
 
-Cycle 11 shipped the MCP-client plumbing (dual-transport arm routing, graceful fallback, audit log) plus a third **`shell`** transport. The first live arm reads the local macOS Calendar via `icalbuddy` — zero OAuth, zero cloud. This upgrades kage from a passive *forwarder* (answers from memory only) to a passive *fetcher* (pulls live external data into an answer) — but it is **still not a mediator**: it acts only when you call it, never on its own initiative. The active, proactive mediator — kage acting *for* you autonomously (scheduled triggers, agent loop) — is later (Cycles 12–13). External UIs (Odysseus, Claude Code) become optional rendering surfaces; kage calls the tools directly and the UI just shows the result.
+Cycle 12 dissolved the monolithic `cli.py` into 16 focused modules via injectable runtime seams — swapping `runtime.embed` or `runtime.cloud` now reaches every module at once, making backends genuinely swappable and arms/providers pluggable via registries. The egress golden tests lock the privacy moat: withheld note content is verified absent from every cloud payload.
+
+Cycle 11 shipped the MCP-client plumbing (dual-transport arm routing, graceful fallback, audit log) plus a third **`shell`** transport. The first live arm reads the local macOS Calendar via `icalbuddy` — zero OAuth, zero cloud. This upgrades kage from a passive *forwarder* (answers from memory only) to a passive *fetcher* (pulls live external data into an answer) — but it is **still not a mediator**: it acts only when you call it, never on its own initiative. The active, proactive mediator — kage acting *for* you autonomously (scheduled triggers, agent loop) — is later (Cycles 13–14).
 
 ---
 
@@ -327,17 +330,33 @@ Above the ten sits one operating value — **jugaad** (जुगाड़): frug
 
 ```
 src/kage/
-├── cli.py            Main CLI + all broker logic
-└── mcp_server.py     MCP server (FastMCP, stdio)
+├── cli.py          Typer commands + call-time forwarder shims (the entry point)
+├── runtime.py      Live seam instances — swapping runtime.X reaches every module
+├── http.py         Shared urllib helper (_post_json) — one place for headers/User-Agent
+├── config.py       Config seam — derives paths from KAGE_HOME, re-reads on every access
+├── store.py        Store seam — SQLite WAL connect, schema init, identity wall query
+├── embed.py        Embedder seam — Ollama nomic-embed-text + OllamaUnavailable sentinel
+├── vector.py       VectorIndex seam — ChromaDB collection + semantic search
+├── cloud.py        CloudClient + ProviderRegistry — the single cloud egress sink
+├── arms.py         Arm routing + ArmRegistry — shell / stdio / sse transport dispatch
+├── privacy.py      Disclosure gate, PII scan, audit log, context assembly
+├── retrieval.py    FTS5 + vector search, RRF fusion, bge-reranker
+├── notes.py        Save / reindex / import — the write path
+├── context.py      Active context resolver (kage use / where)
+├── session.py      Session CRUD, turn gating, query condensing
+├── chunk.py        Note chunking — pure text logic, no I/O
+├── pii.py          PII patterns + scanner — pure, no I/O
+└── mcp_server.py   MCP server (FastMCP, stdio transport)
 
 tests/
-├── test_cli.py       353 tests, ~100% line coverage
-└── eval_retrieval.py Retrieval eval harness (MRR, recall@k, identity wall invariants)
+├── test_cli.py     376 tests — CLI commands + all seam behaviors
+├── test_seams.py   13 unit tests — seam contracts + registry functions
+└── fakes.py        Test doubles: FakeEmbedder, FakeVectorIndex, RecordingCloud, FakeConfig
 
 docs/
-├── blueprint.md      Long-term architecture and planning state
-├── cycle-10-pitch.md Stateful session engine design (most recent cycle)
-└── ...               Historical cycle pitches and research
+├── blueprint.md             Long-term architecture and planning state
+├── cycle-12-modularity.md   Modularity design — injectable seams, 6 slices
+└── ...                      Historical cycle pitches and research
 ```
 
 Built by [Chirag Mokashi](https://github.com/Chirag-Mokashi) — MS Applied AI, Northeastern University.

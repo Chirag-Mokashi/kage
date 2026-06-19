@@ -42,7 +42,6 @@ def _patch_home(monkeypatch, home) -> None:
         "KAGE_HOME": home, "MEMORY_DIR": home / "memory",
         "INDEX_DIR": home / "indexes", "DB_PATH": db_path,
         "CONFIG_PATH": home / "config.json", "CHROMA_DIR": home / "chroma",
-        "STATE_PATH": home / "state.json",
     }.items():
         monkeypatch.setattr(cli, attr, val)
     monkeypatch.setattr(runtime, "config", Config(home))

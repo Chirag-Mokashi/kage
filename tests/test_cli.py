@@ -23,7 +23,33 @@ import pytest
 from typer.testing import CliRunner
 from unittest import mock
 
-from kage import cli
+from kage import cli, cloud, runtime
+from kage import privacy as kage_privacy
+from kage import embed as _embed_module
+from kage.config import Config
+from kage.store import Store
+from fakes import RecordingCloud, FakeEmbedder, FakeVectorIndex, _FakeChromaCollection  # noqa: F401
+
+
+def _patch_home(monkeypatch, home) -> None:
+    """Patch all kage path constants AND runtime.config/store to use `home`.
+
+    Called by every in-process test helper that creates an isolated kage home.
+    Required so runtime.store.connect() and runtime.config.data see the temp
+    path after the 4 cli.py seam forwarders are wired in Cycle 12 Slice 4a.
+    """
+    db_path = home / "indexes" / "kage.db"
+    for attr, val in {
+        "KAGE_HOME": home, "MEMORY_DIR": home / "memory",
+        "INDEX_DIR": home / "indexes", "DB_PATH": db_path,
+        "CONFIG_PATH": home / "config.json", "CHROMA_DIR": home / "chroma",
+    }.items():
+        monkeypatch.setattr(cli, attr, val)
+    monkeypatch.setattr(runtime, "config", Config(home))
+    monkeypatch.setattr(runtime, "store", Store(db_path))
+
+
+# ── Test fakes ──────────────────────────────────────────────────────────────
 
 
 def run(args, home, stdin=None):
@@ -123,12 +149,7 @@ def test_doctor_detects_drift(home):
 def test_doctor_warns_on_pending_embeddings(monkeypatch, tmp_path):
     """doctor must warn when notes have needs_embed=1, but still exit 0."""
     h = tmp_path / ".kage"
-    for attr, val in {
-        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-    }.items():
-        monkeypatch.setattr(cli, attr, val)
+    _patch_home(monkeypatch, h)
     r = CliRunner()
     r.invoke(cli.app, ["init"])
 
@@ -151,12 +172,7 @@ def test_doctor_warns_on_pending_embeddings(monkeypatch, tmp_path):
 def test_doctor_warns_on_embed_model_mismatch(monkeypatch, tmp_path):
     """doctor must warn when config embed_model differs from ChromaDB collection metadata."""
     h = tmp_path / ".kage"
-    for attr, val in {
-        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-    }.items():
-        monkeypatch.setattr(cli, attr, val)
+    _patch_home(monkeypatch, h)
     r = CliRunner()
     r.invoke(cli.app, ["init"])
 
@@ -192,17 +208,7 @@ def test_import_folder(home, tmp_path):
 def test_import_skips_embedding(monkeypatch, tmp_path):
     """import_ must NOT call _embed — bulk import defers embedding to kage reindex."""
     home = tmp_path / ".kage"
-    for attr, val in {
-        "KAGE_HOME": home,
-        "MEMORY_DIR": home / "memory",
-        "INDEX_DIR": home / "indexes",
-        "DB_PATH": home / "indexes" / "kage.db",
-        "CONFIG_PATH": home / "config.json",
-        "CHROMA_DIR": home / "chroma",
-        "STATE_PATH": home / "state.json",
-    }.items():
-        monkeypatch.setattr(cli, attr, val)
-
+    _patch_home(monkeypatch, home)
     r = CliRunner()
     assert r.invoke(cli.app, ["init"]).exit_code == 0
 
@@ -231,17 +237,7 @@ def test_import_skips_embedding(monkeypatch, tmp_path):
 def test_import_prints_reindex_hint(monkeypatch, tmp_path):
     """import_ must print the reindex hint after bulk import completes."""
     home = tmp_path / ".kage"
-    for attr, val in {
-        "KAGE_HOME": home,
-        "MEMORY_DIR": home / "memory",
-        "INDEX_DIR": home / "indexes",
-        "DB_PATH": home / "indexes" / "kage.db",
-        "CONFIG_PATH": home / "config.json",
-        "CHROMA_DIR": home / "chroma",
-        "STATE_PATH": home / "state.json",
-    }.items():
-        monkeypatch.setattr(cli, attr, val)
-
+    _patch_home(monkeypatch, home)
     r = CliRunner()
     assert r.invoke(cli.app, ["init"]).exit_code == 0
 
@@ -262,15 +258,7 @@ def test_ask_honors_partition_and_returns_answer(monkeypatch, tmp_path):
     In-process + mocked model call, so it runs in CI without Ollama.
     """
     home = tmp_path / ".kage"
-    for attr, val in {
-        "KAGE_HOME": home,
-        "MEMORY_DIR": home / "memory",
-        "INDEX_DIR": home / "indexes",
-        "DB_PATH": home / "indexes" / "kage.db",
-        "CONFIG_PATH": home / "config.json",
-    }.items():
-        monkeypatch.setattr(cli, attr, val)
-
+    _patch_home(monkeypatch, home)
     r = CliRunner()
     assert r.invoke(cli.app, ["init"]).exit_code == 0
     r.invoke(cli.app, ["remember", "alpha shared secret", "-p", "A", "-y"])
@@ -445,7 +433,7 @@ def test_get_chroma_raises_on_model_mismatch(monkeypatch):
 # ── _embed (Step 3) ─────────────────────────────────────────────────────────
 
 def test_embed_returns_floats(monkeypatch):
-    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: {"embeddings": [[0.1, 0.2, 0.3]]})
+    monkeypatch.setattr(_embed_module, "_post_json", lambda url, payload, **kw: {"embeddings": [[0.1, 0.2, 0.3]]})
     assert cli._embed("hello") == [0.1, 0.2, 0.3]
 
 
@@ -454,7 +442,7 @@ def test_embed_truncates_long_input(monkeypatch):
     def fake_post(url, payload, **kw):
         captured["payload"] = payload
         return {"embeddings": [[0.1]]}
-    monkeypatch.setattr(cli, "_post_json", fake_post)
+    monkeypatch.setattr(_embed_module, "_post_json", fake_post)
     cli._embed("x" * 40000)
     assert len(captured["payload"]["input"]) == 6000
 
@@ -462,7 +450,7 @@ def test_embed_truncates_long_input(monkeypatch):
 def test_embed_raises_on_urlerror(monkeypatch):
     def raise_it(*a, **kw):
         raise urllib.error.URLError("down")
-    monkeypatch.setattr(cli, "_post_json", raise_it)
+    monkeypatch.setattr(_embed_module, "_post_json", raise_it)
     with pytest.raises(cli.OllamaUnavailable):
         cli._embed("test")
 
@@ -470,7 +458,7 @@ def test_embed_raises_on_urlerror(monkeypatch):
 def test_embed_raises_on_timeout(monkeypatch):
     def raise_it(*a, **kw):
         raise TimeoutError()
-    monkeypatch.setattr(cli, "_post_json", raise_it)
+    monkeypatch.setattr(_embed_module, "_post_json", raise_it)
     with pytest.raises(cli.OllamaUnavailable):
         cli._embed("test")
 
@@ -596,12 +584,7 @@ def test_init_idempotent_on_migrated_db(tmp_path):
 
 def _wall_home(monkeypatch, tmp_path):
     h = tmp_path / ".kage"
-    for attr, val in {
-        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-    }.items():
-        monkeypatch.setattr(cli, attr, val)
+    _patch_home(monkeypatch, h)
     CliRunner().invoke(cli.app, ["init"])
     conn = sqlite3.connect(h / "indexes" / "kage.db")
     conn.executemany(
@@ -713,12 +696,7 @@ def test_search_embeddings_off_uses_wall(monkeypatch, tmp_path):
 
 def _mp_home(monkeypatch, tmp_path):
     h = tmp_path / ".kage"
-    for attr, val in {
-        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-    }.items():
-        monkeypatch.setattr(cli, attr, val)
+    _patch_home(monkeypatch, h)
     CliRunner().invoke(cli.app, ["init"])
     return h
 
@@ -963,6 +941,7 @@ def test_window_by_pieces_tracks_positions():
 
 def test_read_section_returns_correct_slice(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "KAGE_HOME", tmp_path)
+    monkeypatch.setattr(runtime, "config", Config(tmp_path))
     (tmp_path / "memory").mkdir()
     (tmp_path / "memory" / "note.md").write_text("This is the body of the note.")
     result = cli._read_section("memory/note.md", 5, 15)
@@ -971,6 +950,7 @@ def test_read_section_returns_correct_slice(monkeypatch, tmp_path):
 
 def test_read_section_with_frontmatter_file(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "KAGE_HOME", tmp_path)
+    monkeypatch.setattr(runtime, "config", Config(tmp_path))
     (tmp_path / "memory").mkdir()
     (tmp_path / "memory" / "note.md").write_text(
         "---\ntitle: Test Note\n---\nThis is the body of the note."
@@ -988,6 +968,7 @@ def test_read_section_returns_empty_on_missing_file(monkeypatch, tmp_path):
 
 def test_read_section_full_body_slice(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "KAGE_HOME", tmp_path)
+    monkeypatch.setattr(runtime, "config", Config(tmp_path))
     (tmp_path / "memory").mkdir()
     body = "This is the body of the note."
     (tmp_path / "memory" / "note.md").write_text(body)
@@ -1073,12 +1054,7 @@ def test_wal_mode_enabled(tmp_path):
 
 def test_save_sets_needs_embed_to_0_when_ollama_up(monkeypatch, tmp_path):
     h = tmp_path / ".kage"
-    for attr, val in {
-        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json",
-    }.items():
-        monkeypatch.setattr(cli, attr, val)
+    _patch_home(monkeypatch, h)
     CliRunner().invoke(cli.app, ["init"])
     monkeypatch.setattr(cli, "_embed", lambda *a, **kw: [0.1, 0.2])
     fake_coll = type("C", (), {
@@ -1098,12 +1074,7 @@ def test_save_sets_needs_embed_to_0_when_ollama_up(monkeypatch, tmp_path):
 
 def test_save_sets_needs_embed_to_1_when_ollama_down(monkeypatch, tmp_path):
     h = tmp_path / ".kage"
-    for attr, val in {
-        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json",
-    }.items():
-        monkeypatch.setattr(cli, attr, val)
+    _patch_home(monkeypatch, h)
     CliRunner().invoke(cli.app, ["init"])
     def embed_down(*a, **kw): raise cli.OllamaUnavailable("down")
     monkeypatch.setattr(cli, "_embed", embed_down)
@@ -1138,12 +1109,7 @@ def test_init_migration_adds_needs_embed_to_existing_db(tmp_path):
 def _save_home(monkeypatch, tmp_path):
     """Isolated in-process kage home for _save chunk tests."""
     h = tmp_path / ".kage"
-    for attr, val in {
-        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-    }.items():
-        monkeypatch.setattr(cli, attr, val)
+    _patch_home(monkeypatch, h)
     CliRunner().invoke(cli.app, ["init"])
     return h
 
@@ -1357,12 +1323,7 @@ def test_search_vec_per_project_count_uses_get_not_count(monkeypatch):
 def _reindex_home(monkeypatch, tmp_path):
     """Set up an isolated in-process kage home and return (home, runner)."""
     h = tmp_path / ".kage"
-    for attr, val in {
-        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-    }.items():
-        monkeypatch.setattr(cli, attr, val)
+    _patch_home(monkeypatch, h)
     r = CliRunner()
     r.invoke(cli.app, ["init"])
     return h, r
@@ -1532,12 +1493,7 @@ def test_vec_search_respects_project_partition(monkeypatch, tmp_path):
 def _step12_home(monkeypatch, tmp_path):
     """Shared helper: isolated in-process kage home, fully init'd."""
     h = tmp_path / ".kage"
-    for attr, val in {
-        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-    }.items():
-        monkeypatch.setattr(cli, attr, val)
+    _patch_home(monkeypatch, h)
     r = CliRunner()
     r.invoke(cli.app, ["init"])
     return h, r
@@ -1603,6 +1559,7 @@ def test_search_hybrid_snippet_for_vec_only_results(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli, "KAGE_HOME", h)
     monkeypatch.setattr(cli, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(runtime, "config", Config(h))
 
     md_path = h / "memory" / "note-A.md"
     md_path.write_text("---\nid: note-A\n---\n\nNeural networks and transformers for semantic search")
@@ -1939,10 +1896,13 @@ def test_call_cloud_missing_env_var(monkeypatch):
     assert "OPENAI_API_KEY" in str(e.value)
 
 
+# Cycle 12 Slice 1: cloud dispatch moved to kage.cloud.CloudClient, so these provider-
+# dispatch tests now patch cloud._post_json (the http call site in cloud.py). They still
+# enter via cli._call_cloud (a call-time forwarder → runtime.cloud.complete).
 def test_call_cloud_claude_uses_anthropic_url(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     calls = []
-    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append((url, kw)) or {"content": [{"text": "ans"}]})
+    monkeypatch.setattr(cloud, "_post_json", lambda url, payload, **kw: calls.append((url, kw)) or {"content": [{"text": "ans"}]})
     result = cli._call_cloud("claude", "sys", "msg", {})
     assert result == "ans"
     assert "anthropic.com" in calls[0][0]
@@ -1952,7 +1912,7 @@ def test_call_cloud_claude_uses_anthropic_url(monkeypatch):
 def test_call_cloud_openai_uses_bearer_auth(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "oai-key")
     calls = []
-    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append((url, kw)) or {"choices": [{"message": {"content": "ans"}}]})
+    monkeypatch.setattr(cloud, "_post_json", lambda url, payload, **kw: calls.append((url, kw)) or {"choices": [{"message": {"content": "ans"}}]})
     result = cli._call_cloud("openai", "sys", "msg", {})
     assert result == "ans"
     assert "openai.com/v1/chat/completions" in calls[0][0]
@@ -1962,7 +1922,7 @@ def test_call_cloud_openai_uses_bearer_auth(monkeypatch):
 def test_call_cloud_groq_url_has_v1_path(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "groq-key")
     calls = []
-    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append(url) or {"choices": [{"message": {"content": "ans"}}]})
+    monkeypatch.setattr(cloud, "_post_json", lambda url, payload, **kw: calls.append(url) or {"choices": [{"message": {"content": "ans"}}]})
     cli._call_cloud("groq", "sys", "msg", {})
     assert calls[0] == "https://api.groq.com/openai/v1/chat/completions"
 
@@ -1970,7 +1930,7 @@ def test_call_cloud_groq_url_has_v1_path(monkeypatch):
 def test_call_cloud_perplexity_url_has_no_v1(monkeypatch):
     monkeypatch.setenv("PERPLEXITY_API_KEY", "ppl-key")
     calls = []
-    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append(url) or {"choices": [{"message": {"content": "ans"}}]})
+    monkeypatch.setattr(cloud, "_post_json", lambda url, payload, **kw: calls.append(url) or {"choices": [{"message": {"content": "ans"}}]})
     cli._call_cloud("perplexity", "sys", "msg", {})
     assert calls[0] == "https://api.perplexity.ai/chat/completions"
 
@@ -1978,7 +1938,7 @@ def test_call_cloud_perplexity_url_has_no_v1(monkeypatch):
 def test_call_cloud_gemini_key_in_url(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "gem-key")
     calls = []
-    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append(url) or {"candidates": [{"content": {"parts": [{"text": "ans"}]}}]})
+    monkeypatch.setattr(cloud, "_post_json", lambda url, payload, **kw: calls.append(url) or {"candidates": [{"content": {"parts": [{"text": "ans"}]}}]})
     result = cli._call_cloud("gemini", "sys", "msg", {})
     assert result == "ans"
     assert "?key=gem-key" in calls[0]
@@ -1987,7 +1947,7 @@ def test_call_cloud_gemini_key_in_url(monkeypatch):
 
 def test_call_cloud_gemini_safety_block_raises(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "gem-key")
-    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: {"candidates": [{}]})
+    monkeypatch.setattr(cloud, "_post_json", lambda *a, **kw: {"candidates": [{}]})
     with pytest.raises(cli.CloudError):
         cli._call_cloud("gemini", "sys", "msg", {})
 
@@ -1995,7 +1955,7 @@ def test_call_cloud_gemini_safety_block_raises(monkeypatch):
 def test_call_cloud_user_config_partial_override_keeps_defaults(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "oai-key")
     calls = []
-    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append(payload) or {"choices": [{"message": {"content": "ans"}}]})
+    monkeypatch.setattr(cloud, "_post_json", lambda url, payload, **kw: calls.append(payload) or {"choices": [{"message": {"content": "ans"}}]})
     cfg = {"providers": {"openai": {"model": "gpt-4o-mini"}}}
     cli._call_cloud("openai", "sys", "msg", cfg)
     assert calls[0]["model"] == "gpt-4o-mini"
@@ -2005,7 +1965,7 @@ def test_call_cloud_network_error_raises_cloud_error(monkeypatch):
     import urllib.error
     monkeypatch.setenv("OPENAI_API_KEY", "oai-key")
     def bad_post(*a, **kw): raise urllib.error.URLError("timeout")
-    monkeypatch.setattr(cli, "_post_json", bad_post)
+    monkeypatch.setattr(cloud, "_post_json", bad_post)
     with pytest.raises(cli.CloudError, match="request failed"):
         cli._call_cloud("openai", "sys", "msg", {})
 
@@ -2147,12 +2107,7 @@ mcp_server = pytest.importorskip("kage.mcp_server", reason="mcp[cli] not install
 def _mcp_home(monkeypatch, tmp_path):
     """Isolated in-process kage home for MCP tool tests."""
     h = tmp_path / ".kage"
-    for attr, val in {
-        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-    }.items():
-        monkeypatch.setattr(cli, attr, val)
+    _patch_home(monkeypatch, h)
     CliRunner().invoke(cli.app, ["init"])
     return h
 
@@ -2344,12 +2299,7 @@ def test_mcp_ask_local_unavailable_returns_error_dict(monkeypatch, tmp_path):
 def test_init_rerun_shows_config_existed(monkeypatch, tmp_path):
     """Line 101: re-running init on an existing store must mark config as 'exists'."""
     h = tmp_path / ".kage"
-    for attr, val in {
-        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-    }.items():
-        monkeypatch.setattr(cli, attr, val)
+    _patch_home(monkeypatch, h)
     r = CliRunner()
     r.invoke(cli.app, ["init"])          # first run — creates everything
     result = r.invoke(cli.app, ["init"]) # second run — config already exists
@@ -2370,12 +2320,7 @@ def test_init_migration_adds_needs_embed_in_process(monkeypatch, tmp_path):
         CREATE VIRTUAL TABLE memory_fts USING fts5(id UNINDEXED, body);
     """)
     conn.close()
-    for attr, val in {
-        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-    }.items():
-        monkeypatch.setattr(cli, attr, val)
+    _patch_home(monkeypatch, h)
     result = CliRunner().invoke(cli.app, ["init"])
     assert result.exit_code == 0
     conn = sqlite3.connect(h / "indexes" / "kage.db")
@@ -2389,12 +2334,7 @@ def test_init_migration_adds_needs_embed_in_process(monkeypatch, tmp_path):
 def test_require_init_exits_when_db_missing(monkeypatch, tmp_path):
     """Lines 148-149: any command must exit 1 with 'kage init' hint if DB doesn't exist."""
     h = tmp_path / "empty"
-    for attr, val in {
-        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-    }.items():
-        monkeypatch.setattr(cli, attr, val)
+    _patch_home(monkeypatch, h)
     r = CliRunner().invoke(cli.app, ["status"])
     assert r.exit_code == 1
     assert "kage init" in r.output
@@ -2411,16 +2351,17 @@ def test_search_fts_returns_empty_for_blank_query():
 # ── _config ───────────────────────────────────────────────────────────────────
 
 def test_config_returns_empty_dict_when_file_missing(monkeypatch, tmp_path):
-    """Lines 361-362: _config must return {} when CONFIG_PATH doesn't exist."""
-    monkeypatch.setattr(cli, "CONFIG_PATH", tmp_path / "nonexistent.json")
+    """_config must return {} when config.json doesn't exist."""
+    monkeypatch.setattr(runtime, "config", Config(tmp_path / "nonexistent"))
     assert cli._config() == {}
 
 
 def test_config_returns_empty_dict_on_invalid_json(monkeypatch, tmp_path):
-    """Lines 361-362: _config must return {} on JSON parse error."""
-    bad = tmp_path / "bad.json"
-    bad.write_text("not json {{{")
-    monkeypatch.setattr(cli, "CONFIG_PATH", bad)
+    """_config must return {} on JSON parse error."""
+    bad_home = tmp_path / "bad"
+    bad_home.mkdir()
+    (bad_home / "config.json").write_text("not json {{{")
+    monkeypatch.setattr(runtime, "config", Config(bad_home))
     assert cli._config() == {}
 
 
@@ -2440,7 +2381,7 @@ def test_embed_raises_on_http_400(monkeypatch):
     """Lines 466-467: HTTP 400 from embed endpoint must raise OllamaUnavailable with 'HTTP 400'."""
     import urllib.error as _ue
     err = _ue.HTTPError(url="http://x", code=400, msg="Bad Request", hdrs={}, fp=None)
-    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: (_ for _ in ()).throw(err))
+    monkeypatch.setattr(_embed_module, "_post_json", lambda *a, **kw: (_ for _ in ()).throw(err))
     with pytest.raises(cli.OllamaUnavailable, match="HTTP 400"):
         cli._embed("test")
 
@@ -2449,7 +2390,7 @@ def test_embed_raises_on_non_400_http_error(monkeypatch):
     """Line 468: non-400 HTTPError must re-raise as OllamaUnavailable."""
     import urllib.error as _ue
     err = _ue.HTTPError(url="http://x", code=500, msg="Server Error", hdrs={}, fp=None)
-    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: (_ for _ in ()).throw(err))
+    monkeypatch.setattr(_embed_module, "_post_json", lambda *a, **kw: (_ for _ in ()).throw(err))
     with pytest.raises(cli.OllamaUnavailable):
         cli._embed("test")
 
@@ -2883,12 +2824,7 @@ def test_doctor_sqlite_error_marks_db_check_failed(monkeypatch, tmp_path):
     (h / "indexes").mkdir()
     (h / "indexes" / "kage.db").write_bytes(b"not a sqlite database")  # corrupted DB
     (h / "config.json").write_text(_j.dumps({"version": "0.1.0"}))
-    for attr, val in {
-        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-    }.items():
-        monkeypatch.setattr(cli, attr, val)
+    _patch_home(monkeypatch, h)
     monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
     r = CliRunner().invoke(cli.app, ["doctor"])
     assert r.exit_code == 1
@@ -2914,12 +2850,7 @@ def test_doctor_sqlite_error_in_chunks_check_is_silenced(monkeypatch, tmp_path):
     conn.close()
     # Note: chunks table deliberately absent → SELECT COUNT(*) FROM chunks raises sqlite3.Error
     (h / "config.json").write_text(_j.dumps({"version": "0.1.0"}))
-    for attr, val in {
-        "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-        "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-        "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-    }.items():
-        monkeypatch.setattr(cli, attr, val)
+    _patch_home(monkeypatch, h)
     monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
     monkeypatch.setattr(cli, "_ollama_status", lambda cfg, model: (True, "mocked ok"))
     r = CliRunner().invoke(cli.app, ["doctor"])
@@ -3009,6 +2940,25 @@ def test_pii_scan_matches_openai_key():
 
 def test_pii_scan_matches_email():
     assert "Email" in cli._pii_scan("reach me at user@example.com please")
+
+
+def test_pii_scan_matches_upi():
+    assert "UPI ID" in cli._pii_scan("pay me at 9876543210@ybl now")
+
+
+def test_pii_scan_upi_ignores_email():
+    assert "UPI ID" not in cli._pii_scan("email john@gmail.com today")
+
+
+def test_pii_scan_upi_short_handle_caught():
+    # security baseline (Slice 0): privacy gate must not leak short UPI handles;
+    # FN (leak) is worse than FP (over-withhold), so the username floor is {2,}.
+    assert "UPI ID" in cli._pii_scan("refund to ab@hdfc")
+    assert "UPI ID" not in cli._pii_scan("rate is 5@bar")  # 1-char username still dropped
+
+
+def test_pii_scan_ipv4_removed():
+    assert "IPv4 address" not in cli._pii_scan("connect to 192.168.1.1 please")
 
 
 def test_pii_scan_matches_aws_key():
@@ -3779,7 +3729,7 @@ def test_list_flag_respects_identity_wall(monkeypatch, tmp_path):
 
 def test_disclosure_gate_stage1_blocks_cross_identity(monkeypatch, tmp_path):
     _save_home(monkeypatch, tmp_path)
-    monkeypatch.setattr(cli, "_allowed_note_ids", lambda identity, project: {"allowed-note"})
+    monkeypatch.setattr(runtime.store, "allowed_note_ids", lambda identity, project: {"allowed-note"})
     rows = [
         ("allowed-note", "p", "t", "path", "snip", None, None, None),
         ("blocked-note", "p", "t", "path", "snip", None, None, None),
@@ -3794,14 +3744,13 @@ def test_disclosure_gate_stage1_blocks_cross_identity(monkeypatch, tmp_path):
 # ── Cycle 10: session schema (Step 1) + session helpers (Step 2) ─────────────
 
 class TestSessionSchema:
+    @pytest.fixture(autouse=True)
+    def _env(self, monkeypatch, tmp_path):
+        _patch_home(monkeypatch, tmp_path / ".kage")
+
     def test_sessions_table_exists(self, monkeypatch, tmp_path):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         r = CliRunner()
         r.invoke(cli.app, ["init"])
         conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
@@ -3813,12 +3762,7 @@ class TestSessionSchema:
 
     def test_session_turns_table_exists(self, monkeypatch, tmp_path):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         r = CliRunner()
         r.invoke(cli.app, ["init"])
         conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
@@ -3830,12 +3774,7 @@ class TestSessionSchema:
 
     def test_sessions_columns(self, monkeypatch, tmp_path):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         r = CliRunner()
         r.invoke(cli.app, ["init"])
         conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
@@ -3847,12 +3786,7 @@ class TestSessionSchema:
 
     def test_session_turns_columns(self, monkeypatch, tmp_path):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         r = CliRunner()
         r.invoke(cli.app, ["init"])
         conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
@@ -3864,12 +3798,7 @@ class TestSessionSchema:
 
     def test_session_turns_parent_idx_nullable(self, monkeypatch, tmp_path):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         r = CliRunner()
         r.invoke(cli.app, ["init"])
         conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
@@ -3882,12 +3811,7 @@ class TestSessionSchema:
 
     def test_session_turns_note_ids_default(self, monkeypatch, tmp_path):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         r = CliRunner()
         r.invoke(cli.app, ["init"])
         conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
@@ -3901,12 +3825,7 @@ class TestSessionSchema:
 
     def test_schema_idempotent(self, monkeypatch, tmp_path):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         r = CliRunner()
         r.invoke(cli.app, ["init"])
         r.invoke(cli.app, ["init"])
@@ -3920,12 +3839,7 @@ class TestSessionSchema:
 
     def test_sessions_deleted_default_zero(self, monkeypatch, tmp_path):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         r = CliRunner()
         r.invoke(cli.app, ["init"])
         conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
@@ -3938,12 +3852,7 @@ class TestSessionSchema:
 
     def test_session_turns_deleted_default_zero(self, monkeypatch, tmp_path):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         r = CliRunner()
         r.invoke(cli.app, ["init"])
         conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
@@ -3957,14 +3866,13 @@ class TestSessionSchema:
 
 
 class TestSessionHelpers:
+    @pytest.fixture(autouse=True)
+    def _env(self, monkeypatch, tmp_path):
+        _patch_home(monkeypatch, tmp_path / ".kage")
+
     def test_session_create_returns_uuid_string(self, tmp_path, monkeypatch):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         CliRunner().invoke(cli.app, ["init"])
         session_id = cli._session_create("personal", None, "ollama")
         assert isinstance(session_id, str)
@@ -3972,12 +3880,7 @@ class TestSessionHelpers:
 
     def test_session_create_persists_to_db(self, tmp_path, monkeypatch):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         CliRunner().invoke(cli.app, ["init"])
         session_id = cli._session_create("personal", None, "ollama")
         conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
@@ -3989,12 +3892,7 @@ class TestSessionHelpers:
 
     def test_session_load_returns_dict(self, tmp_path, monkeypatch):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         CliRunner().invoke(cli.app, ["init"])
         session_id = cli._session_create("personal", None, "ollama")
         result = cli._session_load(session_id)
@@ -4003,23 +3901,13 @@ class TestSessionHelpers:
 
     def test_session_load_returns_none_for_missing(self, tmp_path, monkeypatch):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         CliRunner().invoke(cli.app, ["init"])
         assert cli._session_load("nonexistent-id") is None
 
     def test_session_load_excludes_deleted(self, tmp_path, monkeypatch):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         CliRunner().invoke(cli.app, ["init"])
         session_id = cli._session_create("personal", None, "ollama")
         conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
@@ -4030,12 +3918,7 @@ class TestSessionHelpers:
 
     def test_session_append_returns_zero_for_first_turn(self, tmp_path, monkeypatch):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         CliRunner().invoke(cli.app, ["init"])
         session_id = cli._session_create("personal", None, "ollama")
         idx = cli._session_append(session_id, "user", "hello", [], "ollama", None, None, None)
@@ -4043,12 +3926,7 @@ class TestSessionHelpers:
 
     def test_session_append_increments_idx(self, tmp_path, monkeypatch):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         CliRunner().invoke(cli.app, ["init"])
         session_id = cli._session_create("personal", None, "ollama")
         idx1 = cli._session_append(session_id, "user", "hello", [], "ollama", None, None, None)
@@ -4058,12 +3936,7 @@ class TestSessionHelpers:
 
     def test_session_append_serializes_note_ids(self, tmp_path, monkeypatch):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         CliRunner().invoke(cli.app, ["init"])
         session_id = cli._session_create("personal", None, "ollama")
         cli._session_append(session_id, "user", "hello", ["n1", "n2"], "ollama", None, None, None)
@@ -4074,12 +3947,7 @@ class TestSessionHelpers:
 
     def test_session_turns_returns_chronological(self, tmp_path, monkeypatch):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         CliRunner().invoke(cli.app, ["init"])
         session_id = cli._session_create("personal", None, "ollama")
         for content in ("a", "b", "c"):
@@ -4089,12 +3957,7 @@ class TestSessionHelpers:
 
     def test_session_turns_token_budget_drops_oldest(self, tmp_path, monkeypatch):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         CliRunner().invoke(cli.app, ["init"])
         session_id = cli._session_create("personal", None, "ollama")
         content = "x" * 400
@@ -4154,8 +4017,8 @@ class TestGateConversation:
 
     def test_provenance_allowed_note_safe(self, monkeypatch):
         turn = self.make_turn(0, "hello", note_ids=["note-x"])
-        monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: {"note-x"})
-        monkeypatch.setattr(cli, "_connect", lambda: self.FakeConn())
+        monkeypatch.setattr(runtime.store, "allowed_note_ids", lambda *a: {"note-x"})
+        monkeypatch.setattr(runtime.store, "connect", lambda: self.FakeConn())
         safe, withheld = cli._gate_conversation([turn], {}, "personal", None)
         assert safe == [turn] and withheld == []
 
@@ -4165,8 +4028,8 @@ class TestGateConversation:
             def fetchall(self): return [("note-lo", 1)]
             def close(self): pass
         turn = self.make_turn(0, "hello", note_ids=["note-lo"])
-        monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: {"note-lo"})
-        monkeypatch.setattr(cli, "_connect", lambda: LocalConn())
+        monkeypatch.setattr(runtime.store, "allowed_note_ids", lambda *a: {"note-lo"})
+        monkeypatch.setattr(runtime.store, "connect", lambda: LocalConn())
         safe, withheld = cli._gate_conversation([turn], {}, "personal", None)
         assert safe == []
         assert withheld[0]["reason"].startswith("provenance:local_only:")
@@ -4194,14 +4057,13 @@ class TestGateConversation:
 
 
 class TestSessionSwitch:
+    @pytest.fixture(autouse=True)
+    def _env(self, monkeypatch, tmp_path):
+        _patch_home(monkeypatch, tmp_path / ".kage")
+
     def test_switch_raises_on_unknown_session(self, monkeypatch, tmp_path):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         CliRunner().invoke(cli.app, ["init"])
         monkeypatch.setattr(cli, "_gate_conversation", lambda *a, **kw: ([], []))
         with pytest.raises(ValueError):
@@ -4209,12 +4071,7 @@ class TestSessionSwitch:
 
     def test_switch_updates_destination_in_db(self, monkeypatch, tmp_path):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         CliRunner().invoke(cli.app, ["init"])
         monkeypatch.setattr(cli, "_gate_conversation", lambda *a, **kw: ([], []))
         monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: set())
@@ -4227,12 +4084,7 @@ class TestSessionSwitch:
 
     def test_switch_returns_new_destination(self, monkeypatch, tmp_path):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         CliRunner().invoke(cli.app, ["init"])
         monkeypatch.setattr(cli, "_gate_conversation", lambda *a, **kw: ([], []))
         session_id = cli._session_create("personal", None, "ollama")
@@ -4241,15 +4093,9 @@ class TestSessionSwitch:
 
     def test_switch_re_gates_turns(self, monkeypatch, tmp_path):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         CliRunner().invoke(cli.app, ["init"])
-        monkeypatch.setattr(cli, "_gate_conversation", lambda *a, **kw: ([{"the": "turn"}], [{"withheld": True}]))
-        monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: set())
+        monkeypatch.setattr(kage_privacy, "_gate_conversation", lambda *a, **kw: ([{"the": "turn"}], [{"withheld": True}]))
         session_id = cli._session_create("personal", None, "ollama")
         cli._session_append(session_id, "user", "hello", [], "ollama", None, None, None)
         _, safe, withheld = cli._session_switch(session_id, "claude", {}, "personal", None)
@@ -4258,12 +4104,7 @@ class TestSessionSwitch:
 
     def test_switch_no_leak_invariant(self, monkeypatch, tmp_path):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+
         CliRunner().invoke(cli.app, ["init"])
         monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: set())
         session_id = cli._session_create("personal", None, "ollama")
@@ -4407,12 +4248,7 @@ class TestCondenseQuery:
 class TestChatCommand:
     def _setup(self, tmp_path, monkeypatch):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma", "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+        _patch_home(monkeypatch, h)
         CliRunner().invoke(cli.app, ["init"])
 
     def test_chat_exits_on_slash_exit(self, tmp_path, monkeypatch):
@@ -4560,13 +4396,7 @@ def test_mcp_ask_session_history_threaded(monkeypatch, tmp_path):
 class TestActiveContext:
     def _setup(self, monkeypatch, tmp_path):
         h = tmp_path / ".kage"
-        for attr, val in {
-            "KAGE_HOME": h, "MEMORY_DIR": h / "memory",
-            "INDEX_DIR": h / "indexes", "DB_PATH": h / "indexes" / "kage.db",
-            "CONFIG_PATH": h / "config.json", "CHROMA_DIR": h / "chroma",
-            "STATE_PATH": h / "state.json",
-        }.items():
-            monkeypatch.setattr(cli, attr, val)
+        _patch_home(monkeypatch, h)
         CliRunner().invoke(cli.app, ["init"])
         return h
 
@@ -4652,8 +4482,10 @@ class TestArmShellTransport:
     }
 
     def test_call_arm_shell_returns_stdout(self, monkeypatch):
-        monkeypatch.setattr(cli, "_config", lambda: self._SHELL_CFG)
-        monkeypatch.setattr(cli, "_write_audit", lambda x: None)
+        _mock_cfg = mock.Mock()
+        _mock_cfg.data = self._SHELL_CFG
+        monkeypatch.setattr(runtime, "config", _mock_cfg)
+        monkeypatch.setattr(kage_privacy, "_write_audit", lambda x: None)
         mock_proc = mock.Mock()
         mock_proc.stdout = "• Test event\n"
         mock_proc.returncode = 0
@@ -4663,22 +4495,28 @@ class TestArmShellTransport:
 
     def test_call_arm_shell_empty_command_returns_none(self, monkeypatch):
         cfg = {"arms": {"calendar": {"enabled": True, "transport": "shell", "command": "", "identity": "personal", "permission": "read"}}}
-        monkeypatch.setattr(cli, "_config", lambda: cfg)
-        monkeypatch.setattr(cli, "_write_audit", lambda x: None)
+        _mock_cfg = mock.Mock()
+        _mock_cfg.data = cfg
+        monkeypatch.setattr(runtime, "config", _mock_cfg)
+        monkeypatch.setattr(kage_privacy, "_write_audit", lambda x: None)
         result = asyncio.run(cli._call_arm("calendar", "whats on my calendar", "personal"))
         assert result is None
 
     def test_call_arm_shell_exception_returns_none(self, monkeypatch):
-        monkeypatch.setattr(cli, "_config", lambda: self._SHELL_CFG)
-        monkeypatch.setattr(cli, "_write_audit", lambda x: None)
+        _mock_cfg = mock.Mock()
+        _mock_cfg.data = self._SHELL_CFG
+        monkeypatch.setattr(runtime, "config", _mock_cfg)
+        monkeypatch.setattr(kage_privacy, "_write_audit", lambda x: None)
         def raise_fnf(*a, **kw): raise FileNotFoundError()
         monkeypatch.setattr(cli.subprocess, "run", raise_fnf)
         result = asyncio.run(cli._call_arm("calendar", "whats on my calendar", "personal"))
         assert result is None
 
     def test_call_arm_shell_empty_stdout_returns_none(self, monkeypatch):
-        monkeypatch.setattr(cli, "_config", lambda: self._SHELL_CFG)
-        monkeypatch.setattr(cli, "_write_audit", lambda x: None)
+        _mock_cfg = mock.Mock()
+        _mock_cfg.data = self._SHELL_CFG
+        monkeypatch.setattr(runtime, "config", _mock_cfg)
+        monkeypatch.setattr(kage_privacy, "_write_audit", lambda x: None)
         mock_proc = mock.Mock()
         mock_proc.stdout = "  "
         mock_proc.returncode = 0
@@ -4687,7 +4525,9 @@ class TestArmShellTransport:
         assert result is None
 
     def test_check_arm_health_shell_returncode_zero(self, monkeypatch):
-        monkeypatch.setattr(cli, "_config", lambda: self._SHELL_CFG)
+        _mock_cfg = mock.Mock()
+        _mock_cfg.data = self._SHELL_CFG
+        monkeypatch.setattr(runtime, "config", _mock_cfg)
         mock_proc = mock.Mock()
         mock_proc.returncode = 0
         monkeypatch.setattr(cli.subprocess, "run", lambda *a, **kw: mock_proc)
@@ -4695,9 +4535,129 @@ class TestArmShellTransport:
         assert result is True
 
     def test_check_arm_health_shell_nonzero_returncode(self, monkeypatch):
-        monkeypatch.setattr(cli, "_config", lambda: self._SHELL_CFG)
+        _mock_cfg = mock.Mock()
+        _mock_cfg.data = self._SHELL_CFG
+        monkeypatch.setattr(runtime, "config", _mock_cfg)
         mock_proc = mock.Mock()
         mock_proc.returncode = 1
         monkeypatch.setattr(cli.subprocess, "run", lambda *a, **kw: mock_proc)
         result = asyncio.run(cli._check_arm_health("calendar"))
         assert result is False
+
+
+# ── Egress golden tests (Slice 1g) ──────────────────────────────────────────
+# Invariant: withheld note content must NEVER appear in runtime.cloud.complete() payloads.
+# RecordingCloud replaces the live seam; all_text() concatenates every complete() call.
+
+def test_egress_golden_clean_note_reaches_cloud(monkeypatch, tmp_path):
+    """Positive control: clean note content reaches the cloud seam."""
+    _save_home(monkeypatch, tmp_path)
+    note_id = cli._save("safe content about databases", "proj", embed=False)
+    row = (note_id, "proj", "2026-01-01T00:00:00+00:00", f"memory/{note_id}.md", "snip", None, None, None)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [row])
+    monkeypatch.setattr(cli, "_config", lambda: {"require_approval": False, "cloud_provider": "claude"})
+    monkeypatch.setattr(cli, "_detect_arms", lambda *a, **kw: [])
+    rec = RecordingCloud()
+    monkeypatch.setattr(runtime, "cloud", rec)
+    CliRunner().invoke(cli.app, ["ask", "--cloud", "what do you know?"])
+    assert rec.calls, "RecordingCloud should have been called"
+    assert "safe content about databases" in rec.all_text()
+
+
+def test_egress_golden_local_only_withheld(monkeypatch, tmp_path):
+    """local_only=True note must never reach the cloud sink."""
+    _save_home(monkeypatch, tmp_path)
+    clean_id = cli._save("safe content about databases", "proj", embed=False)
+    secret_id = cli._save("SECRET local banking PIN 9999", "proj", embed=False, local_only=True)
+    clean_row = (clean_id, "proj", "2026-01-01T00:00:00+00:00", f"memory/{clean_id}.md", "snip", None, None, None)
+    secret_row = (secret_id, "proj", "2026-01-01T00:00:00+00:00", f"memory/{secret_id}.md", "snip", None, None, None)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [clean_row, secret_row])
+    monkeypatch.setattr(cli, "_config", lambda: {"require_approval": False, "cloud_provider": "claude"})
+    monkeypatch.setattr(cli, "_detect_arms", lambda *a, **kw: [])
+    rec = RecordingCloud()
+    monkeypatch.setattr(runtime, "cloud", rec)
+    CliRunner().invoke(cli.app, ["ask", "--cloud", "what do you know?"])
+    assert rec.calls, "cloud should have been called (clean note still goes through)"
+    assert "safe content about databases" in rec.all_text(), "clean note must reach cloud"
+    assert "SECRET local banking PIN 9999" not in rec.all_text(), "local_only content must be withheld"
+
+
+def test_egress_golden_pii_withheld(monkeypatch, tmp_path):
+    """Note containing PII (UPI ID) must never reach the cloud sink."""
+    _save_home(monkeypatch, tmp_path)
+    clean_id = cli._save("safe content about databases", "proj", embed=False)
+    pii_id = cli._save("transfer to 9876543210@ybl for payment", "proj", embed=False)
+    clean_row = (clean_id, "proj", "2026-01-01T00:00:00+00:00", f"memory/{clean_id}.md", "snip", None, None, None)
+    pii_row = (pii_id, "proj", "2026-01-01T00:00:00+00:00", f"memory/{pii_id}.md", "snip", None, None, None)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [clean_row, pii_row])
+    monkeypatch.setattr(cli, "_config", lambda: {"require_approval": False, "cloud_provider": "claude"})
+    monkeypatch.setattr(cli, "_detect_arms", lambda *a, **kw: [])
+    rec = RecordingCloud()
+    monkeypatch.setattr(runtime, "cloud", rec)
+    CliRunner().invoke(cli.app, ["ask", "--cloud", "what do you know?"])
+    assert rec.calls
+    assert "safe content about databases" in rec.all_text()
+    assert "9876543210@ybl" not in rec.all_text(), "PII must be withheld from cloud"
+
+
+def test_egress_golden_all_withheld_no_cloud_call(monkeypatch, tmp_path):
+    """When ALL notes are withheld, runtime.cloud.complete must never be called."""
+    _save_home(monkeypatch, tmp_path)
+    secret_id = cli._save("SECRET local banking PIN 9999", "proj", embed=False, local_only=True)
+    secret_row = (secret_id, "proj", "2026-01-01T00:00:00+00:00", f"memory/{secret_id}.md", "snip", None, None, None)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [secret_row])
+    monkeypatch.setattr(cli, "_config", lambda: {"require_approval": False, "cloud_provider": "claude"})
+    monkeypatch.setattr(cli, "_detect_arms", lambda *a, **kw: [])
+    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: {"response": "ollama fallback"})
+    rec = RecordingCloud()
+    monkeypatch.setattr(runtime, "cloud", rec)
+    CliRunner().invoke(cli.app, ["ask", "--cloud", "what do you know?"])
+    assert not rec.calls, "cloud must NOT be called when all notes are withheld"
+
+
+def test_egress_golden_identity_wall_withheld(monkeypatch, tmp_path):
+    """Note owned by 'work' identity must not reach cloud when querying as 'personal'."""
+    _save_home(monkeypatch, tmp_path)
+    clean_id = cli._save("safe content about databases", "proj", embed=False)
+    work_id = cli._save("WORK SECRET confidential memo", "proj", embed=False, identities=["work"])
+    clean_row = (clean_id, "proj", "2026-01-01T00:00:00+00:00", f"memory/{clean_id}.md", "snip", None, None, None)
+    work_row = (work_id, "proj", "2026-01-01T00:00:00+00:00", f"memory/{work_id}.md", "snip", None, None, None)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [clean_row, work_row])
+    monkeypatch.setattr(cli, "_config", lambda: {"require_approval": False, "cloud_provider": "claude"})
+    monkeypatch.setattr(cli, "_detect_arms", lambda *a, **kw: [])
+    rec = RecordingCloud()
+    monkeypatch.setattr(runtime, "cloud", rec)
+    # ask with no --identity flag → _resolve_context falls back to "personal"
+    CliRunner().invoke(cli.app, ["ask", "--cloud", "what do you know?"])
+    assert rec.calls, "cloud should be called (clean personal note goes through)"
+    assert "safe content about databases" in rec.all_text()
+    assert "WORK SECRET confidential memo" not in rec.all_text(), "cross-identity note must be withheld"
+
+
+def test_egress_golden_local_only_project_withheld(monkeypatch, tmp_path):
+    """Note in a local_only_projects project must not reach cloud."""
+    _save_home(monkeypatch, tmp_path)
+    clean_id = cli._save("safe content about databases", "proj", embed=False)
+    secret_id = cli._save("classified project notes", "secret-proj", embed=False)
+    clean_row = (clean_id, "proj", "2026-01-01T00:00:00+00:00", f"memory/{clean_id}.md", "snip", None, None, None)
+    secret_row = (secret_id, "secret-proj", "2026-01-01T00:00:00+00:00", f"memory/{secret_id}.md", "snip", None, None, None)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [clean_row, secret_row])
+    monkeypatch.setattr(cli, "_config", lambda: {
+        "require_approval": False,
+        "cloud_provider": "claude",
+        "local_only_projects": ["secret-proj"],
+    })
+    monkeypatch.setattr(cli, "_detect_arms", lambda *a, **kw: [])
+    rec = RecordingCloud()
+    monkeypatch.setattr(runtime, "cloud", rec)
+    CliRunner().invoke(cli.app, ["ask", "--cloud", "what do you know?"])
+    assert rec.calls, "cloud should be called (clean note goes through)"
+    assert "safe content about databases" in rec.all_text()
+    assert "classified project notes" not in rec.all_text(), "local_only_projects note must be withheld"
+
+
+# ponytail: chat-path and arm-context golden tests deferred.
+# _gate_conversation (chat) and arm-injected context (arm_context branch) are
+# untested here. The gate functions themselves have unit tests; the missing coverage
+# is the full gate→sink chain for those two paths. Add when Slice 4 extracts
+# privacy.py and session.py — cleaner seam to mock at that point.

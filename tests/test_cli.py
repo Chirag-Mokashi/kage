@@ -25,9 +25,9 @@ from unittest import mock
 
 from kage import cli, cloud, runtime
 from kage import embed as _embed_module
-from kage.cloud import CloudClient
 from kage.config import Config
 from kage.store import Store
+from fakes import RecordingCloud, FakeEmbedder, FakeVectorIndex, _FakeChromaCollection  # noqa: F401
 
 
 def _patch_home(monkeypatch, home) -> None:
@@ -49,57 +49,6 @@ def _patch_home(monkeypatch, home) -> None:
 
 
 # ── Test fakes ──────────────────────────────────────────────────────────────
-
-class RecordingCloud(CloudClient):
-    """CloudClient drop-in that records complete() calls instead of hitting the network.
-
-    Swap into the seam: monkeypatch.setattr(runtime, "cloud", RecordingCloud())
-    Assert invariants: assert "sensitive" not in rec.all_text()
-    """
-
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
-
-    def complete(self, _provider_name: str, system: str, messages: list[dict], _cfg: dict) -> str:
-        self.calls.append({"system": system, "messages": list(messages)})
-        return "FAKE_ANSWER"
-
-    def all_text(self) -> str:
-        """Concatenate all text in all recorded complete() calls."""
-        parts: list[str] = []
-        for call in self.calls:
-            parts.append(call["system"])
-            for msg in call["messages"]:
-                parts.append(msg.get("content", ""))
-        return "\n".join(parts)
-
-
-class FakeEmbedder:
-    def __init__(self, vec=None, raises=None, status_val=None):
-        self._vec = vec if vec is not None else [0.1]
-        self._raises = raises
-        self._status = status_val
-
-    def embed(self, text: str, cfg: dict) -> list[float]:
-        if self._raises is not None:
-            raise self._raises
-        return list(self._vec)
-
-    def status(self, cfg: dict, model: str) -> tuple[bool, str]:
-        if self._status is not None:
-            return self._status
-        return True, "fake embedder up"
-
-
-class FakeVectorIndex:
-    def __init__(self, collection=None, raises=None):
-        self._coll = collection
-        self._raises = raises
-
-    def collection(self, chroma_dir, embed_model: str):
-        if self._raises is not None:
-            raise self._raises
-        return self._coll
 
 
 def run(args, home, stdin=None):

@@ -32,6 +32,8 @@ from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
 
 from kage.embed import OllamaUnavailable  # re-export; tests use cli.OllamaUnavailable
+from kage import runtime
+from kage.context import _read_active, _write_active, _resolve_context  # noqa: F401
 
 
 # CloudError + DEFAULT_PROVIDERS now live in kage.cloud (Cycle 12 Slice 1); re-export so
@@ -68,66 +70,6 @@ ARM_KEYWORDS: dict[str, list[str]] = {
                  "unread", "reply", "newsletter", "attachment"],
 }
 _arm_tool_cache: dict[str, list] = {}  # warm across calls in one process
-
-# v0.1 schema: memories + an FTS5 full-text index for `recall`.
-# Partition filtering (the wall) lives in SQL per #99; v0.1 = single project tag.
-# v0.4 adds: chunks table for semantic chunking (char offsets into memory files).
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS memories (
-    id           TEXT PRIMARY KEY,
-    content_path TEXT NOT NULL,
-    project      TEXT,
-    created_at   TEXT NOT NULL,
-    needs_embed  INTEGER NOT NULL DEFAULT 1,
-    local_only   INTEGER NOT NULL DEFAULT 0,
-    state        TEXT NOT NULL DEFAULT 'scoped' CHECK (state IN ('scoped','baseline','pending'))
-);
-CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(id UNINDEXED, body);
-CREATE TABLE IF NOT EXISTS chunks (
-    id            TEXT PRIMARY KEY,
-    note_id       TEXT NOT NULL,
-    section_title TEXT NOT NULL DEFAULT '',
-    char_start    INTEGER NOT NULL,
-    char_end      INTEGER NOT NULL,
-    needs_embed   INTEGER NOT NULL DEFAULT 1
-);
-CREATE TABLE IF NOT EXISTS memory_projects (
-    mem_id   TEXT NOT NULL,
-    project  TEXT NOT NULL,
-    PRIMARY KEY (mem_id, project)
-);
-CREATE TABLE IF NOT EXISTS memory_identities (
-    mem_id   TEXT NOT NULL,
-    identity TEXT NOT NULL,
-    PRIMARY KEY (mem_id, identity)
-);
-CREATE INDEX IF NOT EXISTS idx_mem_projects_project    ON memory_projects(project);
-CREATE INDEX IF NOT EXISTS idx_mem_identities_identity ON memory_identities(identity);
-CREATE TABLE IF NOT EXISTS sessions (
-    session_id  TEXT PRIMARY KEY,
-    created_at  TEXT NOT NULL,
-    identity    TEXT NOT NULL,
-    project     TEXT,
-    destination TEXT NOT NULL,
-    deleted     INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS session_turns (
-    session_id  TEXT NOT NULL,
-    idx         INTEGER NOT NULL,
-    parent_idx  INTEGER,
-    role        TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
-    content     TEXT NOT NULL,
-    note_ids    TEXT NOT NULL DEFAULT '[]',
-    destination TEXT NOT NULL,
-    model       TEXT,
-    reason      TEXT,
-    tokens      INTEGER,
-    ts          TEXT NOT NULL,
-    deleted     INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (session_id, idx),
-    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
-);
-"""
 
 
 def _disp(p: Path) -> str:
@@ -549,8 +491,6 @@ def _post_json(url: str, payload: dict, headers: dict | None = None, timeout: in
 # Cloud dispatch lives in kage.cloud.CloudClient (Cycle 12 Slice 1). These call-time
 # forwarders route to runtime.cloud — the swappable egress sink (RecordingCloud in tests) —
 # while existing cli._call_cloud / cli._call_cloud_chat patches keep working unchanged.
-from kage import runtime  # noqa: E402
-from kage.context import _read_active, _write_active, _resolve_context  # noqa: F401,E402
 
 
 def _call_cloud(provider_name: str, system: str, user_msg: str, cfg: dict) -> str:

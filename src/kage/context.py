@@ -14,6 +14,7 @@ def _read_active() -> dict:
 
 def _write_active(state: dict) -> None:
     p = runtime.config.state_path
+    p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(state, indent=2) + "\n")
     os.replace(tmp, p)

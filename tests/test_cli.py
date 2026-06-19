@@ -940,6 +940,7 @@ def test_window_by_pieces_tracks_positions():
 
 def test_read_section_returns_correct_slice(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "KAGE_HOME", tmp_path)
+    monkeypatch.setattr(runtime, "config", Config(tmp_path))
     (tmp_path / "memory").mkdir()
     (tmp_path / "memory" / "note.md").write_text("This is the body of the note.")
     result = cli._read_section("memory/note.md", 5, 15)
@@ -948,6 +949,7 @@ def test_read_section_returns_correct_slice(monkeypatch, tmp_path):
 
 def test_read_section_with_frontmatter_file(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "KAGE_HOME", tmp_path)
+    monkeypatch.setattr(runtime, "config", Config(tmp_path))
     (tmp_path / "memory").mkdir()
     (tmp_path / "memory" / "note.md").write_text(
         "---\ntitle: Test Note\n---\nThis is the body of the note."
@@ -965,6 +967,7 @@ def test_read_section_returns_empty_on_missing_file(monkeypatch, tmp_path):
 
 def test_read_section_full_body_slice(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "KAGE_HOME", tmp_path)
+    monkeypatch.setattr(runtime, "config", Config(tmp_path))
     (tmp_path / "memory").mkdir()
     body = "This is the body of the note."
     (tmp_path / "memory" / "note.md").write_text(body)
@@ -1555,6 +1558,7 @@ def test_search_hybrid_snippet_for_vec_only_results(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli, "KAGE_HOME", h)
     monkeypatch.setattr(cli, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(runtime, "config", Config(h))
 
     md_path = h / "memory" / "note-A.md"
     md_path.write_text("---\nid: note-A\n---\n\nNeural networks and transformers for semantic search")
@@ -3724,7 +3728,7 @@ def test_list_flag_respects_identity_wall(monkeypatch, tmp_path):
 
 def test_disclosure_gate_stage1_blocks_cross_identity(monkeypatch, tmp_path):
     _save_home(monkeypatch, tmp_path)
-    monkeypatch.setattr(cli, "_allowed_note_ids", lambda identity, project: {"allowed-note"})
+    monkeypatch.setattr(runtime.store, "allowed_note_ids", lambda identity, project: {"allowed-note"})
     rows = [
         ("allowed-note", "p", "t", "path", "snip", None, None, None),
         ("blocked-note", "p", "t", "path", "snip", None, None, None),
@@ -4012,8 +4016,8 @@ class TestGateConversation:
 
     def test_provenance_allowed_note_safe(self, monkeypatch):
         turn = self.make_turn(0, "hello", note_ids=["note-x"])
-        monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: {"note-x"})
-        monkeypatch.setattr(cli, "_connect", lambda: self.FakeConn())
+        monkeypatch.setattr(runtime.store, "allowed_note_ids", lambda *a: {"note-x"})
+        monkeypatch.setattr(runtime.store, "connect", lambda: self.FakeConn())
         safe, withheld = cli._gate_conversation([turn], {}, "personal", None)
         assert safe == [turn] and withheld == []
 
@@ -4023,8 +4027,8 @@ class TestGateConversation:
             def fetchall(self): return [("note-lo", 1)]
             def close(self): pass
         turn = self.make_turn(0, "hello", note_ids=["note-lo"])
-        monkeypatch.setattr(cli, "_allowed_note_ids", lambda *a: {"note-lo"})
-        monkeypatch.setattr(cli, "_connect", lambda: LocalConn())
+        monkeypatch.setattr(runtime.store, "allowed_note_ids", lambda *a: {"note-lo"})
+        monkeypatch.setattr(runtime.store, "connect", lambda: LocalConn())
         safe, withheld = cli._gate_conversation([turn], {}, "personal", None)
         assert safe == []
         assert withheld[0]["reason"].startswith("provenance:local_only:")

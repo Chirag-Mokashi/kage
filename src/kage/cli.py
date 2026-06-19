@@ -212,27 +212,7 @@ def init() -> None:
         created.append(CONFIG_PATH)
 
     db_is_new = not DB_PATH.exists()
-    conn = _connect()
-    try:
-        conn.executescript(_SCHEMA)
-        conn.commit()
-        try:
-            conn.execute("ALTER TABLE memories ADD COLUMN needs_embed INTEGER NOT NULL DEFAULT 1")
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass  # column already exists in an existing DB
-        try:
-            conn.execute("ALTER TABLE memories ADD COLUMN local_only INTEGER NOT NULL DEFAULT 0")
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass
-        try:
-            conn.execute("ALTER TABLE memories ADD COLUMN state TEXT NOT NULL DEFAULT 'scoped'")
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass  # column already exists in an existing DB
-    finally:
-        conn.close()
+    runtime.store.init_schema()
     (created if db_is_new else existed).append(DB_PATH)
 
     for p in created:
@@ -255,9 +235,7 @@ def _require_init() -> None:
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+    return runtime.store.connect()
 
 
 def _session_create(identity: str, project: str | None, destination: str) -> str:
@@ -511,33 +489,7 @@ def _save(
 
 
 def _allowed_note_ids(identity: str, project: str | None) -> set[str]:
-    conn = _connect()
-    try:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT DISTINCT m.id
-            FROM memories m
-            JOIN memory_identities mi ON mi.mem_id = m.id
-            WHERE mi.identity = :identity
-              AND m.state != 'pending'
-              AND (
-                :project IS NULL
-                OR EXISTS (
-                    SELECT 1 FROM memory_projects mp
-                    WHERE mp.mem_id = m.id AND mp.project = :project
-                )
-                OR (
-                    m.state = 'baseline'
-                    AND NOT EXISTS (
-                        SELECT 1 FROM memory_projects mp2
-                        WHERE mp2.mem_id = m.id
-                    )
-                )
-              )
-        """, {"identity": identity, "project": project})
-        return {row[0] for row in cursor.fetchall()}
-    finally:
-        conn.close()
+    return runtime.store.allowed_note_ids(identity, project)
 
 
 def _search_fts(query: str, project: str | None, limit: int, any_terms: bool = False, identity: str = "personal"):
@@ -615,10 +567,7 @@ def _search(query: str, project: str | None, limit: int, any_terms: bool = False
 
 
 def _config() -> dict:
-    try:
-        return json.loads(CONFIG_PATH.read_text())
-    except (OSError, ValueError):
-        return {}
+    return runtime.config.data
 
 
 # _post_json lives in kage.http (Cycle 12 Slice 1). Call-time forwarder so in-cli

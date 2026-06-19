@@ -10,7 +10,6 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
-import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -18,15 +17,11 @@ import asyncio
 import urllib.error
 import urllib.parse
 import urllib.request
-from contextlib import asynccontextmanager
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import typer
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-from mcp.client.sse import sse_client
 
 from kage.embed import OllamaUnavailable  # re-export; tests use cli.OllamaUnavailable
 from kage import runtime
@@ -35,6 +30,7 @@ from kage import notes as _notes
 from kage import privacy as _privacy
 from kage import retrieval as _retrieval
 from kage import session as _session
+from kage import arms as _arms
 
 
 # CloudError + DEFAULT_PROVIDERS now live in kage.cloud (Cycle 12 Slice 1); re-export so
@@ -62,15 +58,13 @@ DB_PATH = INDEX_DIR / "kage.db"            # 5B: derived SQLite index (#71)
 CONFIG_PATH = KAGE_HOME / "config.json"
 CHROMA_DIR  = KAGE_HOME / "chroma"
 
-# ── Arm routing ───────────────────────────────────────────────────────────
-# Arm names in config.json must match these keys exactly to trigger keyword routing.
-ARM_KEYWORDS: dict[str, list[str]] = {
-    "calendar": ["calendar", "schedule", "meeting", "event",
-                 "appointment", "today", "tomorrow", "this week"],
-    "gmail":    ["email", "mail", "inbox", "thread", "draft",
-                 "unread", "reply", "newsletter", "attachment"],
-}
-_arm_tool_cache: dict[str, list] = {}  # warm across calls in one process
+# ── Arm routing forwarders ────────────────────────────────────────────────
+ARM_KEYWORDS: dict[str, list[str]] = _arms.ARM_KEYWORDS
+_arm_tool_cache: dict[str, list] = _arms._arm_tool_cache
+
+async def _call_arm(*a, **kw): return await _arms._call_arm(*a, **kw)
+def _detect_arms(*a, **kw): return _arms._detect_arms(*a, **kw)
+async def _check_arm_health(*a, **kw): return await _arms._check_arm_health(*a, **kw)
 
 
 def _disp(p: Path) -> str:
@@ -877,195 +871,7 @@ def recall(
         typer.echo(f"    {created}   {_disp(KAGE_HOME / path)}   [{mem_id}]\n")
 
 
-# ── Arm helpers (Cycle 11) ────────────────────────────────────────────────
-
-# ── DORMANT (Cycle 11) — do not delete ──────────────────────────────────────
-# Google OAuth + remote SSE arm transport (this token helper, the `sse` branch
-# in _connect_arm, and arm_auth below). Kept importable & test-covered, NOT
-# removed: Workspace Developer Preview rejects Gmail-domain accounts, so the SSE
-# arms (Calendar/Gmail) never complete a live call. The live calendar arm uses
-# the `shell` transport (icalbuddy) and needs none of this.
-# FLIPS LIVE when: a valid google_oauth.refresh_token exists (via `kage arm auth`)
-# AND an arm is enabled with transport "sse". Restoring OAuth from scratch later
-# is the expensive path — that's why it stays.
-async def _get_google_token() -> str:
-    """Exchange Google OAuth refresh token for a short-lived access token."""
-    cfg = _config()
-    oauth = cfg.get("google_oauth", {})
-    client_id = oauth.get("client_id", "")
-    client_secret = oauth.get("client_secret", "")
-    refresh_token = oauth.get("refresh_token", "")
-    if not (client_id and client_secret and refresh_token):
-        raise RuntimeError("google_oauth credentials missing — run: kage arm auth")
-    payload = {
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "refresh_token": refresh_token,
-        "grant_type": "refresh_token",
-    }
-    data = urllib.parse.urlencode(payload).encode()
-    req = urllib.request.Request(
-        "https://oauth2.googleapis.com/token",
-        data=data,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read())["access_token"]
-
-
-@asynccontextmanager
-async def _connect_arm(arm_name: str):
-    """Yield (read, write) streams for the named arm (sse or stdio transport)."""
-    arm = _config().get("arms", {}).get(arm_name, {})
-    transport = arm.get("transport", "stdio")
-    if transport == "sse":
-        # DORMANT (Cycle 11) — see _get_google_token banner. Inert until a refresh_token exists.
-        token = await _get_google_token()
-        async with sse_client(
-            url=arm["mcp_url"],
-            headers={"Authorization": f"Bearer {token}"},
-        ) as streams:
-            yield streams
-    else:
-        server_params = StdioServerParameters(
-            command=arm["mcp_command"],
-            args=arm.get("mcp_args", []),
-        )
-        async with stdio_client(server_params) as streams:
-            yield streams
-
-
-def _serialize_arm_result(result) -> str | None:
-    """Extract text from a CallToolResult. Returns None if error or empty."""
-    if getattr(result, "isError", False):
-        return None
-    texts = [block.text for block in result.content if hasattr(block, "text")]
-    return "\n".join(texts) if texts else None
-
-
-def _select_tool(arm_name: str, question: str, tools: list) -> tuple[str, dict]:
-    """Pick the best tool from the arm's tool list and build params."""
-    preferred = {"calendar": "list_events", "gmail": "search_threads"}
-    pref = preferred.get(arm_name)
-    for t in tools:
-        if t.name == pref:
-            return t.name, {"query": question}
-    if tools:
-        return tools[0].name, {"query": question}
-    raise RuntimeError(f"Arm {arm_name!r} has no tools")
-
-
-async def _call_arm(arm_name: str, question: str, identity: str, timeout: float = 30.0) -> str | None:
-    """Call one arm. Returns serialized text or None on any failure (graceful)."""
-    ts = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
-    arm = _config().get("arms", {}).get(arm_name, {})
-    if arm.get("transport") == "shell":
-        cmd = arm.get("command", "")
-        if not cmd:
-            _write_audit({
-                "type": "arm_call",
-                "arm": arm_name,
-                "tool": "shell",
-                "identity": identity,
-                "ts": ts,
-                "success": False,
-            })
-            return None
-        try:
-            proc = subprocess.run(shlex.split(cmd), capture_output=True, text=True, timeout=timeout)
-            data = proc.stdout.strip() or None
-            _write_audit({
-                "type": "arm_call",
-                "arm": arm_name,
-                "tool": "shell",
-                "identity": identity,
-                "ts": ts,
-                "success": bool(data),
-            })
-            return data
-        except Exception:
-            _write_audit({
-                "type": "arm_call",
-                "arm": arm_name,
-                "tool": "shell",
-                "identity": identity,
-                "ts": ts,
-                "success": False,
-            })
-            return None
-    try:
-        async with asyncio.timeout(timeout):
-            async with _connect_arm(arm_name) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    if arm_name not in _arm_tool_cache:
-                        tools_result = await session.list_tools()
-                        _arm_tool_cache[arm_name] = tools_result.tools
-                    tool_name, params = _select_tool(
-                        arm_name, question, _arm_tool_cache[arm_name]
-                    )
-                    result = await session.call_tool(tool_name, params)
-                    data = _serialize_arm_result(result)
-                    _write_audit({
-                        "type": "arm_call",
-                        "arm": arm_name,
-                        "tool": tool_name,
-                        "identity": identity,
-                        "ts": ts,
-                        "success": data is not None,
-                    })
-                    return data
-    except Exception:
-        _write_audit({
-            "type": "arm_call",
-            "arm": arm_name,
-            "tool": "unknown",
-            "identity": identity,
-            "ts": ts,
-            "success": False,
-        })
-        return None
-
-
-def _detect_arms(question: str, identity: str) -> list[str]:
-    """Return list of arm names to call (all matching in config order)."""
-    arms = _config().get("arms", {})
-    q = question.lower()
-    return [
-        name for name, arm in arms.items()
-        if arm.get("enabled")
-        and isinstance(arm.get("identity"), str)
-        and arm["identity"] == identity
-        and arm.get("permission") == "read"
-        and any(kw in q for kw in ARM_KEYWORDS.get(name, []))
-    ]
-
-
-async def _check_arm_health(arm_name: str) -> bool:
-    """Return True if the arm is reachable (shell: exit 0; MCP: initializes)."""
-    arm = _config().get("arms", {}).get(arm_name, {})
-    if arm.get("transport") == "shell":
-        cmd = arm.get("command", "")
-        if not cmd:
-            return False
-        try:
-            proc = subprocess.run(shlex.split(cmd), capture_output=True, text=True, timeout=10.0)
-            return proc.returncode == 0
-        except Exception:
-            return False
-    try:
-        async with asyncio.timeout(10.0):
-            async with _connect_arm(arm_name) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    await session.list_tools()
-        return True
-    except Exception:
-        return False
-
-
-# DORMANT (Cycle 11) — see _get_google_token banner. Inert until a refresh_token exists.
+# DORMANT (Cycle 11) — see arms._get_google_token banner. Inert until a refresh_token exists.
 @_arm_app.command("auth")
 def arm_auth() -> None:
     """One-time Google OAuth consent flow — stores refresh token in config."""

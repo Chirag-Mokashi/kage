@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import urllib.error
+from collections.abc import Callable
 
 from kage.http import _post_json
 
@@ -31,6 +32,64 @@ DEFAULT_PROVIDERS: dict[str, dict] = {
 }
 
 
+def _dispatch_claude(pcfg: dict, key: str, system: str, messages: list[dict]) -> str:
+    out = _post_json(
+        "https://api.anthropic.com/v1/messages",
+        {"model": pcfg.get("model", ""), "max_tokens": 1024, "system": system, "messages": messages},
+        headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
+    )
+    return out["content"][0]["text"].strip()
+
+
+def _dispatch_openai_compat(pcfg: dict, key: str, system: str, messages: list[dict]) -> str:
+    base = pcfg.get("base_url", "https://api.openai.com")
+    path = pcfg.get("chat_path", "/v1/chat/completions")
+    out = _post_json(
+        f"{base}{path}",
+        {"model": pcfg.get("model", ""), "max_tokens": 1024,
+         "messages": [{"role": "system", "content": system}] + messages},
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    return out["choices"][0]["message"]["content"].strip()
+
+
+def _dispatch_gemini(pcfg: dict, key: str, system: str, messages: list[dict]) -> str:
+    model = pcfg.get("model", "")
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta"
+        f"/models/{model}:generateContent?key={key}"
+    )
+    contents = [
+        {"role": "model" if m["role"] == "assistant" else "user",
+         "parts": [{"text": m["content"]}]}
+        for m in messages
+    ]
+    out = _post_json(url, {
+        "systemInstruction": {"parts": [{"text": system}]},
+        "contents": contents,
+    })
+    candidates = out.get("candidates") or []
+    if not candidates or "content" not in candidates[0]:
+        raise CloudError("Gemini returned no content")
+    return candidates[0]["content"]["parts"][0]["text"].strip()
+
+
+_PROVIDER_REGISTRY: dict[str, Callable[[dict, str, str, list[dict]], str]] = {}
+
+
+def register_provider_type(
+    name: str,
+    dispatch_fn: Callable[[dict, str, str, list[dict]], str],
+) -> None:
+    _PROVIDER_REGISTRY[name] = dispatch_fn
+
+
+register_provider_type("claude", _dispatch_claude)
+register_provider_type("openai", _dispatch_openai_compat)
+register_provider_type("openai-compat", _dispatch_openai_compat)
+register_provider_type("gemini", _dispatch_gemini)
+
+
 class CloudClient:
     """The cloud egress seam. `complete()` is the single sink all cloud paths funnel through."""
 
@@ -48,44 +107,10 @@ class CloudClient:
         if not key:
             raise CloudError(f"{pcfg['api_key_env']} not set (provider: {provider_name})")
         ptype = pcfg.get("type", "openai-compat")
-        model = pcfg.get("model", "")
+        dispatch_fn = _PROVIDER_REGISTRY.get(ptype)
+        if dispatch_fn is None:
+            raise CloudError(f"Unknown provider type '{ptype}'")
         try:
-            if ptype == "claude":
-                out = _post_json(
-                    "https://api.anthropic.com/v1/messages",
-                    {"model": model, "max_tokens": 1024, "system": system, "messages": messages},
-                    headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
-                )
-                return out["content"][0]["text"].strip()
-            elif ptype in ("openai", "openai-compat"):
-                base = pcfg.get("base_url", "https://api.openai.com")
-                path = pcfg.get("chat_path", "/v1/chat/completions")
-                out = _post_json(
-                    f"{base}{path}",
-                    {"model": model, "max_tokens": 1024,
-                     "messages": [{"role": "system", "content": system}] + messages},
-                    headers={"Authorization": f"Bearer {key}"},
-                )
-                return out["choices"][0]["message"]["content"].strip()
-            elif ptype == "gemini":
-                url = (
-                    f"https://generativelanguage.googleapis.com/v1beta"
-                    f"/models/{model}:generateContent?key={key}"
-                )
-                contents = [
-                    {"role": "model" if m["role"] == "assistant" else "user",
-                     "parts": [{"text": m["content"]}]}
-                    for m in messages
-                ]
-                out = _post_json(url, {
-                    "systemInstruction": {"parts": [{"text": system}]},
-                    "contents": contents,
-                })
-                candidates = out.get("candidates") or []
-                if not candidates or "content" not in candidates[0]:
-                    raise CloudError(f"Gemini returned no content (provider: {provider_name})")
-                return candidates[0]["content"]["parts"][0]["text"].strip()
-            else:
-                raise CloudError(f"Unknown provider type '{ptype}'")
+            return dispatch_fn(pcfg, key, system, messages)
         except (urllib.error.URLError, KeyError, IndexError, TimeoutError) as exc:
             raise CloudError(f"Provider '{provider_name}' request failed: {exc}") from exc

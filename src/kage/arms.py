@@ -6,6 +6,7 @@ import shlex
 import subprocess
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 
 from mcp import ClientSession, StdioServerParameters
@@ -15,10 +16,7 @@ from mcp.client.sse import sse_client
 from kage import privacy as _privacy
 from kage import runtime
 
-ARM_KEYWORDS: dict[str, list[str]] = {
-    'calendar': ['calendar', 'schedule', 'meeting', 'event', 'appointment', 'today', 'tomorrow', 'this week'],
-    'gmail':    ['email', 'mail', 'inbox', 'thread', 'draft', 'unread', 'reply', 'newsletter', 'attachment'],
-}
+ARM_KEYWORDS: dict[str, list[str]] = {}
 _arm_tool_cache: dict[str, list] = {}
 
 
@@ -83,22 +81,28 @@ def _select_tool(arm_name: str, question: str, tools: list) -> tuple[str, dict]:
     raise RuntimeError(f'Arm {arm_name!r} has no tools')
 
 
-async def _call_arm(arm_name: str, question: str, identity: str, timeout: float = 30.0) -> str | None:
+async def _call_arm_shell(
+    arm_name: str, arm_cfg: dict, _question: str, identity: str, timeout: float,
+) -> str | None:
     ts = _dt.datetime.now().astimezone().isoformat(timespec='seconds')
-    arm = runtime.config.data.get('arms', {}).get(arm_name, {})
-    if arm.get('transport') == 'shell':
-        cmd = arm.get('command', '')
-        if not cmd:
-            _privacy._write_audit({'type': 'arm_call', 'arm': arm_name, 'tool': 'shell', 'identity': identity, 'ts': ts, 'success': False})
-            return None
-        try:
-            proc = subprocess.run(shlex.split(cmd), capture_output=True, text=True, timeout=timeout)
-            data = proc.stdout.strip() or None
-            _privacy._write_audit({'type': 'arm_call', 'arm': arm_name, 'tool': 'shell', 'identity': identity, 'ts': ts, 'success': bool(data)})
-            return data
-        except Exception:
-            _privacy._write_audit({'type': 'arm_call', 'arm': arm_name, 'tool': 'shell', 'identity': identity, 'ts': ts, 'success': False})
-            return None
+    cmd = arm_cfg.get('command', '')
+    if not cmd:
+        _privacy._write_audit({'type': 'arm_call', 'arm': arm_name, 'tool': 'shell', 'identity': identity, 'ts': ts, 'success': False})
+        return None
+    try:
+        proc = subprocess.run(shlex.split(cmd), capture_output=True, text=True, timeout=timeout)
+        data = proc.stdout.strip() or None
+        _privacy._write_audit({'type': 'arm_call', 'arm': arm_name, 'tool': 'shell', 'identity': identity, 'ts': ts, 'success': bool(data)})
+        return data
+    except Exception:
+        _privacy._write_audit({'type': 'arm_call', 'arm': arm_name, 'tool': 'shell', 'identity': identity, 'ts': ts, 'success': False})
+        return None
+
+
+async def _call_arm_mcp(
+    arm_name: str, _arm_cfg: dict, question: str, identity: str, timeout: float,
+) -> str | None:
+    ts = _dt.datetime.now().astimezone().isoformat(timespec='seconds')
     try:
         async with asyncio.timeout(timeout):
             async with _connect_arm(arm_name) as (read, write):
@@ -115,6 +119,34 @@ async def _call_arm(arm_name: str, question: str, identity: str, timeout: float 
     except Exception:
         _privacy._write_audit({'type': 'arm_call', 'arm': arm_name, 'tool': 'unknown', 'identity': identity, 'ts': ts, 'success': False})
         return None
+
+
+_TRANSPORT_HANDLERS: dict[str, Callable] = {}
+
+
+def register_arm(
+    name: str,
+    keywords: list[str],
+    transport: str,
+    handler: Callable,
+) -> None:
+    ARM_KEYWORDS[name] = keywords
+    _TRANSPORT_HANDLERS.setdefault(transport, handler)
+
+
+register_arm('calendar', ['calendar', 'schedule', 'meeting', 'event', 'appointment', 'today', 'tomorrow', 'this week'], 'shell', _call_arm_shell)
+register_arm('gmail', ['email', 'mail', 'inbox', 'thread', 'draft', 'unread', 'reply', 'newsletter', 'attachment'], 'shell', _call_arm_shell)
+_TRANSPORT_HANDLERS.setdefault('stdio', _call_arm_mcp)
+_TRANSPORT_HANDLERS.setdefault('sse', _call_arm_mcp)
+
+
+async def _call_arm(arm_name: str, question: str, identity: str, timeout: float = 30.0) -> str | None:
+    arm = runtime.config.data.get('arms', {}).get(arm_name, {})
+    transport = arm.get('transport', 'stdio')
+    handler = _TRANSPORT_HANDLERS.get(transport)
+    if handler is None:
+        return None
+    return await handler(arm_name, arm, question, identity, timeout)
 
 
 def _detect_arms(question: str, identity: str) -> list[str]:

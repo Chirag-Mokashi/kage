@@ -5,6 +5,8 @@ import sqlite3
 
 import pytest
 
+from kage import arms as _arms
+from kage import cloud as _cloud
 from kage.config import Config
 from kage.store import Store
 
@@ -84,3 +86,54 @@ def test_store_allowed_note_ids_wall(tmp_path):
     assert "m3" not in store.allowed_note_ids("personal", None)   # wrong identity
     assert "m4" not in store.allowed_note_ids("personal", None)   # pending never returned
     assert "m2" in store.allowed_note_ids("neu", "quantum")       # baseline visible cross-project
+
+
+# ── Slice 5: ProviderRegistry ────────────────────────────────────────────────
+
+def test_builtin_provider_types_registered():
+    for ptype in ("claude", "openai", "openai-compat", "gemini"):
+        assert ptype in _cloud._PROVIDER_REGISTRY
+
+
+def test_register_provider_type_custom(monkeypatch):
+    calls = []
+    def fake_dispatch(pcfg, key, system, messages):
+        calls.append((pcfg, key, system, messages))
+        return "fake-response"
+    monkeypatch.setitem(_cloud._PROVIDER_REGISTRY, "test-type", fake_dispatch)
+    result = fake_dispatch({"model": "m"}, "k", "sys", [{"role": "user", "content": "q"}])
+    assert result == "fake-response"
+    assert calls[0][1] == "k"
+
+
+# ── Slice 5: ArmRegistry ─────────────────────────────────────────────────────
+
+def test_builtin_arms_registered_keywords():
+    assert "calendar" in _arms.ARM_KEYWORDS
+    assert "gmail" in _arms.ARM_KEYWORDS
+    assert "calendar" in _arms.ARM_KEYWORDS["calendar"]
+    assert "email" in _arms.ARM_KEYWORDS["gmail"]
+
+
+def test_builtin_transport_handlers_registered():
+    for transport in ("shell", "stdio", "sse"):
+        assert transport in _arms._TRANSPORT_HANDLERS
+
+
+def test_register_arm_adds_keywords(monkeypatch):
+    monkeypatch.setitem(_arms.ARM_KEYWORDS, "test-arm", [])
+    _arms.ARM_KEYWORDS["test-arm"] = ["zyx-unique-kw"]
+    assert "zyx-unique-kw" in _arms.ARM_KEYWORDS["test-arm"]
+    del _arms.ARM_KEYWORDS["test-arm"]
+
+
+def test_register_arm_custom_transport():
+    calls = []
+    async def fake_handler(arm_name, _arm_cfg, _question, _identity, _timeout):
+        calls.append(arm_name)
+        return "fake"
+    _arms.register_arm("test-arm2", ["zyx2"], "test-transport", fake_handler)
+    assert _arms.ARM_KEYWORDS["test-arm2"] == ["zyx2"]
+    assert _arms._TRANSPORT_HANDLERS["test-transport"] is fake_handler
+    del _arms.ARM_KEYWORDS["test-arm2"]
+    del _arms._TRANSPORT_HANDLERS["test-transport"]

@@ -10,9 +10,6 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
-import re
-import secrets
-import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -20,23 +17,25 @@ import asyncio
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid
-from contextlib import asynccontextmanager
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import typer
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-from mcp.client.sse import sse_client
 
-class OllamaUnavailable(Exception):
-    """Raised when Ollama is unreachable or times out."""
+from kage.embed import OllamaUnavailable  # re-export; tests use cli.OllamaUnavailable
+from kage import runtime
+from kage.context import _read_active, _write_active, _resolve_context  # noqa: F401
+from kage import notes as _notes
+from kage import privacy as _privacy
+from kage import retrieval as _retrieval
+from kage import session as _session
+from kage import arms as _arms
 
 
-class CloudError(Exception):
-    """Raised when a cloud provider call fails."""
+# CloudError + DEFAULT_PROVIDERS now live in kage.cloud (Cycle 12 Slice 1); re-export so
+# cli.CloudError / cli.DEFAULT_PROVIDERS stay the public/test surface.
+from kage.cloud import CloudError, DEFAULT_PROVIDERS  # noqa: E402,F401
 
 
 app = typer.Typer(
@@ -58,77 +57,11 @@ INDEX_DIR = KAGE_HOME / "indexes"
 DB_PATH = INDEX_DIR / "kage.db"            # 5B: derived SQLite index (#71)
 CONFIG_PATH = KAGE_HOME / "config.json"
 CHROMA_DIR  = KAGE_HOME / "chroma"
-STATE_PATH  = KAGE_HOME / "state.json"
 
-# ── Arm routing ───────────────────────────────────────────────────────────
-# Arm names in config.json must match these keys exactly to trigger keyword routing.
-ARM_KEYWORDS: dict[str, list[str]] = {
-    "calendar": ["calendar", "schedule", "meeting", "event",
-                 "appointment", "today", "tomorrow", "this week"],
-    "gmail":    ["email", "mail", "inbox", "thread", "draft",
-                 "unread", "reply", "newsletter", "attachment"],
-}
-_arm_tool_cache: dict[str, list] = {}  # warm across calls in one process
-
-# v0.1 schema: memories + an FTS5 full-text index for `recall`.
-# Partition filtering (the wall) lives in SQL per #99; v0.1 = single project tag.
-# v0.4 adds: chunks table for semantic chunking (char offsets into memory files).
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS memories (
-    id           TEXT PRIMARY KEY,
-    content_path TEXT NOT NULL,
-    project      TEXT,
-    created_at   TEXT NOT NULL,
-    needs_embed  INTEGER NOT NULL DEFAULT 1,
-    local_only   INTEGER NOT NULL DEFAULT 0,
-    state        TEXT NOT NULL DEFAULT 'scoped' CHECK (state IN ('scoped','baseline','pending'))
-);
-CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(id UNINDEXED, body);
-CREATE TABLE IF NOT EXISTS chunks (
-    id            TEXT PRIMARY KEY,
-    note_id       TEXT NOT NULL,
-    section_title TEXT NOT NULL DEFAULT '',
-    char_start    INTEGER NOT NULL,
-    char_end      INTEGER NOT NULL,
-    needs_embed   INTEGER NOT NULL DEFAULT 1
-);
-CREATE TABLE IF NOT EXISTS memory_projects (
-    mem_id   TEXT NOT NULL,
-    project  TEXT NOT NULL,
-    PRIMARY KEY (mem_id, project)
-);
-CREATE TABLE IF NOT EXISTS memory_identities (
-    mem_id   TEXT NOT NULL,
-    identity TEXT NOT NULL,
-    PRIMARY KEY (mem_id, identity)
-);
-CREATE INDEX IF NOT EXISTS idx_mem_projects_project    ON memory_projects(project);
-CREATE INDEX IF NOT EXISTS idx_mem_identities_identity ON memory_identities(identity);
-CREATE TABLE IF NOT EXISTS sessions (
-    session_id  TEXT PRIMARY KEY,
-    created_at  TEXT NOT NULL,
-    identity    TEXT NOT NULL,
-    project     TEXT,
-    destination TEXT NOT NULL,
-    deleted     INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS session_turns (
-    session_id  TEXT NOT NULL,
-    idx         INTEGER NOT NULL,
-    parent_idx  INTEGER,
-    role        TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
-    content     TEXT NOT NULL,
-    note_ids    TEXT NOT NULL DEFAULT '[]',
-    destination TEXT NOT NULL,
-    model       TEXT,
-    reason      TEXT,
-    tokens      INTEGER,
-    ts          TEXT NOT NULL,
-    deleted     INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (session_id, idx),
-    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
-);
-"""
+# ── Arm routing forwarders ────────────────────────────────────────────────
+async def _call_arm(*a, **kw): return await _arms._call_arm(*a, **kw)
+def _detect_arms(*a, **kw): return _arms._detect_arms(*a, **kw)
+async def _check_arm_health(*a, **kw): return await _arms._check_arm_health(*a, **kw)
 
 
 def _disp(p: Path) -> str:
@@ -138,38 +71,6 @@ def _disp(p: Path) -> str:
     except ValueError:
         return str(p)
 
-
-def _read_active() -> dict:
-    try:
-        return json.loads(STATE_PATH.read_text())
-    except (OSError, ValueError):
-        return {}
-
-
-def _write_active(state: dict) -> None:
-    tmp = STATE_PATH.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state, indent=2) + "\n")
-    os.replace(tmp, STATE_PATH)
-
-
-def _resolve_context(
-    arg_identity: str | None,
-    arg_project: str | None,
-) -> tuple[str, str | None, str]:
-    active = _read_active()
-    if arg_identity:
-        identity = arg_identity
-        project = arg_project
-        source = "explicit"
-    elif active.get("identity"):
-        identity = active.get("identity")
-        project = arg_project if arg_project is not None else active.get("project")
-        source = "sticky"
-    else:
-        identity = "personal"
-        project = arg_project
-        source = "fallback"
-    return (identity, project, source)
 
 
 @app.callback()
@@ -212,27 +113,7 @@ def init() -> None:
         created.append(CONFIG_PATH)
 
     db_is_new = not DB_PATH.exists()
-    conn = _connect()
-    try:
-        conn.executescript(_SCHEMA)
-        conn.commit()
-        try:
-            conn.execute("ALTER TABLE memories ADD COLUMN needs_embed INTEGER NOT NULL DEFAULT 1")
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass  # column already exists in an existing DB
-        try:
-            conn.execute("ALTER TABLE memories ADD COLUMN local_only INTEGER NOT NULL DEFAULT 0")
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass
-        try:
-            conn.execute("ALTER TABLE memories ADD COLUMN state TEXT NOT NULL DEFAULT 'scoped'")
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass  # column already exists in an existing DB
-    finally:
-        conn.close()
+    runtime.store.init_schema()
     (created if db_is_new else existed).append(DB_PATH)
 
     for p in created:
@@ -255,279 +136,47 @@ def _require_init() -> None:
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+    return runtime.store.connect()
 
+
+_LEADING_PRONOUNS = _session._LEADING_PRONOUNS  # re-export
 
 def _session_create(identity: str, project: str | None, destination: str) -> str:
-    session_id = str(uuid.uuid4())
-    created_at = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
-    conn = None
-    try:
-        conn = _connect()
-        conn.execute(
-            "INSERT INTO sessions(session_id, created_at, identity, project, destination) VALUES(?,?,?,?,?)",
-            (session_id, created_at, identity, project, destination),
-        )
-        conn.commit()
-    finally:
-        if conn:
-            conn.close()
-    return session_id
-
+    return _session._session_create(identity, project, destination)
 
 def _session_load(session_id: str) -> dict | None:
-    conn = None
-    try:
-        conn = _connect()
-        row = conn.execute(
-            "SELECT session_id, created_at, identity, project, destination, deleted FROM sessions WHERE session_id=? AND deleted=0",
-            (session_id,),
-        ).fetchone()
-        if not row:
-            return None
-        return dict(zip(["session_id", "created_at", "identity", "project", "destination", "deleted"], row))
-    finally:
-        if conn:
-            conn.close()
+    return _session._session_load(session_id)
 
-
-def _session_append(
-    session_id: str,
-    role: str,
-    content: str,
-    note_ids: list[str],
-    destination: str,
-    model: str | None,
-    reason: str | None,
-    tokens: int | None,
-) -> int:
-    conn = None
-    try:
-        conn = _connect()
-        next_idx = conn.execute(
-            "SELECT COALESCE(MAX(idx), -1) FROM session_turns WHERE session_id=?",
-            (session_id,),
-        ).fetchone()[0] + 1
-        ts = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
-        conn.execute(
-            "INSERT INTO session_turns(session_id, idx, parent_idx, role, content, note_ids, destination, model, reason, tokens, ts) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (session_id, next_idx, None, role, content, json.dumps(note_ids), destination, model, reason, tokens, ts),
-        )
-        conn.commit()
-        return next_idx
-    finally:
-        if conn:
-            conn.close()
-
+def _session_append(session_id, role, content, note_ids, destination, model, reason, tokens):
+    return _session._session_append(session_id, role, content, note_ids, destination, model, reason, tokens)
 
 def _session_turns(session_id: str, token_budget: int = 4000) -> list[dict]:
-    conn = None
-    try:
-        conn = _connect()
-        rows = conn.execute(
-            "SELECT idx, role, content, note_ids, destination, model, reason, tokens, ts FROM session_turns WHERE session_id=? AND deleted=0 ORDER BY idx ASC",
-            (session_id,),
-        ).fetchall()
-        kept = []
-        est_total = 0
-        for row in reversed(rows):
-            est = len(row[2]) // 4
-            if est_total + est > token_budget:
-                break
-            est_total += est
-            kept.append(row)
-        kept.reverse()
-        return [
-            {
-                "idx": r[0], "role": r[1], "content": r[2],
-                "note_ids": json.loads(r[3]), "destination": r[4],
-                "model": r[5], "reason": r[6], "tokens": r[7], "ts": r[8],
-            }
-            for r in kept
-        ]
-    finally:
-        if conn:
-            conn.close()
-
-
-_LEADING_PRONOUNS = {
-    "it", "its", "they", "them", "their", "this", "that", "these", "those",
-    "he", "she", "we", "what", "which", "how", "why", "when", "where", "who",
-}
-
+    return _session._session_turns(session_id, token_budget)
 
 def _condense_query(history: list[dict], question: str) -> str:
-    words = question.split()
-    if len(words) > 10:
-        return question
-    first_word = re.sub(r"[^a-z]", "", words[0].lower())
-    if first_word not in _LEADING_PRONOUNS:
-        return question
-    has_proper_noun = any(
-        re.match(r"[A-Z][a-z]+", word) and word != words[0] and len(word) > 1
-        for word in words
-    )
-    if has_proper_noun:
-        return question
-    last_assistant = next((t for t in reversed(history) if t["role"] == "assistant"), None)
-    if last_assistant is None:
-        return question
-    context_snippet = last_assistant["content"][:120].rstrip()
-    return f"{context_snippet} — {question}"
-
+    return _session._condense_query(history, question)
 
 def _new_id() -> str:
-    """Sortable, unique id: 20260604T223719-a1b2c3."""
-    return f"{_dt.datetime.now():%Y%m%dT%H%M%S}-{secrets.token_hex(3)}"
+    return _session._new_id()
 
 
 def _read_body(rel_path: str) -> str:
-    """Read a memory's body from its markdown file (source of truth), minus frontmatter."""
-    text = (KAGE_HOME / rel_path).read_text()
-    if text.startswith("---"):
-        close = text.find("\n---", 3)
-        if close != -1:
-            text = text[close + 4 :]
-    return text.strip()
+    return _notes._read_body(rel_path)
 
 
-_CHUNK_TARGET  = 1500
-_CHUNK_MIN     = 100
-_CHUNK_OVERLAP = 150
-_RERANK_POOL   = 25
-_reranker_cache: list = [False, None]   # [loaded_flag, instance_or_None]
+# Chunking lives in kage.chunk (audit WI-4). Re-exported here so cli.* stays the
+# test/patch surface and in-module callers (_save, reindex) remain patchable.
+from kage.chunk import (  # noqa: E402,F401  (re-export shim — used via cli.* in tests)
+    _CHUNK_TARGET, _CHUNK_MIN, _CHUNK_OVERLAP,
+    _split_on_headers, _hard_windows, _window_by_pieces, _chunk_note,
+)
 
-
-def _split_on_headers(body: str) -> list[dict]:
-    """Split body on ## / ### headers; return sections with char offsets. No size filtering."""
-    chunks = []
-    lines = body.splitlines()
-    prev_header_pos = -1
-
-    for i, line in enumerate(lines):
-        if line.startswith("## ") or line.startswith("### "):
-            if prev_header_pos != -1:
-                char_start = sum(len(l) + 1 for l in lines[: prev_header_pos + 1])
-                char_end = min(sum(len(l) + 1 for l in lines[:i]), len(body))
-                if char_end - char_start >= 100:
-                    chunks.append({
-                        "title": lines[prev_header_pos].lstrip("#").strip(),
-                        "char_start": char_start,
-                        "char_end": char_end,
-                    })
-            prev_header_pos = i
-
-    if prev_header_pos != -1:
-        char_start = sum(len(l) + 1 for l in lines[: prev_header_pos + 1])
-        char_end = len(body)
-        if char_end - char_start >= 100:
-            chunks.append({
-                "title": lines[prev_header_pos].lstrip("#").strip(),
-                "char_start": char_start,
-                "char_end": char_end,
-            })
-
-    if not chunks:
-        return [{"title": "", "char_start": 0, "char_end": len(body)}]
-
-    return chunks
-
-
-def _hard_windows(text: str, base: int, title: str) -> list[dict]:
-    """Slice text into fixed-size windows of TARGET chars with OVERLAP."""
-    result = []
-    pos = 0
-    while pos < len(text):
-        end = min(pos + _CHUNK_TARGET, len(text))
-        if end - pos >= _CHUNK_MIN:
-            result.append({"title": title, "char_start": base + pos, "char_end": base + end})
-        pos += _CHUNK_TARGET - _CHUNK_OVERLAP
-    if not result:
-        result.append({"title": title, "char_start": base, "char_end": base + len(text)})
-    return result
-
-
-def _window_by_pieces(pieces: list[str], text: str, base: int, title: str) -> list[dict]:
-    """Group pieces (splits of text) into TARGET-sized windows with OVERLAP."""
-    positions: list[int] = []
-    cursor = 0
-    for piece in pieces:
-        pos = text.find(piece, cursor)
-        if pos == -1:
-            pos = cursor
-        positions.append(pos)
-        cursor = pos + len(piece)
-
-    result: list[dict] = []
-    i = 0
-    while i < len(pieces):
-        w_start = positions[i]
-        w_end = positions[i] + len(pieces[i])
-        j = i + 1
-        while j < len(pieces):
-            candidate_end = positions[j] + len(pieces[j])
-            if candidate_end - w_start > _CHUNK_TARGET:
-                break
-            w_end = candidate_end
-            j += 1
-        if w_end - w_start >= _CHUNK_MIN:
-            result.append({"title": title, "char_start": base + w_start, "char_end": base + w_end})
-        if j >= len(pieces):
-            break
-        overlap_target = w_end - _CHUNK_OVERLAP
-        next_i = j
-        for k in range(j - 1, i, -1):
-            if positions[k] <= overlap_target:
-                next_i = k + 1
-                break
-        i = max(next_i, i + 1)
-    return result
-
-
-def _chunk_note(body: str) -> list[dict]:
-    """Split a note body into retrieval chunks with char offsets into body.
-
-    Header sections kept as-is when <= TARGET. Oversized sections (and
-    headerless notes > TARGET) split recursively: paragraph -> sentence -> window.
-    """
-    sections = _split_on_headers(body)
-    result = []
-    for section in sections:
-        char_start = section["char_start"]
-        char_end = section["char_end"]
-        text = body[char_start:char_end]
-        if len(text) < _CHUNK_MIN:
-            continue
-        if len(text) <= _CHUNK_TARGET:
-            result.append(section)
-            continue
-        pieces = [p for p in re.split(r'\n\n+', text) if p]
-        if len(pieces) > 1:
-            windows = _window_by_pieces(pieces, text, char_start, section["title"])
-            if windows:
-                result.extend(windows)
-                continue
-        pieces = [p for p in re.split(r'(?<=[.!?]) +', text) if p]
-        if len(pieces) > 1:
-            windows = _window_by_pieces(pieces, text, char_start, section["title"])
-            if windows:
-                result.extend(windows)
-                continue
-        result.extend(_hard_windows(text, char_start, section["title"]))
-    if not result:
-        result.append({"title": "", "char_start": 0, "char_end": len(body)})
-    return result
+_RERANK_POOL: int = _retrieval._RERANK_POOL        # re-export (read-only alias)
+_reranker_cache: list = _retrieval._reranker_cache  # same list object — tests mutate [0]/[1] in-place
 
 
 def _read_section(content_path: str, char_start: int, char_end: int) -> str:
-    """Return the body slice [char_start:char_end] from a note; empty string on read error."""
-    try:
-        body = _read_body(content_path)
-        return body[char_start:char_end]
-    except OSError:
-        return ""
+    return _notes._read_section(content_path, char_start, char_end)
 
 
 def _save(
@@ -628,33 +277,7 @@ def _save(
 
 
 def _allowed_note_ids(identity: str, project: str | None) -> set[str]:
-    conn = _connect()
-    try:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT DISTINCT m.id
-            FROM memories m
-            JOIN memory_identities mi ON mi.mem_id = m.id
-            WHERE mi.identity = :identity
-              AND m.state != 'pending'
-              AND (
-                :project IS NULL
-                OR EXISTS (
-                    SELECT 1 FROM memory_projects mp
-                    WHERE mp.mem_id = m.id AND mp.project = :project
-                )
-                OR (
-                    m.state = 'baseline'
-                    AND NOT EXISTS (
-                        SELECT 1 FROM memory_projects mp2
-                        WHERE mp2.mem_id = m.id
-                    )
-                )
-              )
-        """, {"identity": identity, "project": project})
-        return {row[0] for row in cursor.fetchall()}
-    finally:
-        conn.close()
+    return runtime.store.allowed_note_ids(identity, project)
 
 
 def _search_fts(query: str, project: str | None, limit: int, any_terms: bool = False, identity: str = "personal"):
@@ -732,143 +355,31 @@ def _search(query: str, project: str | None, limit: int, any_terms: bool = False
 
 
 def _config() -> dict:
-    try:
-        return json.loads(CONFIG_PATH.read_text())
-    except (OSError, ValueError):
-        return {}
+    return runtime.config.data
+
+
+# _post_json lives in kage.http (Cycle 12 Slice 1). Call-time forwarder so in-cli
+# callers and the ~39 cli._post_json test patches keep working during transition.
+from kage import http as _http  # noqa: E402
 
 
 def _post_json(url: str, payload: dict, headers: dict | None = None, timeout: int = 120) -> dict:
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "User-Agent": "kage/0.5", **(headers or {})},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read())
+    return _http._post_json(url, payload, headers, timeout)
 
 
-DEFAULT_PROVIDERS: dict[str, dict] = {
-    "claude":     {"type": "claude",        "api_key_env": "ANTHROPIC_API_KEY",  "model": "claude-sonnet-4-6"},
-    "openai":     {"type": "openai",        "api_key_env": "OPENAI_API_KEY",     "model": "gpt-4o"},
-    "gemini":     {"type": "gemini",        "api_key_env": "GEMINI_API_KEY",     "model": "gemini-2.0-flash"},
-    "groq":       {"type": "openai-compat", "api_key_env": "GROQ_API_KEY",       "model": "llama-3.3-70b-versatile",
-                   "base_url": "https://api.groq.com/openai", "chat_path": "/v1/chat/completions"},
-    "perplexity": {"type": "openai-compat", "api_key_env": "PERPLEXITY_API_KEY", "model": "llama-3.1-sonar-large-128k-online",
-                   "base_url": "https://api.perplexity.ai",   "chat_path": "/chat/completions"},
-}
+# Cloud dispatch lives in kage.cloud.CloudClient (Cycle 12 Slice 1). These call-time
+# forwarders route to runtime.cloud — the swappable egress sink (RecordingCloud in tests) —
+# while existing cli._call_cloud / cli._call_cloud_chat patches keep working unchanged.
 
 
 def _call_cloud(provider_name: str, system: str, user_msg: str, cfg: dict) -> str:
-    """Dispatch to a named cloud provider. Raises CloudError on any failure."""
-    default_pcfg = DEFAULT_PROVIDERS.get(provider_name, {})
-    user_pcfg = cfg.get("providers", {}).get(provider_name, {})
-    if not default_pcfg and not user_pcfg:
-        raise CloudError(
-            f"Unknown provider '{provider_name}'. "
-            f"Add providers.{provider_name} to ~/.kage/config.json"
-        )
-    pcfg = {**default_pcfg, **user_pcfg}
-    key = os.environ.get(pcfg["api_key_env"], "")
-    if not key:
-        raise CloudError(f"{pcfg['api_key_env']} not set (provider: {provider_name})")
-    ptype = pcfg.get("type", "openai-compat")
-    model = pcfg.get("model", "")
-    try:
-        if ptype == "claude":
-            out = _post_json(
-                "https://api.anthropic.com/v1/messages",
-                {"model": model, "max_tokens": 1024, "system": system,
-                 "messages": [{"role": "user", "content": user_msg}]},
-                headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
-            )
-            return out["content"][0]["text"].strip()
-        elif ptype in ("openai", "openai-compat"):
-            base = pcfg.get("base_url", "https://api.openai.com")
-            path = pcfg.get("chat_path", "/v1/chat/completions")
-            out = _post_json(
-                f"{base}{path}",
-                {"model": model, "max_tokens": 1024,
-                 "messages": [{"role": "system", "content": system},
-                               {"role": "user", "content": user_msg}]},
-                headers={"Authorization": f"Bearer {key}"},
-            )
-            return out["choices"][0]["message"]["content"].strip()
-        elif ptype == "gemini":
-            url = (
-                f"https://generativelanguage.googleapis.com/v1beta"
-                f"/models/{model}:generateContent?key={key}"
-            )
-            out = _post_json(url, {
-                "systemInstruction": {"parts": [{"text": system}]},
-                "contents": [{"parts": [{"text": user_msg}]}],
-            })
-            candidates = out.get("candidates") or []
-            if not candidates or "content" not in candidates[0]:
-                raise CloudError(f"Gemini returned no content (provider: {provider_name})")
-            return candidates[0]["content"]["parts"][0]["text"].strip()
-        else:
-            raise CloudError(f"Unknown provider type '{ptype}'")
-    except (urllib.error.URLError, KeyError, IndexError, TimeoutError) as exc:
-        raise CloudError(f"Provider '{provider_name}' request failed: {exc}") from exc
+    """Single-message dispatch — thin wrapper over _call_cloud_chat."""
+    return _call_cloud_chat(provider_name, system, [{"role": "user", "content": user_msg}], cfg)
 
 
 def _call_cloud_chat(provider_name: str, system: str, messages: list[dict], cfg: dict) -> str:
-    """Multi-turn chat dispatch. messages = history + current user turn (no system message)."""
-    default_pcfg = DEFAULT_PROVIDERS.get(provider_name, {})
-    user_pcfg = cfg.get("providers", {}).get(provider_name, {})
-    if not default_pcfg and not user_pcfg:
-        raise CloudError(
-            f"Unknown provider '{provider_name}'. "
-            f"Add providers.{provider_name} to ~/.kage/config.json"
-        )
-    pcfg = {**default_pcfg, **user_pcfg}
-    key = os.environ.get(pcfg["api_key_env"], "")
-    if not key:
-        raise CloudError(f"{pcfg['api_key_env']} not set (provider: {provider_name})")
-    ptype = pcfg.get("type", "openai-compat")
-    model = pcfg.get("model", "")
-    try:
-        if ptype == "claude":
-            out = _post_json(
-                "https://api.anthropic.com/v1/messages",
-                {"model": model, "max_tokens": 1024, "system": system, "messages": messages},
-                headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
-            )
-            return out["content"][0]["text"].strip()
-        elif ptype in ("openai", "openai-compat"):
-            base = pcfg.get("base_url", "https://api.openai.com")
-            path = pcfg.get("chat_path", "/v1/chat/completions")
-            out = _post_json(
-                f"{base}{path}",
-                {"model": model, "max_tokens": 1024,
-                 "messages": [{"role": "system", "content": system}] + messages},
-                headers={"Authorization": f"Bearer {key}"},
-            )
-            return out["choices"][0]["message"]["content"].strip()
-        elif ptype == "gemini":
-            url = (
-                f"https://generativelanguage.googleapis.com/v1beta"
-                f"/models/{model}:generateContent?key={key}"
-            )
-            contents = [
-                {"role": "model" if m["role"] == "assistant" else "user",
-                 "parts": [{"text": m["content"]}]}
-                for m in messages
-            ]
-            out = _post_json(url, {
-                "systemInstruction": {"parts": [{"text": system}]},
-                "contents": contents,
-            })
-            candidates = out.get("candidates") or []
-            if not candidates or "content" not in candidates[0]:
-                raise CloudError(f"Gemini returned no content (provider: {provider_name})")
-            return candidates[0]["content"]["parts"][0]["text"].strip()
-        else:
-            raise CloudError(f"Unknown provider type '{ptype}'")
-    except (urllib.error.URLError, KeyError, IndexError, TimeoutError) as exc:
-        raise CloudError(f"Provider '{provider_name}' request failed: {exc}") from exc
+    """Multi-turn chat dispatch → the cloud egress sink (runtime.cloud.complete)."""
+    return runtime.cloud.complete(provider_name, system, messages, cfg)
 
 
 def _answer(
@@ -909,137 +420,20 @@ def _answer(
 
 # ── Privacy gate (Layer 3e) ────────────────────────────────────────────────
 
-_PII_PATTERNS: list[dict] = [
-    # INDIAN IDENTITY DOCUMENTS
-    {"name": "Aadhaar",          "pattern": r"\b\d{4}[\s-]\d{4}[\s-]\d{4}\b"},
-    {"name": "PAN card",         "pattern": r"\b[A-Z]{5}[0-9]{4}[A-Z]\b"},
-    {"name": "Passport (IN)",    "pattern": r"\b[A-Z][0-9]{7}\b"},
-    {"name": "Voter ID (IN)",    "pattern": r"\b[A-Z]{3}[0-9]{7}\b"},
-    {"name": "Driving licence",  "pattern": r"\b[A-Z]{2}[0-9]{2}[\s-]?[0-9]{4,11}\b"},
-    {"name": "GSTIN",            "pattern": r"\b[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]\b"},
-    {"name": "IFSC code",        "pattern": r"\b[A-Z]{4}0[A-Z0-9]{6}\b"},
-    {"name": "Vehicle reg (IN)", "pattern": r"\b[A-Z]{2}[\s-]?\d{2}[\s-]?[A-Z]{1,2}[\s-]?\d{4}\b"},
-    # CONTACT INFORMATION
-    {"name": "Email",            "pattern": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"},
-    {"name": "Phone (IN)",       "pattern": r"\b(\+91[\s-]?)?[6-9]\d{9}\b"},
-    {"name": "Phone (intl)",     "pattern": r"\+[1-9]\d{1,14}\b"},
-    {"name": "Indian PIN code",  "pattern": r"(?i)\bpin\s*(?:code)?\s*[:=]?\s*[1-9][0-9]{5}\b"},
-    # FINANCIAL
-    {"name": "Credit/debit card", "pattern": r"\b(?:\d{4}[\s-]?){3}\d{4}\b"},
-    {"name": "UPI ID",           "pattern": r"\b[a-zA-Z0-9._-]+@[a-zA-Z]+\b"},
-    {"name": "CVV",              "pattern": r"(?i)cvv\s*[:=]\s*\d{3,4}"},
-    # CREDENTIALS AND KEYS
-    {"name": "Password field",   "pattern": r"(?i)(password|passwd|pwd|secret)\s*[:=]\s*\S+"},
-    {"name": "OpenAI key",       "pattern": r"\bsk-[A-Za-z0-9]{20,}\b"},
-    {"name": "Google key",       "pattern": r"\bAIza[A-Za-z0-9_-]{35}\b"},
-    {"name": "GitHub PAT",       "pattern": r"\bghp_[A-Za-z0-9]{36}\b"},
-    {"name": "GitHub OAuth",     "pattern": r"\bgho_[A-Za-z0-9]{36}\b"},
-    {"name": "AWS access key",   "pattern": r"\bAKIA[0-9A-Z]{16}\b"},
-    {"name": "Bearer token",     "pattern": r"(?i)bearer\s+[A-Za-z0-9\-._~+/]+=*"},
-    {"name": "JWT token",        "pattern": r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"},
-    {"name": "SSH private key",  "pattern": r"-----BEGIN [A-Z ]+ PRIVATE KEY-----"},
-    {"name": ".env secret",      "pattern": r"(?i)\b(SECRET|TOKEN|KEY|PASS)\s*=\s*\S{8,}"},
-    # NETWORK AND SYSTEM
-    {"name": "IPv4 address",     "pattern": r"\b(?:\d{1,3}\.){3}\d{1,3}\b"},
-    {"name": "IPv6 address",     "pattern": r"\b([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b"},
-    {"name": "MAC address",      "pattern": r"([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}"},
-    # LOCATION
-    {"name": "GPS coordinates",  "pattern": r"-?\d{1,3}\.\d{4,},\s*-?\d{1,3}\.\d{4,}"},
-]
-
-
-def _pii_scan(text: str, extra_patterns: list[dict] | None = None) -> list[str]:
-    """Scan text for PII patterns; return list of matched pattern names (empty = clean)."""
-    hits = []
-    for entry in (_PII_PATTERNS + (extra_patterns or [])):
-        try:
-            if re.search(entry["pattern"], text):
-                hits.append(entry["name"])
-        except re.error:
-            pass  # skip malformed user-supplied patterns
-    return hits
+# PII detection table + scanner live in kage.pii (audit WI-4). Re-exported so
+# cli._PII_PATTERNS / cli._pii_scan stay the test surface (unit tests call them directly).
+from kage.pii import _PII_PATTERNS, _pii_scan  # noqa: F401
 
 
 def _write_audit(record: dict) -> None:
-    """Append one JSON record to the audit log. Best-effort — never raises."""
-    try:
-        with open(KAGE_HOME / "audit.jsonl", "a") as f:
-            f.write(json.dumps(record) + "\n")
-    except OSError:
-        pass
+    _privacy._write_audit(record)
 
 
 _session_approvals: dict[str, bool] = {}
 
 
 def _disclosure_gate(rows: list, cfg: dict, identity: str = "personal", project: str | None = None) -> tuple[list, list[dict]]:
-    """Filter rows before cloud dispatch. Returns (allowed_rows, withheld_list).
-
-    withheld_list entries: {"note_id": str, "reason": str, "pii_patterns": list[str]}
-    Per-provider trust tiers are deferred (v2).
-    """
-    if not rows:
-        return [], []
-
-    note_ids = [row[0] for row in rows]
-    local_only_projects: list[str] = cfg.get("local_only_projects", [])
-    extra_pii: list[dict] = cfg.get("pii_patterns", [])
-
-    # Stage 1: identity wall — second independent wall before cloud dispatch
-    identity_allowed = _allowed_note_ids(identity, project)
-
-    conn = _connect()
-    try:
-        placeholders = ",".join("?" * len(note_ids))
-        lo_map: dict[str, bool] = {
-            r[0]: bool(r[1])
-            for r in conn.execute(
-                f"SELECT id, local_only FROM memories WHERE id IN ({placeholders})",
-                note_ids,
-            ).fetchall()
-        }
-    finally:
-        conn.close()
-
-    allowed: list = []
-    withheld: list[dict] = []
-    for row in rows:
-        note_id: str = row[0]
-        project_val: str | None = row[1]
-
-        if note_id not in identity_allowed:
-            withheld.append({"note_id": note_id, "reason": f"identity_wall:{identity}", "pii_patterns": []})
-            continue
-
-        if lo_map.get(note_id, False):
-            withheld.append({"note_id": note_id, "reason": "local_only:flag", "pii_patterns": []})
-            continue
-
-        if project_val and project_val in local_only_projects:
-            withheld.append({
-                "note_id": note_id,
-                "reason": f"local_only:project:{project_val}",
-                "pii_patterns": [],
-            })
-            continue
-
-        path, char_start, char_end = row[3], row[6], row[7]
-        if char_start is not None and char_end is not None:
-            text = _read_section(path, char_start, char_end)
-        else:
-            try:
-                text = _read_body(path)
-            except OSError:
-                text = ""
-
-        pii_hits = _pii_scan(text, extra_pii)
-        if pii_hits:
-            withheld.append({"note_id": note_id, "reason": "pii_detected", "pii_patterns": pii_hits})
-            continue
-
-        allowed.append(row)
-
-    return allowed, withheld
+    return _privacy._disclosure_gate(rows, cfg, identity, project)
 
 
 def _gate_conversation(
@@ -1048,173 +442,33 @@ def _gate_conversation(
     identity: str,
     project: str | None,
 ) -> tuple[list[dict], list[dict]]:
-    """Filter session turns before cloud dispatch.
-
-    Checks per turn: (1) PII scan on content, (2) provenance — note_ids against identity wall + local_only.
-    Returns (safe_turns, withheld) where withheld entries = {turn_idx, reason, pii_patterns}.
-    Only call for cloud destinations; skip for ollama.
-    """
-    if not turns:
-        return [], []
-    extra_pii = cfg.get("pii_patterns", [])
-    identity_allowed = _allowed_note_ids(identity, project)
-    all_note_ids = list({nid for t in turns for nid in t["note_ids"]})
-    lo_map: dict[str, bool] = {}
-    if all_note_ids:
-        conn = _connect()
-        try:
-            placeholders = ",".join("?" * len(all_note_ids))
-            lo_map = {
-                r[0]: bool(r[1])
-                for r in conn.execute(
-                    f"SELECT id, local_only FROM memories WHERE id IN ({placeholders})",
-                    all_note_ids,
-                ).fetchall()
-            }
-        finally:
-            conn.close()
-    safe: list[dict] = []
-    withheld: list[dict] = []
-    for turn in turns:
-        pii_hits = _pii_scan(turn["content"], extra_pii)
-        if pii_hits:
-            withheld.append({"turn_idx": turn["idx"], "reason": "pii_in_content", "pii_patterns": pii_hits})
-            continue
-        blocked = False
-        for nid in turn["note_ids"]:
-            if nid not in identity_allowed:
-                withheld.append({"turn_idx": turn["idx"], "reason": f"provenance:identity_wall:{identity}", "pii_patterns": []})
-                blocked = True
-                break
-            if lo_map.get(nid, False):
-                withheld.append({"turn_idx": turn["idx"], "reason": f"provenance:local_only:{nid}", "pii_patterns": []})
-                blocked = True
-                break
-        if blocked:
-            continue
-        safe.append(turn)
-    return safe, withheld
+    return _privacy._gate_conversation(turns, cfg, identity, project)
 
 
-def _session_switch(
-    session_id: str,
-    new_destination: str,
-    cfg: dict,
-    identity: str,
-    project: str | None,
-) -> tuple[str, list[dict], list[dict]]:
-    """Switch a session to a new destination, enforcing the no-leak-on-switch invariant.
-
-    Re-gates ALL turns against the new destination. Returns (new_destination, safe_turns, withheld)
-    so the caller knows exactly which history is safe to send to the new provider.
-    """
-    sess = _session_load(session_id)
-    if sess is None:
-        raise ValueError(f"Session {session_id!r} not found")
-    conn = _connect()
-    try:
-        conn.execute("UPDATE sessions SET destination=? WHERE session_id=?", (new_destination, session_id))
-        conn.commit()
-    finally:
-        conn.close()
-    turns = _session_turns(session_id, token_budget=10_000_000)
-    safe_turns, withheld = _gate_conversation(turns, cfg, identity, project)
-    return (new_destination, safe_turns, withheld)
+def _session_switch(session_id, new_destination, cfg, identity, project):
+    return _session._session_switch(session_id, new_destination, cfg, identity, project)
 
 
 def _rrf_fuse(fts_rows: list, vec_rows: list, k: int = 60) -> list:
-    """Merge FTS5 and vector candidates via Reciprocal Rank Fusion; caller slices to limit."""
-    fts_n, vec_n = len(fts_rows), len(vec_rows)
-    fts_rank = {row[0]: i for i, row in enumerate(fts_rows)}
-    vec_rank = {row[0]: i for i, row in enumerate(vec_rows)}
-    rows_by_id = {row[0]: row for row in (*vec_rows, *fts_rows)}  # fts last → fts row wins for shared IDs
-
-    scores: dict[str, float] = {}
-    for mem_id in rows_by_id:
-        r_fts = fts_rank.get(mem_id, fts_n)   # missing → large rank penalty
-        r_vec = vec_rank.get(mem_id, vec_n)
-        scores[mem_id] = 1.0 / (k + r_fts) + 1.0 / (k + r_vec)
-
-    return [rows_by_id[mid] for mid in sorted(scores, key=scores.__getitem__, reverse=True)]
+    return _retrieval._rrf_fuse(fts_rows, vec_rows, k)
 
 
 def _embed(text: str) -> list[float]:
     """Embed text via Ollama /api/embed; raises OllamaUnavailable on failure."""
-    cfg = _config()
-    model = cfg.get("embed_model", "nomic-embed-text")
-    url = cfg.get("ollama_url", "http://localhost:11434") + "/api/embed"
-    try:
-        out = _post_json(url, {"model": model, "input": text[:6000]}, timeout=10)
-        return out["embeddings"][0]
-    except urllib.error.HTTPError as e:
-        if e.code == 400:
-            raise OllamaUnavailable(f"embed input too long for model (HTTP 400)") from e
-        raise OllamaUnavailable(str(e)) from e
-    except (urllib.error.URLError, TimeoutError) as e:
-        raise OllamaUnavailable(str(e)) from e
-    except (KeyError, IndexError) as e:
-        raise OllamaUnavailable(f"unexpected embed response: {e}") from e
+    return runtime.embed.embed(text, _config())
 
 
 def _get_chroma():
-    import chromadb
     cfg = _config()
-    embed_model = cfg.get("embed_model", "nomic-embed-text")
-    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-    collection = client.get_or_create_collection(
-        name="chunks",
-        metadata={"embed_model": embed_model, "schema_version": "4"},
-    )
-    stored_model = (collection.metadata or {}).get("embed_model")
-    stored_schema = (collection.metadata or {}).get("schema_version")
-    if stored_model is not None and stored_model != embed_model:
-        typer.echo(
-            f"  ⚠ embed model changed ({stored_model} → {embed_model}) — run: kage reindex --force",
-            err=True,
-        )
-        raise OllamaUnavailable("embed model mismatch — run: kage reindex --force")
-    if stored_schema is None or stored_schema != "4":
-        typer.echo(
-            f"  ⚠ schema version mismatch (v{stored_schema or 'unknown'} → v4) — run: kage reindex --force",
-            err=True,
-        )
-        raise OllamaUnavailable("schema version mismatch — run: kage reindex --force")
-    return collection
+    return runtime.vector.collection(CHROMA_DIR, cfg.get("embed_model", "nomic-embed-text"))
 
 
 def _get_reranker():
-    """Lazy-load bge-reranker-v2-m3; return None if sentence-transformers not installed."""
-    if _reranker_cache[0]:
-        return _reranker_cache[1]
-    _reranker_cache[0] = True
-    try:
-        from sentence_transformers import CrossEncoder
-        _reranker_cache[1] = CrossEncoder("BAAI/bge-reranker-v2-m3")
-    except Exception:
-        _reranker_cache[1] = None
-    return _reranker_cache[1]
+    return _retrieval._get_reranker()
 
 
 def _rerank(rows: list, query: str, top_n: int) -> list:
-    reranker = _get_reranker()
-    if reranker is None or not rows:
-        return rows[:top_n]
-    texts = []
-    for row in rows:
-        char_start, char_end = row[6], row[7]
-        if char_start is not None and char_end is not None:
-            try:
-                body = _read_body(row[3])
-                text = body[char_start:char_end][:512]
-            except OSError:
-                text = row[4] or ""
-        else:
-            text = row[4] or ""
-        texts.append(text)
-    pairs = [[query, t] for t in texts]
-    scores = reranker.predict(pairs).tolist()
-    ranked = sorted(zip(scores, rows), key=lambda x: x[0], reverse=True)
-    return [r for _, r in ranked[:top_n]]
+    return _retrieval._rerank(rows, query, top_n)
 
 
 def _search_vec(query_vec: list[float], project: str | None, limit: int, identity: str = "personal") -> list:
@@ -1261,15 +515,7 @@ def _search_vec(query_vec: list[float], project: str | None, limit: int, identit
 
 def _ollama_status(cfg: dict, model: str) -> tuple[bool, str]:
     """Is Ollama reachable and the model pulled? (advisory — only `ask` needs it)."""
-    url = cfg.get("ollama_url", "http://localhost:11434") + "/api/tags"
-    try:
-        with urllib.request.urlopen(url, timeout=4) as resp:
-            names = {m.get("name", "") for m in json.loads(resp.read()).get("models", [])}
-    except (urllib.error.URLError, TimeoutError, ValueError):
-        return False, "Ollama not reachable"
-    if model in names:
-        return True, f"Ollama up, {model} ready"
-    return False, f"Ollama up, but {model} not pulled"
+    return runtime.embed.status(cfg, model)
 
 
 @app.command(name="use")
@@ -1622,184 +868,7 @@ def recall(
         typer.echo(f"    {created}   {_disp(KAGE_HOME / path)}   [{mem_id}]\n")
 
 
-# ── Arm helpers (Cycle 11) ────────────────────────────────────────────────
-
-async def _get_google_token() -> str:
-    """Exchange Google OAuth refresh token for a short-lived access token."""
-    cfg = _config()
-    oauth = cfg.get("google_oauth", {})
-    client_id = oauth.get("client_id", "")
-    client_secret = oauth.get("client_secret", "")
-    refresh_token = oauth.get("refresh_token", "")
-    if not (client_id and client_secret and refresh_token):
-        raise RuntimeError("google_oauth credentials missing — run: kage arm auth")
-    payload = {
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "refresh_token": refresh_token,
-        "grant_type": "refresh_token",
-    }
-    data = urllib.parse.urlencode(payload).encode()
-    req = urllib.request.Request(
-        "https://oauth2.googleapis.com/token",
-        data=data,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read())["access_token"]
-
-
-@asynccontextmanager
-async def _connect_arm(arm_name: str):
-    """Yield (read, write) streams for the named arm (sse or stdio transport)."""
-    arm = _config().get("arms", {}).get(arm_name, {})
-    transport = arm.get("transport", "stdio")
-    if transport == "sse":
-        token = await _get_google_token()
-        async with sse_client(
-            url=arm["mcp_url"],
-            headers={"Authorization": f"Bearer {token}"},
-        ) as streams:
-            yield streams
-    else:
-        server_params = StdioServerParameters(
-            command=arm["mcp_command"],
-            args=arm.get("mcp_args", []),
-        )
-        async with stdio_client(server_params) as streams:
-            yield streams
-
-
-def _serialize_arm_result(result) -> str | None:
-    """Extract text from a CallToolResult. Returns None if error or empty."""
-    if getattr(result, "isError", False):
-        return None
-    texts = [block.text for block in result.content if hasattr(block, "text")]
-    return "\n".join(texts) if texts else None
-
-
-def _select_tool(arm_name: str, question: str, tools: list) -> tuple[str, dict]:
-    """Pick the best tool from the arm's tool list and build params."""
-    preferred = {"calendar": "list_events", "gmail": "search_threads"}
-    pref = preferred.get(arm_name)
-    for t in tools:
-        if t.name == pref:
-            return t.name, {"query": question}
-    if tools:
-        return tools[0].name, {"query": question}
-    raise RuntimeError(f"Arm {arm_name!r} has no tools")
-
-
-async def _call_arm(arm_name: str, question: str, identity: str, timeout: float = 30.0) -> str | None:
-    """Call one arm. Returns serialized text or None on any failure (graceful)."""
-    ts = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
-    arm = _config().get("arms", {}).get(arm_name, {})
-    if arm.get("transport") == "shell":
-        cmd = arm.get("command", "")
-        if not cmd:
-            _write_audit({
-                "type": "arm_call",
-                "arm": arm_name,
-                "tool": "shell",
-                "identity": identity,
-                "ts": ts,
-                "success": False,
-            })
-            return None
-        try:
-            proc = subprocess.run(shlex.split(cmd), capture_output=True, text=True, timeout=timeout)
-            data = proc.stdout.strip() or None
-            _write_audit({
-                "type": "arm_call",
-                "arm": arm_name,
-                "tool": "shell",
-                "identity": identity,
-                "ts": ts,
-                "success": bool(data),
-            })
-            return data
-        except Exception:
-            _write_audit({
-                "type": "arm_call",
-                "arm": arm_name,
-                "tool": "shell",
-                "identity": identity,
-                "ts": ts,
-                "success": False,
-            })
-            return None
-    try:
-        async with asyncio.timeout(timeout):
-            async with _connect_arm(arm_name) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    if arm_name not in _arm_tool_cache:
-                        tools_result = await session.list_tools()
-                        _arm_tool_cache[arm_name] = tools_result.tools
-                    tool_name, params = _select_tool(
-                        arm_name, question, _arm_tool_cache[arm_name]
-                    )
-                    result = await session.call_tool(tool_name, params)
-                    data = _serialize_arm_result(result)
-                    _write_audit({
-                        "type": "arm_call",
-                        "arm": arm_name,
-                        "tool": tool_name,
-                        "identity": identity,
-                        "ts": ts,
-                        "success": data is not None,
-                    })
-                    return data
-    except Exception:
-        _write_audit({
-            "type": "arm_call",
-            "arm": arm_name,
-            "tool": "unknown",
-            "identity": identity,
-            "ts": ts,
-            "success": False,
-        })
-        return None
-
-
-def _detect_arms(question: str, identity: str) -> list[str]:
-    """Return list of arm names to call (all matching in config order)."""
-    arms = _config().get("arms", {})
-    q = question.lower()
-    return [
-        name for name, arm in arms.items()
-        if arm.get("enabled")
-        and isinstance(arm.get("identity"), str)
-        and arm["identity"] == identity
-        and arm.get("permission") == "read"
-        and any(kw in q for kw in ARM_KEYWORDS.get(name, []))
-    ]
-
-
-async def _check_arm_health(arm_name: str) -> bool:
-    """Return True if the arm is reachable (shell: exit 0; MCP: initializes)."""
-    arm = _config().get("arms", {}).get(arm_name, {})
-    if arm.get("transport") == "shell":
-        cmd = arm.get("command", "")
-        if not cmd:
-            return False
-        try:
-            proc = subprocess.run(shlex.split(cmd), capture_output=True, text=True, timeout=10.0)
-            return proc.returncode == 0
-        except Exception:
-            return False
-    try:
-        async with asyncio.timeout(10.0):
-            async with _connect_arm(arm_name) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    await session.list_tools()
-        return True
-    except Exception:
-        return False
-
-
+# DORMANT (Cycle 11) — see arms._get_google_token banner. Inert until a refresh_token exists.
 @_arm_app.command("auth")
 def arm_auth() -> None:
     """One-time Google OAuth consent flow — stores refresh token in config."""

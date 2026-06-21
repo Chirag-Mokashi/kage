@@ -140,6 +140,33 @@ Per step, in order:
 
 Bidirectional — log cloud-introduced bugs too. **This log is the deliverable; the code is the byproduct.** It is the Layer 6 fuel and the entire reason the split exists. See `feedback_dev_workflow.md` in memory.
 
+## Kaggle Capstone — Active Build (deadline July 6, 2026)
+
+kage is being submitted to the **Kaggle AI Agents: Intensive Vibe Coding Capstone** (Track: Concierge Agents). Deadline: July 6, 2026 at 11:59 PM PT.
+
+**What is being submitted:** Three new internal agents — Scout, Librarian, Monitor — as a self-contained multi-agent pipeline built on top of the existing kage stack.
+
+**Why ADK:** The capstone requires ADK in code. Scout, Librarian, and Monitor must be built as ADK agents (not plain Python scripts). ADK is the orchestration layer only — model stack unchanged (Qwen3 14B local for Pass 1/2, Claude Sonnet cloud for Pass 3/4). ADK supports both via LiteLLM.
+
+**Capstone requirement mapping:**
+
+| Concept | How kage covers it |
+|---|---|
+| ADK / Multi-agent | Scout + Librarian + Monitor as three ADK agents |
+| MCP Server | `kage mcp serve` — already shipped |
+| Antigravity | Video only — no code change needed |
+| Security features | 3e gate, audit log, per-agent permissions — already shipped |
+| Deployability | Video only — `okiro` startup sequence |
+| Agent skills | Skill files already exist |
+
+**Code comment rule (capstone override):** Ponytail applies fully to Scout, Librarian, and Monitor — minimal code, no abstractions, no boilerplate. One exception: the no-comment default is lifted for these three agents only. They must have comments on implementation decisions, design choices, and non-obvious behaviors — judges score this directly (50pt technical implementation criteria).
+
+**README.md required:** kage's GitHub repo is the public submission link judges review. README must cover: problem, solution, architecture, setup instructions, diagrams. Worth 20pts. Submission assets (writeup, video script) live in the `kaggle-competition` project — NOT here.
+
+**Scout brainstorm:** `Context/kage-scout-brainstorm-2026-06-16.md` — sections 12–20 still need desktop review before building starts.
+
+---
+
 ## Two Handoff Modes
 
 This file and `docs/blueprint.md` serve different purposes when handing context to another AI tool (personal Claude, Cosmos, etc.):

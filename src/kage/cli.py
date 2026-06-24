@@ -1619,7 +1619,11 @@ def mcp_serve() -> None:
 def scout_run() -> None:
     """Fetch all sources, run both ADK stages, write morning report, update cache."""
     from kage import scout as _scout
-    _scout.run("run")
+    try:
+        _scout.run("run")
+    except RuntimeError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1)
 
 
 @_scout_app.command("dry-run")

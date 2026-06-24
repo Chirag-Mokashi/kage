@@ -1,0 +1,76 @@
+from kage import scout
+
+
+def test_fetch_hn_parses(monkeypatch):
+    def fake_get(url, headers=None, timeout=30):
+        return '{"hits":[{"title":"A","url":"http://a.com","points":5,"objectID":"1"},{"title":"B","url":null,"points":2,"objectID":"99"}]}'
+    monkeypatch.setattr(scout._http, "_get", fake_get)
+    results = scout._fetch_hn()
+    assert len(results) == 2
+    assert set(results[0].keys()) == {"source", "title", "url", "score", "snippet"}
+    assert results[0]["url"] == "http://a.com"
+    assert results[1]["url"] == "https://news.ycombinator.com/item?id=99"
+    assert results[0]["score"] == 5
+
+
+def test_fetch_reddit_prefilters_body(monkeypatch):
+    def fake_get(url, headers=None, timeout=30):
+        return '{"data":{"children":[{"data":{"title":"R1","permalink":"/r/x/1","score":7,"selftext":"SECRETBODY"}}]}}'
+    monkeypatch.setattr(scout._http, "_get", fake_get)
+    results = scout._fetch_reddit({"scout": {"reddit_subs": ["x"]}})
+    assert len(results) == 1
+    assert results[0]["snippet"] == ""
+    assert results[0]["url"] == "https://reddit.com/r/x/1"
+    assert results[0]["score"] == 7
+    assert "SECRETBODY" not in str(results)
+
+
+def test_fetch_github_auth_header(monkeypatch):
+    recorded_headers = []
+    def fake_get(url, headers=None, timeout=30):
+        recorded_headers.append(headers)
+        return '{"items":[]}'
+    monkeypatch.setattr(scout._http, "_get", fake_get)
+    scout._fetch_github({"scout": {"github_token": "TKN"}})
+    assert recorded_headers[0]["Authorization"] == "Bearer TKN"
+    recorded_headers.clear()
+    scout._fetch_github({"scout": {}})
+    assert "Authorization" not in recorded_headers[0]
+
+
+def test_fetch_isolates_failing_source(monkeypatch):
+    audit_log = []
+    monkeypatch.setattr(scout._privacy, "_write_audit", lambda arg: audit_log.append(arg))
+    def fake_fetch_hn(*args, **kwargs):
+        raise RuntimeError("Test error")
+    monkeypatch.setattr(scout, "_fetch_hn", fake_fetch_hn)
+    monkeypatch.setattr(scout, "_fetch_arxiv", lambda *a, **k: [{"source": "arxiv", "title": "x", "url": "u", "score": 0, "snippet": ""}])
+    monkeypatch.setattr(scout, "_fetch_github", lambda *a, **k: [])
+    results = scout.fetch({"scout": {"reddit_subs": [], "rss_feeds": []}})
+    assert any(item["source"] == "arxiv" for item in results)
+    assert not any(item["source"] == "hn" for item in results)
+    assert any(record["source"] == "hn" and record["success"] is False for record in audit_log)
+
+
+def test_fetch_arxiv_parses_atom(monkeypatch):
+    fake = lambda url, headers=None, timeout=30: '<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>PaperA</title><id>http://arxiv.org/abs/1234</id><summary>This is the abstract.</summary></entry></feed>'
+    monkeypatch.setattr(scout._http, "_get", fake)
+    items = scout._fetch_arxiv()
+    assert len(items) == 1
+    assert items[0]["source"] == "arxiv"
+    assert items[0]["title"] == "PaperA"
+    assert items[0]["url"] == "http://arxiv.org/abs/1234"
+    assert items[0]["snippet"].startswith("This is")
+    assert items[0]["score"] == 0
+
+
+def test_fetch_rss_parses_items(monkeypatch):
+    fake = lambda url, headers=None, timeout=30: '<rss version="2.0"><channel><item><title>Post1</title><link>http://ex.com/1</link><description>Body text here.</description></item></channel></rss>'
+    monkeypatch.setattr(scout._http, "_get", fake)
+    items = scout._fetch_rss({"scout": {"rss_feeds": ["http://feed"]}})
+    assert len(items) == 1
+    assert items[0]["source"] == "rss"
+    assert items[0]["title"] == "Post1"
+    assert items[0]["url"] == "http://ex.com/1"
+    assert items[0]["snippet"].startswith("Body")
+    assert items[0]["score"] == 0

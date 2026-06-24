@@ -1624,7 +1624,7 @@ def scout_run() -> None:
 
 @_scout_app.command("dry-run")
 def scout_dry_run() -> None:
-    """Fetch + broad stage only; print output, write no files."""
+    """Fetch + broad stage only; print output, write no report or cache."""
     from kage import scout as _scout
     result = _scout.run("dry-run")
     typer.echo(result or "(no output)")

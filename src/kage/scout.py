@@ -10,7 +10,8 @@ from kage import runtime
 from kage.cli import _search, _disclosure_gate
 from kage.context import _resolve_context
 import os
-from google.adk.agents import LlmAgent, SequentialAgent
+from google.adk.agents import LlmAgent
+from google.adk.workflow import Workflow, START
 from google.adk.models.lite_llm import LiteLlm
 from kage.cloud import DEFAULT_PROVIDERS
 
@@ -225,7 +226,7 @@ def _litellm_target(provider: str, cfg: dict) -> tuple[str, str | None, str | No
     return model, api_key, api_base
 
 
-def build_pipeline(cfg: dict, *, cloud: bool) -> SequentialAgent:
+def build_pipeline(cfg: dict, *, cloud: bool) -> Workflow:
     # Pass 1+2 — broad gather + noise filter. Local Qwen3 via LiteLLM→Ollama. $0, never leaves machine.
     broad = LlmAgent(
         name="ScoutBroad",
@@ -233,8 +234,10 @@ def build_pipeline(cfg: dict, *, cloud: bool) -> SequentialAgent:
         instruction=_BROAD_INSTRUCTION,
         output_key="shortlist",
     )
+    # Workflow graph: LlmAgents go straight into the edge tuples (auto-wrapped as nodes).
+    # START is the graph entry; the corpus arrives as the first node's input message.
     if not cloud:
-        return SequentialAgent(name="Scout", sub_agents=[broad])
+        return Workflow(name="Scout", edges=[(START, broad)])
 
     # Pass 3+4 — verify + integrate against existing memory, write the morning report. Cloud judgment.
     provider = cfg["scout"].get("cloud_provider", "openrouter-free")
@@ -254,7 +257,8 @@ def build_pipeline(cfg: dict, *, cloud: bool) -> SequentialAgent:
         before_model_callback=_pii_seam,
         output_key="report",
     )
-    return SequentialAgent(name="Scout", sub_agents=[broad, integrate])
+    # broad → integrate runs sequentially; integrate's output_key="report" is the terminal state.
+    return Workflow(name="Scout", edges=[(START, broad), (broad, integrate)])
 
 
 def _corpus(items) -> str:

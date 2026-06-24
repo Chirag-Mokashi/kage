@@ -193,8 +193,9 @@ def test_scout_recall_empty_query_returns_empty(monkeypatch):
 
 def test_build_pipeline_bootstrap_skips_cloud():
     pipeline = scout.build_pipeline({}, cloud=False)
-    assert len(pipeline.sub_agents) == 1
-    assert pipeline.sub_agents[0].name == "ScoutBroad"
+    names = {n.name for n in pipeline.graph.nodes}
+    assert "ScoutBroad" in names
+    assert "ScoutIntegrate" not in names
 
 
 def test_build_pipeline_cloud_has_two_stages(monkeypatch):
@@ -212,9 +213,9 @@ def test_build_pipeline_cloud_has_two_stages(monkeypatch):
         }
     }
     pipeline = scout.build_pipeline(fake_cfg, cloud=True)
-    assert len(pipeline.sub_agents) == 2
-    assert pipeline.sub_agents[0].name == "ScoutBroad"
-    assert pipeline.sub_agents[1].name == "ScoutIntegrate"
+    names = {n.name for n in pipeline.graph.nodes}
+    assert "ScoutBroad" in names
+    assert "ScoutIntegrate" in names
 
 
 def test_litellm_target_maps_openrouter(monkeypatch):

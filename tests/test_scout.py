@@ -189,3 +189,67 @@ def test_scout_recall_empty_query_returns_empty(monkeypatch):
     monkeypatch.setattr(scout, "_search", lambda q, p, limit, identity: [])
     monkeypatch.setattr(scout, "_disclosure_gate", lambda rows, cfg, identity, project: ([], []))
     assert scout.scout_recall("") == []
+
+
+def test_build_pipeline_bootstrap_skips_cloud():
+    pipeline = scout.build_pipeline({}, cloud=False)
+    assert len(pipeline.sub_agents) == 1
+    assert pipeline.sub_agents[0].name == "ScoutBroad"
+
+
+def test_build_pipeline_cloud_has_two_stages(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    fake_cfg = {
+        "scout": {"cloud_provider": "openrouter-free"},
+        "providers": {
+            "openrouter-free": {
+                "type": "openai-compat",
+                "api_key_env": "OPENROUTER_API_KEY",
+                "base_url": "https://openrouter.ai/api/v1",
+                "chat_path": "/chat/completions",
+                "model": "openrouter/free",
+            }
+        }
+    }
+    pipeline = scout.build_pipeline(fake_cfg, cloud=True)
+    assert len(pipeline.sub_agents) == 2
+    assert pipeline.sub_agents[0].name == "ScoutBroad"
+    assert pipeline.sub_agents[1].name == "ScoutIntegrate"
+
+
+def test_litellm_target_maps_openrouter(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    fake_cfg = {
+        "scout": {"cloud_provider": "openrouter-free"},
+        "providers": {
+            "openrouter-free": {
+                "type": "openai-compat",
+                "api_key_env": "OPENROUTER_API_KEY",
+                "base_url": "https://openrouter.ai/api/v1",
+                "chat_path": "/chat/completions",
+                "model": "openrouter/free",
+            }
+        }
+    }
+    model, api_key, api_base = scout._litellm_target("openrouter-free", fake_cfg)
+    assert model == "openai/openrouter/free"
+    assert api_base == "https://openrouter.ai/api/v1"
+    assert api_key == "test-key"
+
+
+def test_litellm_target_keyless_returns_none(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    fake_cfg = {
+        "scout": {"cloud_provider": "openrouter-free"},
+        "providers": {
+            "openrouter-free": {
+                "type": "openai-compat",
+                "api_key_env": "OPENROUTER_API_KEY",
+                "base_url": "https://openrouter.ai/api/v1",
+                "chat_path": "/chat/completions",
+                "model": "openrouter/free",
+            }
+        }
+    }
+    _, api_key, _ = scout._litellm_target("openrouter-free", fake_cfg)
+    assert api_key is None

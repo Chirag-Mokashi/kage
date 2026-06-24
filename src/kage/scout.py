@@ -9,11 +9,42 @@ from kage import privacy as _privacy
 from kage import runtime
 from kage.cli import _search, _disclosure_gate
 from kage.context import _resolve_context
+import os
+from google.adk.agents import LlmAgent, SequentialAgent
+from google.adk.models.lite_llm import LiteLlm
+from kage.cloud import DEFAULT_PROVIDERS
 
 _SOURCE_ORDER = ("hn", "arxiv", "github", "reddit", "rss")
 _UA = {"User-Agent": "kage-scout/0.1"}
 _CORPUS_CHAR_CAP = 120_000   # ≈30k tokens; headroom under Qwen3's 40k ctx
 _SCOUT_RECALL_LIMIT = 5
+_LITELLM_PREFIX = {"claude": "anthropic", "openai": "openai", "gemini": "gemini", "openai-compat": "openai"}
+
+_BROAD_INSTRUCTION = (
+    "You are Scout's triage stage. You receive a corpus of recent items from Hacker News, "
+    "arXiv, GitHub, Reddit, and RSS feeds.\n\n"
+    "Task: Filter and cluster. Select only genuinely notable items — novel research, significant "
+    "releases, meaningful technical discussions. Drop noise, duplicates, listicles, off-topic items.\n\n"
+    "Output a numbered shortlist. For each item include:\n"
+    "- Title and source\n"
+    "- One sentence on why it is notable\n"
+    "- Cluster label (e.g. LLM/agents, systems, security, tools)\n\n"
+    "Aim for 8–15 items. Quality over quantity."
+)
+
+_INTEGRATE_INSTRUCTION = (
+    "You are Scout's integration stage. You receive a shortlist of notable items.\n\n"
+    "Task:\n"
+    "1. For each item call scout_recall with a short query to check what is already in personal "
+    "memory. If an item is already well-covered, note it and downrank.\n"
+    "2. Write a morning digest report in markdown.\n\n"
+    "Report format:\n"
+    "# Scout Report — {today}\n\n"
+    "For each item (grouped by cluster):\n"
+    "- [ ] **Title** (Source) — one-line summary. [New / Known: <what recall found>]\n\n"
+    "End with a short 'What to dig into today' paragraph. "
+    "Checkboxes: [ ] unreviewed, [x] approved, [-] parked."
+)
 
 
 def _fetch_hn() -> list[dict]:
@@ -161,6 +192,69 @@ def scout_recall(query: str) -> list[dict]:
     rows = _search(query, project, limit=_SCOUT_RECALL_LIMIT, identity=identity)
     allowed, _ = _disclosure_gate(rows, cfg, identity=identity, project=project)
     return [{"snippet": row[4], "project": row[1]} for row in allowed]
+
+
+def _pii_seam(callback_context, llm_request):
+    # ponytail: v1 pass-through — Layer 3e v2 will implement reversible value-substitution here
+    return None
+
+
+def _litellm_target(provider: str, cfg: dict) -> tuple[str, str | None, str | None]:
+    """kage provider config → (litellm_model, api_key|None, api_base|None).
+
+    Merges DEFAULT_PROVIDERS with user config (same as cloud.py:98-105), resolves the key from
+    the env var named by api_key_env (cloud.py:106) — None, never "", when unset/keyless — and
+    rebuilds the endpoint LiteLLM appends '/chat/completions' to.
+    """
+    pcfg = {**DEFAULT_PROVIDERS.get(provider, {}), **cfg.get("providers", {}).get(provider, {})}
+    if "model" not in pcfg:
+        raise ValueError(
+            f"scout cloud_provider '{provider}' not configured — add providers.{provider} to ~/.kage/config.json"
+        )
+    ptype = pcfg.get("type", "openai-compat")
+    model = f"{_LITELLM_PREFIX.get(ptype, 'openai')}/{pcfg['model']}"
+    api_key = os.environ.get(pcfg["api_key_env"]) or None
+    if ptype == "openai-compat":
+        # kage POSTs to base_url + chat_path; LiteLLM appends '/chat/completions' to api_base,
+        # so api_base = base_url + (chat_path minus that suffix). For Chirag's providers the
+        # suffix is the whole chat_path → api_base == base_url (e.g. .../api/v1). Correct for a
+        # hypothetical groq-style '/v1/chat/completions' too → base + '/v1'.
+        api_base = pcfg["base_url"] + pcfg.get("chat_path", "/chat/completions").removesuffix("/chat/completions")
+    else:
+        api_base = None
+    return model, api_key, api_base
+
+
+def build_pipeline(cfg: dict, *, cloud: bool) -> SequentialAgent:
+    # Pass 1+2 — broad gather + noise filter. Local Qwen3 via LiteLLM→Ollama. $0, never leaves machine.
+    broad = LlmAgent(
+        name="ScoutBroad",
+        model=LiteLlm(model="ollama_chat/qwen3:14b"),
+        instruction=_BROAD_INSTRUCTION,
+        output_key="shortlist",
+    )
+    if not cloud:
+        return SequentialAgent(name="Scout", sub_agents=[broad])
+
+    # Pass 3+4 — verify + integrate against existing memory, write the morning report. Cloud judgment.
+    provider = cfg["scout"].get("cloud_provider", "openrouter-free")
+    model_str, api_key, api_base = _litellm_target(provider, cfg)
+    # Pass api_key / api_base ONLY when present. An empty-string key makes some LiteLLM providers
+    # attempt a doomed auth handshake; a None api_base lets native vendors use their own endpoint.
+    kwargs = {"model": model_str}
+    if api_key:
+        kwargs["api_key"] = api_key
+    if api_base:
+        kwargs["api_base"] = api_base
+    integrate = LlmAgent(
+        name="ScoutIntegrate",
+        model=LiteLlm(**kwargs),
+        instruction=_INTEGRATE_INSTRUCTION,
+        tools=[scout_recall],
+        before_model_callback=_pii_seam,
+        output_key="report",
+    )
+    return SequentialAgent(name="Scout", sub_agents=[broad, integrate])
 
 
 def _corpus(items) -> str:

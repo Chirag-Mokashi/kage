@@ -136,3 +136,56 @@ def test_corpus_single_oversized_item_skipped():
         "snippet": "",
     }
     assert scout._corpus([big_item]) == ""
+
+
+def test_scout_recall_returns_allowed(monkeypatch):
+    fake_row = ("n1", "kage", "2026-01-01", "/path", "My snippet", None, None, None)
+    monkeypatch.setattr(scout, "_resolve_context", lambda a, b: ("personal", "kage", "fallback"))
+    monkeypatch.setattr(scout, "_search", lambda q, p, limit, identity: [fake_row])
+    monkeypatch.setattr(scout, "_disclosure_gate", lambda rows, cfg, identity, project: ([fake_row], []))
+    result = scout.scout_recall("test query")
+    assert result == [{"snippet": "My snippet", "project": "kage"}]
+
+
+def test_scout_recall_gates_local_only(monkeypatch):
+    fake_row = ("n1", "kage", "2026-01-01", "/path", "secret", None, None, None)
+    monkeypatch.setattr(scout, "_resolve_context", lambda a, b: ("personal", "kage", "fallback"))
+    monkeypatch.setattr(scout, "_search", lambda q, p, limit, identity: [fake_row])
+    monkeypatch.setattr(scout, "_disclosure_gate", lambda rows, cfg, identity, project: ([], [{"id": "n1", "reason": "local_only"}]))
+    result = scout.scout_recall("query")
+    assert result == []
+
+
+def test_scout_recall_resolves_context(monkeypatch):
+    captured = {}
+    def fake_disclosure_gate(rows, cfg, identity, project):
+        captured["identity"] = identity
+        captured["project"] = project
+        return ([], [])
+    monkeypatch.setattr(scout, "_resolve_context", lambda a, b: ("neu", "thesis", "sticky"))
+    monkeypatch.setattr(scout, "_search", lambda q, p, limit, identity: [])
+    monkeypatch.setattr(scout, "_disclosure_gate", fake_disclosure_gate)
+    scout.scout_recall("anything")
+    assert captured["identity"] == "neu"
+    assert captured["project"] == "thesis"
+
+
+def test_scout_recall_search_uses_resolved_identity(monkeypatch):
+    captured_search = {}
+    def fake_search(q, p, limit, identity):
+        captured_search["identity"] = identity
+        captured_search["project"] = p
+        return []
+    monkeypatch.setattr(scout, "_resolve_context", lambda a, b: ("neu", "thesis", "sticky"))
+    monkeypatch.setattr(scout, "_search", fake_search)
+    monkeypatch.setattr(scout, "_disclosure_gate", lambda rows, cfg, identity, project: ([], []))
+    scout.scout_recall("anything")
+    assert captured_search["identity"] == "neu"
+    assert captured_search["project"] == "thesis"
+
+
+def test_scout_recall_empty_query_returns_empty(monkeypatch):
+    monkeypatch.setattr(scout, "_resolve_context", lambda a, b: ("personal", None, "fallback"))
+    monkeypatch.setattr(scout, "_search", lambda q, p, limit, identity: [])
+    monkeypatch.setattr(scout, "_disclosure_gate", lambda rows, cfg, identity, project: ([], []))
+    assert scout.scout_recall("") == []

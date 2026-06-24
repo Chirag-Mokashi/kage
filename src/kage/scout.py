@@ -7,10 +7,13 @@ from collections import deque
 from kage import http as _http
 from kage import privacy as _privacy
 from kage import runtime
+from kage.cli import _search, _disclosure_gate
+from kage.context import _resolve_context
 
 _SOURCE_ORDER = ("hn", "arxiv", "github", "reddit", "rss")
 _UA = {"User-Agent": "kage-scout/0.1"}
 _CORPUS_CHAR_CAP = 120_000   # ≈30k tokens; headroom under Qwen3's 40k ctx
+_SCOUT_RECALL_LIMIT = 5
 
 
 def _fetch_hn() -> list[dict]:
@@ -149,6 +152,15 @@ def _update_cache(cache: set, items) -> None:
     path = _cache_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(sorted(cache)))
+
+
+def scout_recall(query: str) -> list[dict]:
+    """ADK tool for the cloud stage — resolves identity/project, searches memory, gates via _disclosure_gate, returns only allowed excerpts (the v1 egress chokepoint)."""
+    cfg = runtime.config.data
+    identity, project, _ = _resolve_context(None, None)
+    rows = _search(query, project, limit=_SCOUT_RECALL_LIMIT, identity=identity)
+    allowed, _ = _disclosure_gate(rows, cfg, identity=identity, project=project)
+    return [{"snippet": row[4], "project": row[1]} for row in allowed]
 
 
 def _corpus(items) -> str:

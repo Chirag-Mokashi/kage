@@ -323,3 +323,59 @@ def test_run_once_async_returns_state():
             if False: yield
     result = asyncio.run(scout._run_once_async(FakeRunner(), "some corpus"))
     assert result == "FINAL REPORT"
+
+
+def test_write_report_creates_dated_file(monkeypatch, tmp_path):
+    class FakeConfig:
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+    monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    monkeypatch.setattr(scout._privacy, "_write_audit", lambda *args, **kwargs: None)
+    scout._write_report("run", "# Report content")
+    import datetime
+    date_today = datetime.date.today()
+    assert (tmp_path / "scout" / f"{date_today}.md").read_text() == "# Report content"
+
+
+def test_write_report_bootstrap_filename(monkeypatch, tmp_path):
+    class FakeConfig:
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+    monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    monkeypatch.setattr(scout._privacy, "_write_audit", lambda *args, **kwargs: None)
+    scout._write_report("bootstrap", "# Bootstrap")
+    assert (tmp_path / "scout" / "bootstrap.md").exists()
+
+
+def test_write_report_calls_audit(monkeypatch, tmp_path):
+    class FakeConfig:
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+    monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    audit_records = []
+    monkeypatch.setattr(scout._privacy, "_write_audit", lambda r: audit_records.append(r))
+    scout._write_report("run", "content")
+    assert len(audit_records) == 1
+    assert audit_records[0]["type"] == "scout_report"
+    assert audit_records[0]["mode"] == "run"
+
+
+def test_token_log_appends_jsonl(monkeypatch, tmp_path):
+    class FakeConfig:
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+    monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    items = [{"source": "hn", "title": "T", "url": "u", "score": 1, "snippet": "snip"}]
+    scout._token_log("run", items, "final report text")
+    import json, datetime
+    log_file = tmp_path / "scout" / "log" / f"{datetime.date.today()}.jsonl"
+    assert log_file.exists()
+    record = json.loads(log_file.read_text().strip())
+    assert record["mode"] == "run"
+    assert record["items"] == 1
+    assert record["corpus_chars"] > 0
+    assert record["report_chars"] == len("final report text")

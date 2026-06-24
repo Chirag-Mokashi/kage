@@ -305,6 +305,38 @@ def _run_once(runner: InMemoryRunner, corpus: str) -> str:
     return asyncio.run(_run_once_async(runner, corpus))   # batch entrypoint — own the event loop
 
 
+def _write_report(mode: str, final: str) -> None:
+    if mode == "bootstrap":
+        filename = "bootstrap.md"
+    else:
+        filename = f"{_dt.date.today()}.md"
+    output_path = runtime.config.home / "scout" / filename
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(final)
+    _privacy._write_audit({
+        "type": "scout_report",
+        "mode": mode,
+        "path": str(output_path),
+        "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    })
+
+
+def _token_log(mode: str, items: list, final: str) -> None:
+    # ponytail: char-count proxy for tokens (no tokenizer dep); upgrade to tiktoken when precision matters
+    log_path = runtime.config.home / "scout" / "log" / f"{_dt.date.today()}.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "mode": mode,
+        "items": len(items),
+        "corpus_chars": sum(len(it.get("title", "")) + len(it.get("snippet", "")) for it in items),
+        "report_chars": len(final),
+    }
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+
+
 def run(mode: str) -> None:
     cfg = runtime.config.data
     cache = _load_seen_cache()

@@ -74,3 +74,65 @@ def test_fetch_rss_parses_items(monkeypatch):
     assert items[0]["url"] == "http://ex.com/1"
     assert items[0]["snippet"].startswith("Body")
     assert items[0]["score"] == 0
+
+
+def test_key_is_deterministic_and_url_prefixed():
+    item = {"source": "hn", "title": "T", "url": "http://a", "score": 1, "snippet": "s"}
+    assert scout._key(item) == scout._key(dict(item))
+    assert scout._key(item).startswith("http://a|")
+
+
+def test_seen_cache_round_trip(tmp_path, monkeypatch):
+    cache_file = tmp_path / "seen.json"
+    monkeypatch.setattr(scout, "_cache_path", lambda: cache_file)
+    assert scout._load_seen_cache() == set()
+    item = {"source": "hn", "title": "T", "url": "http://a", "score": 1, "snippet": "s"}
+    cache = set()
+    scout._update_cache(cache, [item])
+    assert cache_file.exists()
+    assert scout._key(item) in scout._load_seen_cache()
+
+
+def test_corpus_round_robin_order():
+    items = [
+        {"source": "github", "title": "G", "url": "u", "score": 0, "snippet": ""},
+        {"source": "hn", "title": "H", "url": "u", "score": 0, "snippet": ""},
+        {"source": "arxiv", "title": "A", "url": "u", "score": 0, "snippet": ""},
+    ]
+    corpus = scout._corpus(items)
+    lines = corpus.splitlines()
+    sources = [line.split("[")[1].split("]")[0] for line in lines if line]
+    assert sources == ["hn", "arxiv", "github"]
+
+
+def test_corpus_empty_returns_empty():
+    assert scout._corpus([]) == ""
+
+
+def test_corpus_respects_cap():
+    items = [{"source": "hn", "title": "a" * 5000, "url": "u", "score": 0, "snippet": "s" * 5000} for _ in range(50)]
+    corpus = scout._corpus(items)
+    assert len(corpus) <= scout._CORPUS_CHAR_CAP
+
+
+def test_corpus_round_robin_interleaves():
+    items = [
+        {"source": "hn", "title": "item1", "url": "http://example.com", "score": 0, "snippet": ""},
+        {"source": "hn", "title": "item2", "url": "http://example.com", "score": 0, "snippet": ""},
+        {"source": "hn", "title": "item3", "url": "http://example.com", "score": 0, "snippet": ""},
+        {"source": "arxiv", "title": "item4", "url": "http://example.com", "score": 0, "snippet": ""},
+    ]
+    corpus = scout._corpus(items)
+    sources = [line.split("[")[1].split("]")[0] for line in corpus.splitlines() if line]
+    assert sources == ["hn", "arxiv", "hn", "hn"]
+
+
+def test_corpus_single_oversized_item_skipped():
+    big_item = {
+        "source": "hn",
+        "title": "x" * scout._CORPUS_CHAR_CAP,
+        "url": "u",
+        "score": 0,
+        "snippet": "",
+    }
+    assert scout._corpus([big_item]) == ""

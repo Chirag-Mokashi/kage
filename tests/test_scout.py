@@ -254,3 +254,72 @@ def test_litellm_target_keyless_returns_none(monkeypatch):
     }
     _, api_key, _ = scout._litellm_target("openrouter-free", fake_cfg)
     assert api_key is None
+
+
+def test_run_refuses_on_empty_cache(monkeypatch, tmp_path):
+    class FakeConfig:
+        data = {"scout": {}}
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+    monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    monkeypatch.setattr(scout, "_load_seen_cache", lambda: set())
+    monkeypatch.setattr(scout, "fetch", lambda cfg: [])
+    import pytest
+    with pytest.raises(SystemExit):
+        scout.run(mode="run")
+
+
+def test_dry_run_skips_report_and_cache(monkeypatch, tmp_path):
+    class FakeConfig:
+        data = {"scout": {"cloud_provider": "openrouter-free"}}
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+    monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    monkeypatch.setattr(scout, "_load_seen_cache", lambda: {"existing_key"})
+    monkeypatch.setattr(scout, "fetch", lambda cfg: [{"source": "hn", "title": "T", "url": "http://x", "score": 1, "snippet": ""}])
+    monkeypatch.setattr(scout, "_run_once", lambda runner, corpus: "canned report")
+    write_report_calls = []
+    update_cache_calls = []
+    monkeypatch.setattr(scout, "_write_report", lambda *a, **kw: write_report_calls.append(1), raising=False)
+    monkeypatch.setattr(scout, "_update_cache", lambda *a, **kw: update_cache_calls.append(1))
+    monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None, raising=False)
+    scout.run(mode="dry-run")
+    assert write_report_calls == []
+    assert update_cache_calls == []
+
+
+def test_run_calls_run_once_with_corpus(monkeypatch, tmp_path):
+    class FakeConfig:
+        data = {"scout": {"cloud_provider": "openrouter-free"}}
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+    monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    monkeypatch.setattr(scout, "_load_seen_cache", lambda: set())
+    monkeypatch.setattr(scout, "fetch", lambda cfg: [{"source": "hn", "title": "HN item", "url": "http://h", "score": 5, "snippet": "snip"}])
+    run_once_calls = []
+    monkeypatch.setattr(scout, "_run_once", lambda runner, corpus: run_once_calls.append(corpus) or "report")
+    monkeypatch.setattr(scout, "_write_report", lambda *a, **kw: None, raising=False)
+    monkeypatch.setattr(scout, "_update_cache", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None, raising=False)
+    scout.run("bootstrap")
+    assert len(run_once_calls) == 1
+    assert "hn" in run_once_calls[0]
+
+
+def test_run_once_async_returns_state():
+    import asyncio
+    class FakeSession:
+        id = "s1"
+        state = {"report": "FINAL REPORT", "shortlist": "shortlist text"}
+    class FakeService:
+        async def create_session(self, **kw): return FakeSession()
+        async def get_session(self, **kw): return FakeSession()
+    class FakeRunner:
+        session_service = FakeService()
+        async def run_async(self, **kw):
+            if False: yield
+    result = asyncio.run(scout._run_once_async(FakeRunner(), "some corpus"))
+    assert result == "FINAL REPORT"

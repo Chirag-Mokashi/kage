@@ -17,6 +17,9 @@ class Embedder:
         model = cfg.get("embed_model", "nomic-embed-text")
         url = cfg.get("ollama_url", "http://localhost:11434") + "/api/embed"
         try:
+            # ponytail: 6000-char pre-clip (≈1500 tok) silently truncates long notes.
+            # Ceiling: notes > 6000 chars get partial embeddings with no warning.
+            # Upgrade: read actual ctx limit from /api/tags, or chunk + average-pool.
             out = _post_json(url, {"model": model, "input": text[:6000]}, timeout=10)
             return out["embeddings"][0]
         except urllib.error.HTTPError as e:

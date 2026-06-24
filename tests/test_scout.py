@@ -256,6 +256,46 @@ def test_litellm_target_keyless_returns_none(monkeypatch):
     assert api_key is None
 
 
+def test_fetch_dedups_against_seen_cache(monkeypatch, tmp_path):
+    item = {"source": "hn", "title": "Old", "url": "http://old", "score": 1, "snippet": ""}
+    existing_key = scout._key(item)
+    run_once_calls = []
+    monkeypatch.setattr(scout, "_load_seen_cache", lambda: {existing_key})
+    monkeypatch.setattr(scout, "fetch", lambda cfg: [item])
+    monkeypatch.setattr(scout, "_run_once", lambda runner, corpus: run_once_calls.append(corpus) or "")
+    monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_write_report", lambda *a, **kw: None)
+    class FakeConfig:
+        data = {"scout": {"cloud_provider": "openrouter-free"}}
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+    monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    scout.run("bootstrap")
+    assert len(run_once_calls) == 1
+    assert "Old" not in run_once_calls[0]
+
+
+def test_bootstrap_seeds_cache(monkeypatch, tmp_path):
+    item = {"source": "arxiv", "title": "Paper", "url": "http://p", "score": 0, "snippet": "s"}
+    update_cache_calls = []
+    monkeypatch.setattr(scout, "_load_seen_cache", lambda: set())
+    monkeypatch.setattr(scout, "fetch", lambda cfg: [item])
+    monkeypatch.setattr(scout, "_run_once", lambda runner, corpus: "bootstrap report")
+    monkeypatch.setattr(scout, "_write_report", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_update_cache", lambda cache, items: update_cache_calls.append(items))
+    class FakeConfig:
+        data = {"scout": {"cloud_provider": "openrouter-free"}}
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+    monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    scout.run("bootstrap")
+    assert len(update_cache_calls) == 1
+    assert update_cache_calls[0][0]["title"] == "Paper"
+
+
 def test_run_refuses_on_empty_cache(monkeypatch, tmp_path):
     class FakeConfig:
         data = {"scout": {}}

@@ -10,9 +10,12 @@ from kage import runtime
 from kage.cli import _search, _disclosure_gate
 from kage.context import _resolve_context
 import os
+import asyncio
+from google.genai import types
 from google.adk.agents import LlmAgent
 from google.adk.workflow import Workflow, START
 from google.adk.models.lite_llm import LiteLlm
+from google.adk.runners import InMemoryRunner
 from kage.cloud import DEFAULT_PROVIDERS
 
 _SOURCE_ORDER = ("hn", "arxiv", "github", "reddit", "rss")
@@ -280,3 +283,41 @@ def _corpus(items) -> str:
         if not updated:
             break
     return corpus
+
+
+async def _run_once_async(runner: InMemoryRunner, corpus: str) -> str:
+    session = await runner.session_service.create_session(
+        app_name="kage-scout", user_id="scout",
+    )
+    message = types.Content(role="user", parts=[types.Part(text=corpus)])
+    async for _ in runner.run_async(
+        user_id="scout", session_id=session.id, new_message=message,
+    ):
+        pass  # drain the stream — each node's answer lands in session state via output_key, not in the events
+    # The original `session` object is NOT mutated; re-fetch to read the terminal state.
+    final = await runner.session_service.get_session(
+        app_name="kage-scout", user_id="scout", session_id=session.id,
+    )
+    return final.state.get("report") or final.state.get("shortlist") or ""
+
+
+def _run_once(runner: InMemoryRunner, corpus: str) -> str:
+    return asyncio.run(_run_once_async(runner, corpus))   # batch entrypoint — own the event loop
+
+
+def run(mode: str) -> None:
+    cfg = runtime.config.data
+    cache = _load_seen_cache()
+    if mode == "run" and not cache:
+        raise SystemExit("seen-cache empty — run: kage scout bootstrap")
+
+    items = [it for it in fetch(cfg) if _key(it) not in cache]
+    corpus = _corpus(items)
+    pipeline = build_pipeline(cfg, cloud=(mode == "run"))
+
+    runner = InMemoryRunner(node=pipeline, app_name="kage-scout")   # node=, not agent= — Workflow is a BaseNode
+    final = _run_once(runner, corpus)
+    if mode != "dry-run":
+        _write_report(mode, final)
+        _update_cache(cache, items)               # dry-run writes neither report nor cache
+    _token_log(mode, items, final)

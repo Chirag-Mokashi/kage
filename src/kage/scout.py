@@ -20,7 +20,7 @@ from kage.cloud import DEFAULT_PROVIDERS
 
 _SOURCE_ORDER = ("hn", "arxiv", "github", "reddit", "rss")
 _UA = {"User-Agent": "kage-scout/0.1"}
-_CORPUS_CHAR_CAP = 120_000   # ≈30k tokens; headroom under Qwen3's 40k ctx
+_CORPUS_CHAR_CAP = 120_000   # ≈30k tokens; conservative cap for Qwen3's default 32k ctx window
 _SCOUT_RECALL_LIMIT = 5
 _LITELLM_PREFIX = {"claude": "anthropic", "openai": "openai", "gemini": "gemini", "openai-compat": "openai"}
 
@@ -154,6 +154,10 @@ def fetch(cfg) -> list[dict]:
             elif name == "rss":
                 src_data = _fetch_rss(cfg) if cfg.get("scout", {}).get("rss_feeds", []) else []
             results.extend(src_data)
+            _privacy._write_audit({
+                "type": "scout_fetch", "source": name, "success": True, "items": len(src_data),
+                "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+            })
         except Exception:
             _privacy._write_audit({
                 "type": "scout_fetch", "source": name, "success": False,
@@ -341,11 +345,11 @@ def run(mode: str) -> str:
     cfg = runtime.config.data
     cache = _load_seen_cache()
     if mode == "run" and not cache:
-        raise SystemExit("seen-cache empty — run: kage scout bootstrap")
+        raise RuntimeError("seen-cache empty — run: kage scout bootstrap")
 
     items = [it for it in fetch(cfg) if _key(it) not in cache]
     corpus = _corpus(items)
-    pipeline = build_pipeline(cfg, cloud=(mode == "run"))
+    pipeline = build_pipeline(cfg, cloud=(mode == "run"))   # dry-run → cloud=False intentionally (broad pass only, no egress)
 
     runner = InMemoryRunner(node=pipeline, app_name="kage-scout")   # node=, not agent= — Workflow is a BaseNode
     final = _run_once(runner, corpus)

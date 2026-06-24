@@ -52,6 +52,17 @@ def test_fetch_isolates_failing_source(monkeypatch):
     assert any(record["source"] == "hn" and record["success"] is False for record in audit_log)
 
 
+def test_fetch_audits_successful_source(monkeypatch):
+    audit_log = []
+    monkeypatch.setattr(scout._privacy, "_write_audit", lambda arg: audit_log.append(arg))
+    monkeypatch.setattr(scout, "_fetch_hn", lambda: [{"source": "hn", "title": "T", "url": "u", "score": 1, "snippet": ""}])
+    monkeypatch.setattr(scout, "_fetch_arxiv", lambda: [])
+    monkeypatch.setattr(scout, "_fetch_github", lambda cfg: [])
+    scout.fetch({"scout": {"reddit_subs": [], "rss_feeds": []}})
+    success_records = [r for r in audit_log if r.get("success") is True]
+    assert any(r["source"] == "hn" and r["items"] == 1 for r in success_records)
+
+
 def test_fetch_arxiv_parses_atom(monkeypatch):
     fake = lambda url, headers=None, timeout=30: '<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>PaperA</title><id>http://arxiv.org/abs/1234</id><summary>This is the abstract.</summary></entry></feed>'
     monkeypatch.setattr(scout._http, "_get", fake)
@@ -256,7 +267,25 @@ def test_litellm_target_keyless_returns_none(monkeypatch):
     assert api_key is None
 
 
-def test_fetch_dedups_against_seen_cache(monkeypatch, tmp_path):
+def test_litellm_target_native_claude_returns_none_base(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ant-test")
+    fake_cfg = {
+        "scout": {"cloud_provider": "claude"},
+        "providers": {
+            "claude": {
+                "type": "claude",
+                "api_key_env": "ANTHROPIC_API_KEY",
+                "model": "claude-sonnet-4-6",
+            }
+        }
+    }
+    model, api_key, api_base = scout._litellm_target("claude", fake_cfg)
+    assert model == "anthropic/claude-sonnet-4-6"
+    assert api_base is None
+    assert api_key == "ant-test"
+
+
+def test_run_filters_seen_items_from_corpus(monkeypatch, tmp_path):
     item = {"source": "hn", "title": "Old", "url": "http://old", "score": 1, "snippet": ""}
     existing_key = scout._key(item)
     run_once_calls = []
@@ -306,7 +335,7 @@ def test_run_refuses_on_empty_cache(monkeypatch, tmp_path):
     monkeypatch.setattr(scout, "_load_seen_cache", lambda: set())
     monkeypatch.setattr(scout, "fetch", lambda cfg: [])
     import pytest
-    with pytest.raises(SystemExit):
+    with pytest.raises(RuntimeError):
         scout.run(mode="run")
 
 

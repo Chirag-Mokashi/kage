@@ -337,7 +337,7 @@ def _token_log(mode: str, items: list, final: str) -> None:
         f.write(json.dumps(record) + "\n")
 
 
-def run(mode: str) -> None:
+def run(mode: str) -> str:
     cfg = runtime.config.data
     cache = _load_seen_cache()
     if mode == "run" and not cache:
@@ -353,3 +353,4 @@ def run(mode: str) -> None:
         _write_report(mode, final)
         _update_cache(cache, items)               # dry-run writes neither report nor cache
     _token_log(mode, items, final)
+    return final

@@ -20,55 +20,81 @@ from kage.cloud import DEFAULT_PROVIDERS
 
 _SOURCE_ORDER = ("hn", "arxiv", "github", "reddit", "rss")
 _UA = {"User-Agent": "kage-scout/0.1"}
-_CORPUS_CHAR_CAP = 120_000   # ≈30k tokens; conservative cap for Qwen3's default 32k ctx window
+# ponytail: 100k cap leaves ~6k token headroom in Qwen3's 32k window;
+# ceiling = Qwen3 ctx limit; upgrade path = raise cap if model is swapped for larger ctx
+_CORPUS_CHAR_CAP = 100_000
 _SCOUT_RECALL_LIMIT = 5
 _LITELLM_PREFIX = {"claude": "anthropic", "openai": "openai", "gemini": "gemini", "openai-compat": "openai"}
 
 _BROAD_INSTRUCTION = (
     "You are Scout's triage stage. You receive a corpus of recent items from Hacker News, "
     "arXiv, GitHub, Reddit, and RSS feeds.\n\n"
-    "CRITICAL: Only include items explicitly present in the corpus above. "
+    "CRITICAL: Only classify items explicitly present in the corpus. "
     "Do not add, invent, or infer items from your training knowledge.\n\n"
-    "Task: Filter for genuinely notable items — novel research, significant releases, "
-    "meaningful technical discussions. Drop noise, duplicates, listicles, off-topic items.\n\n"
-    "Output grouped by source. Use this exact format:\n\n"
-    "## Hacker News\n"
-    "- **Title** — one sentence on why it is notable. (Cluster: <label>)\n\n"
-    "## arXiv\n"
-    "- **Title** — one sentence on why it is notable. (Cluster: <label>)\n\n"
-    "## GitHub\n"
-    "- **repo/name** — one sentence on why it is notable. (Cluster: <label>)\n\n"
-    "## Reddit\n"
-    "- **Title** — one sentence on why it is notable. (Cluster: <label>)\n\n"
-    "## RSS\n"
-    "- **Title** — one sentence on why it is notable. (Cluster: <label>)\n\n"
-    "If a source has no notable items write: (none)\n"
-    "Quality over quantity — only include genuinely notable items."
+    "Classify every item into exactly one tier. Nothing is dropped.\n\n"
+    "You have no information about the active project. Classify generically:\n"
+    "Tier 1 — Actionable: items that could become a task, implementation decision, or cycle "
+    "for a software engineering project. Includes: GitHub repos with novel/useful functionality, "
+    "research papers with concrete implementation implications, tools or techniques that could "
+    "replace something in a typical stack.\n\n"
+    "Tier 2 — Good to Know: everything else. Includes: company news, acquisitions, funding, "
+    "general releases, industry trends, opinion pieces, world events. Interesting but not "
+    "directly actionable in a software project.\n\n"
+    "Output format — use exactly:\n\n"
+    "## Tier 1 — Actionable\n"
+    "- [source] Title — one sentence why actionable\n\n"
+    "## Tier 2 — Good to Know\n"
+    "- [source] Title — one sentence summary\n\n"
+    "Where [source] is one of: hn, arxiv, github, reddit, rss.\n"
+    "If a tier has no items write: (none)"
 )
+# ponytail: ScoutIntegrate receives ScoutBroad's output as its user message (ADK Workflow
+# passes previous node's final response to next node). Format compliance depends on Qwen3 14B.
+# If Tier 1/Tier 2 headers are malformed or [source] tags are inconsistent, ScoutIntegrate
+# sees noise and may hallucinate structure. Upgrade path = validate shortlist format before
+# passing to cloud stage (e.g. regex check for "## Tier" headers before run_async).
 
 _INTEGRATE_INSTRUCTION = (
-    "You are Scout's integration stage. You receive a source-grouped shortlist of notable items.\n\n"
+    "You are Scout's integration stage. You receive a classified shortlist of items "
+    "as your input message above.\n\n"
     "CRITICAL: Only include items from the shortlist above. "
     "Do not add, invent, or infer items from your training knowledge.\n\n"
-    "Task:\n"
-    "1. For each item call scout_recall with a short query to check what is already in personal "
-    "memory. If an item is already well-covered, note it and downrank.\n"
-    "2. Write a morning digest report in markdown.\n\n"
-    "Report format:\n"
-    "# Scout Report — {today}\n\n"
-    "## Hacker News\n"
-    "- [ ] **Title** (Source) — one-line summary. [New / Known: <what recall found>]\n\n"
-    "## arXiv\n"
-    "- [ ] **Title** — one-line summary. [New / Known: <what recall found>]\n\n"
-    "## GitHub\n"
-    "- [ ] **repo/name** — one-line summary. [New / Known: <what recall found>]\n\n"
-    "## Reddit\n"
-    "- [ ] **Title** — one-line summary. [New / Known: <what recall found>]\n\n"
-    "## RSS\n"
-    "- [ ] **Title** — one-line summary. [New / Known: <what recall found>]\n\n"
-    "If a source has no items write: (none)\n\n"
-    "End with a short 'What to dig into today' paragraph.\n"
-    "Checkboxes: [ ] unreviewed, [x] approved, [-] parked."
+    "Step 1 — Project context (do this FIRST, before analyzing any item):\n"
+    "Call scout_recall with the query: "
+    "'{project} current stack implementation goals and recent changes'\n"
+    "If scout_recall returns empty results, write 'unknown' for all "
+    "'Currently used' and 'Previously used' fields. Do not infer from training knowledge.\n\n"
+    "Step 2 — For each Tier 1 item, call scout_recall with a short targeted query "
+    "(e.g. the tool or technique name) to check project memory. "
+    "Use the result for 'Currently used' and 'Previously used' fields.\n\n"
+    "Step 3 — Write the morning digest:\n\n"
+    "# Scout Report — {today}\n"
+    "**Active project:** {project}\n\n"
+    "## Tier 1 — Actionable\n\n"
+    "If Tier 1 contains only '(none)', write '(none)' and no cards.\n"
+    "Otherwise for each Tier 1 item:\n"
+    "### [source] Title\n"
+    "> ⭐ X stars · 🍴 Y forks · Language · License · Last push: YYYY-MM-DD\n"
+    "  (GitHub items only — omit this entire block for non-GitHub items)\n\n"
+    "**Tech relevance:** one sentence why the tech world cares\n"
+    "**{project} relevance:** why this matters to {project} — or 'N/A — [reason]'\n"
+    "**Where in {project}:** which module/layer/component — or 'N/A'\n"
+    "**Currently used:** from recall — or 'unknown'\n"
+    "**Previously used:** from recall — or 'unknown'\n"
+    "**Competitors:** 2–4 main alternatives\n"
+    "**Outperforms by:** how and how much — or 'unclear'\n"
+    "**Complexity:** low/medium/high — ~N specs, ~N days\n"
+    "**Worth your time?** yes/no + decisive reason\n"
+    "**Cycle candidate:** [ ] yes — one-line pitch  OR  [-] no — one-line reason\n\n"
+    "## Tier 2 — Good to Know\n\n"
+    "For each Tier 2 item:\n"
+    "### [source] Title\n"
+    "**What happened:** one sentence\n"
+    "**Tech relevance:** one sentence\n"
+    "**{project} relevance:** 'N/A — [reason]' or one sentence if it applies\n\n"
+    "---\n"
+    "**What to dig into today:** 2–3 sentences on highest-signal Tier 1 items "
+    "and why they are worth time today. Omit this paragraph if Tier 1 is (none)."
 )
 
 
@@ -102,8 +128,12 @@ def _fetch_github(cfg) -> list[dict]:
             "source": "github",
             "title": item["full_name"],
             "url": item["html_url"],
-            "score": item.get("stargazers_count", 0),
-            "snippet": item.get("description") or "",
+            "score":     item.get("stargazers_count", 0),
+            "snippet":   item.get("description") or "",
+            "forks":     item.get("forks_count", 0),
+            "language":  item.get("language") or "",
+            "license":   (item.get("license") or {}).get("spdx_id") or "",
+            "pushed_at": (item.get("pushed_at") or "")[:10],
         })
     return results
 
@@ -302,7 +332,15 @@ def _corpus(items) -> str:
             if queues[source]:
                 updated = True
                 it = queues[source].popleft()
-                rendered = f"[{it['source']}] {it['title']} — {it['snippet']}\n"
+                if it["source"] == "github":
+                    parts = [f"⭐ {it.get('score', 0)} stars", f"🍴 {it.get('forks', 0)} forks"]
+                    for field in (it.get("language", ""), it.get("license", ""), f"last push {it.get('pushed_at', '')}"):
+                        if field and field != "last push ":
+                            parts.append(field)
+                    stats = " · ".join(parts)
+                    rendered = f"[github] {it['title']} — {it['snippet']}\n  {stats}\n" if stats else f"[github] {it['title']} — {it['snippet']}\n"
+                else:
+                    rendered = f"[{it['source']}] {it['title']} — {it['snippet']}\n"
                 if len(corpus) + len(rendered) <= _CORPUS_CHAR_CAP:
                     corpus += rendered
         if not updated:
@@ -311,9 +349,13 @@ def _corpus(items) -> str:
 
 
 async def _run_once_async(runner: InMemoryRunner, corpus: str) -> str:
+    _, project, _ = _resolve_context(None, None)   # sync file read, safe in CLI batch
     session = await runner.session_service.create_session(
         app_name="kage-scout", user_id="scout",
-        state={"today": str(_dt.date.today())},
+        state={
+            "today": str(_dt.date.today()),
+            "project": project or "kage",
+        },
     )
     message = types.Content(role="user", parts=[types.Part(text=corpus)])
     async for _ in runner.run_async(

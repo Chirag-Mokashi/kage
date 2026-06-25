@@ -37,6 +37,15 @@ def test_fetch_github_auth_header(monkeypatch):
     scout._fetch_github({"scout": {}})
     assert "Authorization" not in recorded_headers[0]
 
+    def fake_get_item(url, headers=None, timeout=30):
+        return '{"items":[{"full_name":"a/b","html_url":"http://h","stargazers_count":10,"description":"desc","forks_count":5,"language":"Python","license":{"spdx_id":"MIT"},"pushed_at":"2026-06-01T00:00:00Z"}]}'
+    monkeypatch.setattr(scout._http, "_get", fake_get_item)
+    items = scout._fetch_github({"scout": {}})
+    assert items[0]["forks"] == 5
+    assert items[0]["language"] == "Python"
+    assert items[0]["license"] == "MIT"
+    assert items[0]["pushed_at"] == "2026-06-01"
+
 
 def test_fetch_isolates_failing_source(monkeypatch):
     audit_log = []
@@ -112,7 +121,7 @@ def test_corpus_round_robin_order():
     ]
     corpus = scout._corpus(items)
     lines = corpus.splitlines()
-    sources = [line.split("[")[1].split("]")[0] for line in lines if line]
+    sources = [line.split("[")[1].split("]")[0] for line in lines if line.startswith("[")]
     assert sources == ["hn", "arxiv", "github"]
 
 
@@ -134,7 +143,7 @@ def test_corpus_round_robin_interleaves():
         {"source": "arxiv", "title": "item4", "url": "http://example.com", "score": 0, "snippet": ""},
     ]
     corpus = scout._corpus(items)
-    sources = [line.split("[")[1].split("]")[0] for line in corpus.splitlines() if line]
+    sources = [line.split("[")[1].split("]")[0] for line in corpus.splitlines() if line.startswith("[")]
     assert sources == ["hn", "arxiv", "hn", "hn"]
 
 
@@ -378,7 +387,8 @@ def test_run_calls_run_once_with_corpus(monkeypatch, tmp_path):
     assert "hn" in run_once_calls[0]
 
 
-def test_run_once_async_returns_state():
+def test_run_once_async_returns_state(monkeypatch):
+    monkeypatch.setattr(scout, "_resolve_context", lambda *a: ("personal", "kage", None))
     import asyncio
     class FakeSession:
         id = "s1"
@@ -448,3 +458,117 @@ def test_token_log_appends_jsonl(monkeypatch, tmp_path):
     assert record["items"] == 1
     assert record["corpus_chars"] > 0
     assert record["report_chars"] == len("final report text")
+
+
+def test_fetch_github_stats_fields(monkeypatch):
+    def fake_get(url, headers=None, timeout=30):
+        return '{"items":[{"full_name":"owner/repo","html_url":"http://h","stargazers_count":42,"description":"desc","forks_count":7,"language":"Go","license":{"spdx_id":"Apache-2.0"},"pushed_at":"2026-01-15T10:00:00Z"}]}'
+    monkeypatch.setattr(scout._http, "_get", fake_get)
+    result = scout._fetch_github({"scout": {}})
+    assert result[0]["forks"] == 7
+    assert result[0]["language"] == "Go"
+    assert result[0]["license"] == "Apache-2.0"
+    assert result[0]["pushed_at"] == "2026-01-15"
+
+
+def test_fetch_github_stats_null_license(monkeypatch):
+    def fake_get(url, headers=None, timeout=30):
+        return '{"items":[{"full_name":"a/b","html_url":"http://h","stargazers_count":1,"description":"","forks_count":0,"language":"Python","license":null,"pushed_at":"2026-01-01T00:00:00Z"}]}'
+    monkeypatch.setattr(scout._http, "_get", fake_get)
+    result = scout._fetch_github({"scout": {}})
+    assert result[0]["license"] == ""
+
+
+def test_corpus_github_stats_line():
+    item = {"source": "github", "title": "owner/repo", "url": "u", "score": 100, "snippet": "A useful tool", "forks": 20, "language": "Rust", "license": "MIT", "pushed_at": "2026-06-01"}
+    corpus = scout._corpus([item])
+    assert "⭐" in corpus
+    assert "🍴" in corpus
+    lines = corpus.splitlines()
+    assert len(lines) >= 2
+    second_line = lines[1]
+    assert second_line.startswith("  ")
+    assert "100 stars" in second_line
+    assert "20 forks" in second_line
+
+
+def test_corpus_github_omits_empty_language():
+    item = {"source": "github", "title": "owner/repo", "url": "u", "score": 5, "snippet": "desc", "forks": 3, "language": "", "license": "", "pushed_at": "2026-06-01"}
+    corpus = scout._corpus([item])
+    assert " · · " not in corpus
+
+
+def test_corpus_github_cap_atomicity():
+    item = {"source": "github", "title": "owner/repo", "url": "u", "score": 5, "snippet": "desc", "forks": 3, "language": "Python", "license": "MIT", "pushed_at": "2026-06-01"}
+    first_line = "[github] owner/repo — desc\n"
+    original_cap = scout._CORPUS_CHAR_CAP
+    scout._CORPUS_CHAR_CAP = len(first_line) - 1
+    try:
+        corpus = scout._corpus([item])
+    finally:
+        scout._CORPUS_CHAR_CAP = original_cap
+    assert corpus == ""
+
+
+def test_run_once_injects_project(monkeypatch):
+    import asyncio
+    monkeypatch.setattr(scout, "_resolve_context", lambda *a: ("personal", "hsi", None))
+    captured = {}
+    class FakeSession:
+        id = "s1"
+        state = {}
+    class FakeService:
+        async def create_session(self, **kw):
+            captured.update(kw)
+            return FakeSession()
+        async def get_session(self, **kw):
+            return FakeSession()
+    class FakeRunner:
+        session_service = FakeService()
+        async def run_async(self, **kw):
+            if False: yield
+    asyncio.run(scout._run_once_async(FakeRunner(), "corpus"))
+    assert captured["state"]["project"] == "hsi"
+
+
+def test_run_once_project_fallback(monkeypatch):
+    import asyncio
+    monkeypatch.setattr(scout, "_resolve_context", lambda *a: ("personal", None, None))
+    captured = {}
+    class FakeSession:
+        id = "s1"
+        state = {}
+    class FakeService:
+        async def create_session(self, **kw):
+            captured.update(kw)
+            return FakeSession()
+        async def get_session(self, **kw):
+            return FakeSession()
+    class FakeRunner:
+        session_service = FakeService()
+        async def run_async(self, **kw):
+            if False: yield
+    asyncio.run(scout._run_once_async(FakeRunner(), "corpus"))
+    assert captured["state"]["project"] == "kage"
+
+
+def test_broad_instruction_has_grounding_rule():
+    assert "Only classify items explicitly present in the corpus" in scout._BROAD_INSTRUCTION
+
+
+def test_broad_instruction_has_tier_format():
+    assert "## Tier 1 — Actionable" in scout._BROAD_INSTRUCTION
+    assert "## Tier 2 — Good to Know" in scout._BROAD_INSTRUCTION
+
+
+def test_integrate_instruction_has_project_variable():
+    assert "{project}" in scout._INTEGRATE_INSTRUCTION
+
+
+def test_integrate_instruction_has_step1():
+    assert "Step 1" in scout._INTEGRATE_INSTRUCTION
+    assert "scout_recall" in scout._INTEGRATE_INSTRUCTION
+
+
+def test_integrate_instruction_handles_none_tier():
+    assert "only '(none)'" in scout._INTEGRATE_INSTRUCTION

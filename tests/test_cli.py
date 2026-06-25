@@ -23,6 +23,7 @@ import pytest
 from typer.testing import CliRunner
 from unittest import mock
 
+from contextlib import asynccontextmanager
 from kage import cli, cloud, runtime
 from kage import privacy as kage_privacy
 from kage import embed as _embed_module
@@ -4661,3 +4662,126 @@ def test_egress_golden_local_only_project_withheld(monkeypatch, tmp_path):
 # untested here. The gate functions themselves have unit tests; the missing coverage
 # is the full gate→sink chain for those two paths. Add when Slice 4 extracts
 # privacy.py and session.py — cleaner seam to mock at that point.
+
+
+# ---------------------------------------------------------------------------
+# Cycle 13 — browser arm + gmail arm keyword routing + _call_arm_browser
+# ---------------------------------------------------------------------------
+
+from kage import arms
+
+
+def _make_browser_mocks(monkeypatch, nav_is_error=False, snapshot_text='page content', snapshot_is_error=False):
+    """Set up fake MCP session for _call_arm_browser tests. Returns calls list."""
+    calls = []
+
+    async def fake_call_tool(name, params=None):
+        calls.append((name, dict(params) if params is not None else {}))
+        if name == 'browser_navigate':
+            return mock.MagicMock(isError=nav_is_error, content=[])
+        return mock.MagicMock(isError=snapshot_is_error, content=[mock.MagicMock(text=snapshot_text)])
+
+    fake_session = mock.AsyncMock()
+    fake_session.initialize = mock.AsyncMock()
+    fake_session.call_tool.side_effect = fake_call_tool
+
+    @asynccontextmanager
+    async def fake_connect(_arm_name):
+        yield (mock.AsyncMock(), mock.AsyncMock())
+
+    class FakeClientSession:
+        def __init__(self, r, w): pass
+        async def __aenter__(self): return fake_session
+        async def __aexit__(self, *a): pass
+
+    monkeypatch.setattr(arms, '_connect_arm', fake_connect)
+    monkeypatch.setattr(arms, 'ClientSession', FakeClientSession)
+    monkeypatch.setattr(kage_privacy, '_write_audit', lambda x: None)
+    return calls
+
+
+def _arm_cfg(monkeypatch, arms_dict):
+    cfg = mock.Mock()
+    cfg.data = {'arms': arms_dict}
+    monkeypatch.setattr(runtime, 'config', cfg)
+
+
+def test_browser_arm_keyword_triggers_detect(monkeypatch):
+    """Browser arm fires when question contains a browser keyword."""
+    _arm_cfg(monkeypatch, {'browser': {'enabled': True, 'identity': 'personal', 'permission': 'read'}})
+    result = arms._detect_arms('find me a website about machine learning', 'personal')
+    assert result == ['browser']
+
+
+def test_browser_arm_keyword_no_overlap_with_gmail(monkeypatch):
+    """Gmail keywords do not trigger browser arm."""
+    _arm_cfg(monkeypatch, {
+        'browser': {'enabled': True, 'identity': 'personal', 'permission': 'read'},
+        'gmail':   {'enabled': True, 'identity': 'personal', 'permission': 'read'},
+    })
+    result = arms._detect_arms('check my inbox', 'personal')
+    assert 'browser' not in result
+    assert 'gmail' in result
+
+
+def test_gmail_arm_keyword_triggers_detect(monkeypatch):
+    """Gmail arm fires when question contains 'unread'."""
+    _arm_cfg(monkeypatch, {'gmail': {'enabled': True, 'identity': 'personal', 'permission': 'read'}})
+    result = arms._detect_arms('do I have any unread emails', 'personal')
+    assert result == ['gmail']
+
+
+def test_browser_arm_builds_ddg_url(monkeypatch):
+    """Question with no URL → DuckDuckGo HTML search URL passed to browser_navigate."""
+    calls = _make_browser_mocks(monkeypatch)
+    result = asyncio.run(arms._call_arm_browser('browser', {}, 'find python tutorials', 'personal', 10.0))
+    assert calls[0][0] == 'browser_navigate'
+    assert 'search.brave.com/search' in calls[0][1]['url']
+    assert 'python' in calls[0][1]['url']
+    assert result == 'page content'
+
+
+def test_browser_arm_uses_direct_url(monkeypatch):
+    """Question containing https:// → that URL passed directly to browser_navigate."""
+    calls = _make_browser_mocks(monkeypatch)
+    result = asyncio.run(arms._call_arm_browser('browser', {}, 'summarise https://example.com/article', 'personal', 10.0))
+    assert calls[0][1]['url'] == 'https://example.com/article'
+    assert result == 'page content'
+
+
+def test_browser_arm_strips_trailing_punctuation(monkeypatch):
+    """URL followed by trailing dot in question → dot stripped before navigate."""
+    calls = _make_browser_mocks(monkeypatch)
+    asyncio.run(arms._call_arm_browser('browser', {}, 'look up https://example.com.', 'personal', 10.0))
+    assert calls[0][1]['url'] == 'https://example.com'
+
+
+def test_browser_arm_nav_error_returns_none(monkeypatch):
+    """When browser_navigate returns isError=True, returns None and snapshot never called."""
+    calls = _make_browser_mocks(monkeypatch, nav_is_error=True)
+    result = asyncio.run(arms._call_arm_browser('browser', {}, 'search for something', 'personal', 10.0))
+    assert result is None
+    assert len(calls) == 1 and calls[0][0] == 'browser_navigate'
+
+
+def test_browser_arm_exception_returns_none(monkeypatch):
+    """When _connect_arm raises, _call_arm_browser returns None without propagating."""
+    @asynccontextmanager
+    async def raising_connect(_arm_name):
+        raise RuntimeError('connection failed')
+        yield  # required by asynccontextmanager
+
+    monkeypatch.setattr(arms, '_connect_arm', raising_connect)
+    monkeypatch.setattr(kage_privacy, '_write_audit', lambda x: None)
+    result = asyncio.run(arms._call_arm_browser('browser', {}, 'search the web', 'personal', 10.0))
+    assert result is None
+
+
+def test_browser_arm_snapshot_error_returns_none(monkeypatch):
+    """When browser_snapshot returns isError=True, _serialize_arm_result returns None."""
+    calls = _make_browser_mocks(monkeypatch, snapshot_is_error=True)
+    result = asyncio.run(arms._call_arm_browser('browser', {}, 'find something', 'personal', 10.0))
+    assert result is None
+    assert len(calls) == 2
+    assert calls[0][0] == 'browser_navigate'
+    assert calls[1][0] == 'browser_snapshot'

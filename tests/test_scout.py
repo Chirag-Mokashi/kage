@@ -499,15 +499,16 @@ def test_corpus_github_omits_empty_language():
 
 
 def test_corpus_github_cap_atomicity():
+    # Atomicity: first line alone fits; combined two-liner does not; whole item must be skipped.
     item = {"source": "github", "title": "owner/repo", "url": "u", "score": 5, "snippet": "desc", "forks": 3, "language": "Python", "license": "MIT", "pushed_at": "2026-06-01"}
     first_line = "[github] owner/repo — desc\n"
     original_cap = scout._CORPUS_CHAR_CAP
-    scout._CORPUS_CHAR_CAP = len(first_line) - 1
+    scout._CORPUS_CHAR_CAP = len(first_line)  # fits first line, not the two-line block
     try:
         corpus = scout._corpus([item])
     finally:
         scout._CORPUS_CHAR_CAP = original_cap
-    assert corpus == ""
+    assert corpus == ""  # entire two-line block rejected, not just second line
 
 
 def test_run_once_injects_project(monkeypatch):

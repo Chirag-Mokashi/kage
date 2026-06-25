@@ -307,6 +307,11 @@ def build_pipeline(cfg: dict, *, cloud: bool) -> Workflow:
         kwargs["api_key"] = api_key
     if api_base:
         kwargs["api_base"] = api_base
+    # ponytail: ADK substitutes {project}/{today} from session state into instruction strings at
+    # run time (confirmed empirically — v0.14.0 shipped {today} substitution and produced correct
+    # dates in reports). Ceiling: if ADK removes this feature, {project} appears literally in the
+    # report and Step 1 scout_recall query fires with "{project} current stack..." (silent failure).
+    # Upgrade path: explicit _INTEGRATE_INSTRUCTION.format(project=..., today=...) in _run_once_async.
     integrate = LlmAgent(
         name="ScoutIntegrate",
         model=LiteLlm(**kwargs),

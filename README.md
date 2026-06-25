@@ -19,13 +19,21 @@ kage is defined at three nested levels, all simultaneously true:
 
 ---
 
-## Current state — v0.12.0
+## Current state — v0.15.0
 
 kage ships as a headless CLI and MCP server. The full UI layer (via Odysseus integration) is in progress.
 
-**Honest status:** today kage is a *context-gated forwarder with a hard identity wall and stateful sessions* — it retrieves your notes, enforces the identity × project partition before any note reaches retrieval, gates what may leave your machine, holds multi-turn conversation state, and forwards a grounded query to the model *you* select (switchable mid-session, with the privacy gate re-run on switch). The full *broker* behavior (automatic model routing, active context detection) is on the roadmap below — designed, not yet shipped. The BROKER level above describes the direction; this section describes what runs today.
+**Honest status:** today kage is a *context-gated forwarder with a hard identity wall, stateful sessions, arm routing for live external data, and a first proactive agent — Scout*. It retrieves your notes, enforces the identity × project partition before any note reaches retrieval, gates what may leave your machine, holds multi-turn conversation state, and forwards a grounded query to the model *you* select (switchable mid-session, with the privacy gate re-run on switch). Scout fetches external signals (Hacker News, arXiv, GitHub, Reddit, RSS) on demand, classifies them into Tier 1 (Actionable) / Tier 2 (Good to Know) using a local ADK pipeline, and writes a morning digest to `~/.kage/scout/`. The full *broker* behavior (continuous monitoring, Librarian/Monitor agents promoting findings to memory) is on the roadmap below. The BROKER level above describes the direction; this section describes what runs today.
 
 ```
+  ┌─────────────────────────────────────────────────────────────┐
+  │  SCOUT (proactive agent — runs independently)               │
+  │  kage scout run / dry-run / bootstrap / status             │
+  │  HN · arXiv · GitHub · Reddit · RSS                        │
+  │  ADK Workflow: ScoutBroad (local) → ScoutIntegrate (cloud) │
+  │  Tier 1/2 triage · project-aware · ~/.kage/scout/          │
+  └─────────────────────────────────────────────────────────────┘
+
   ┌─────────────────────────────────────────────────────────────┐
   │  SURFACE                                                    │
   │  CLI (kage)                    MCP (stdio → any client)    │
@@ -120,6 +128,13 @@ kage doctor                         Health checks: store, DB, Ollama, providers,
 kage mcp serve                      Start the MCP server (stdio transport).
 
 kage arm auth                       One-time Google OAuth consent (for remote SSE arms).
+
+kage scout run                      Fetch external signals, triage, and write today's digest.
+                                    Requires prior bootstrap run to seed the seen-cache.
+kage scout dry-run                  Fetch + triage only — print digest and discard (no write).
+kage scout bootstrap                Seed the seen-cache without writing a report.
+                                    Run once before the first kage scout run.
+kage scout status                   Show cache size, last run date, token log summary.
 ```
 
 Arms are configured under `arms` in `~/.kage/config.json`. Each arm declares a
@@ -301,13 +316,17 @@ kage today is a passive broker — it answers when called. The target is an acti
   Cycle 10.5 Active context             SHIPPED — kage use / where, resolver, MCP wired
   Cycle 11   kage as MCP client         SHIPPED — arm routing + local shell arm (calendar)
   Cycle 12   Modularity                 SHIPPED — injectable seams, 16 modules, registries
-  Cycle 13   Layer 4 auto-routing       Intent → model selection, automatic
-  Cycle 14   Agent loop                 Multi-step planning and execution
+  Cycle 13   Arms expansion             SHIPPED — gmail arm (osascript) + browser arm (Playwright MCP)
+  Cycle 14   Scout agent                SHIPPED — proactive ADK Workflow, Tier 1/2 triage, project-aware
+  Cycle 15   Librarian agent            Promote scout findings to project memory, Layer 2 scaffold
+  Cycle 16   Monitor agent              Continuous watcher, alert routing
 ```
 
-Cycle 12 dissolved the monolithic `cli.py` into 16 focused modules via injectable runtime seams — swapping `runtime.embed` or `runtime.cloud` now reaches every module at once, making backends genuinely swappable and arms/providers pluggable via registries. The egress golden tests lock the privacy moat: withheld note content is verified absent from every cloud payload.
+Cycle 14 shipped Scout — kage's first proactive behavior. Scout fetches public signals from five sources (HN, arXiv, GitHub, Reddit, RSS) on demand, classifies them into Tier 1 (Actionable — things that could become a cycle or implementation decision) and Tier 2 (Good to Know — news, trends, opinion) using a two-stage ADK Workflow, and writes a project-aware morning digest. ScoutBroad (local Qwen3) triages; ScoutIntegrate (cloud Claude) writes full business-ruthlessness cards for Tier 1 items, consulting project memory via `scout_recall` before every card. Scout finds. You decide. Librarian remembers.
 
-Cycle 11 shipped the MCP-client plumbing (dual-transport arm routing, graceful fallback, audit log) plus a third **`shell`** transport. The first live arm reads the local macOS Calendar via `icalbuddy` — zero OAuth, zero cloud. This upgrades kage from a passive *forwarder* (answers from memory only) to a passive *fetcher* (pulls live external data into an answer) — but it is **still not a mediator**: it acts only when you call it, never on its own initiative. The active, proactive mediator — kage acting *for* you autonomously (scheduled triggers, agent loop) — is later (Cycles 13–14).
+Cycle 13 added two arms: a gmail arm (reads Mail.app via osascript, zero OAuth, privacy-gated) and a browser arm (Playwright MCP for headless web, stealth config). Arms are declared in `~/.kage/config.json` and routed by keyword; every call hits the audit log.
+
+Cycle 12 dissolved the monolithic `cli.py` into 16 focused modules via injectable runtime seams — swapping `runtime.embed` or `runtime.cloud` now reaches every module at once, making backends genuinely swappable and arms/providers pluggable via registries. The egress golden tests lock the privacy moat: withheld note content is verified absent from every cloud payload.
 
 ---
 
@@ -346,16 +365,20 @@ src/kage/
 ├── session.py      Session CRUD, turn gating, query condensing
 ├── chunk.py        Note chunking — pure text logic, no I/O
 ├── pii.py          PII patterns + scanner — pure, no I/O
+├── scout.py        Scout agent — fetch (5 sources), dedup, corpus, ADK pipeline, report writer
 └── mcp_server.py   MCP server (FastMCP, stdio transport)
 
 tests/
-├── test_cli.py     376 tests — CLI commands + all seam behaviors
-├── test_seams.py   13 unit tests — seam contracts + registry functions
+├── test_cli.py     372 tests — CLI commands + all seam behaviors
+├── test_scout.py    46 tests — fetch layer, corpus, dedup, ADK pipeline, project injection
+├── test_seams.py    13 tests — seam contracts + registry functions
 └── fakes.py        Test doubles: FakeEmbedder, FakeVectorIndex, RecordingCloud, FakeConfig
 
 docs/
 ├── blueprint.md             Long-term architecture and planning state
 ├── cycle-12-modularity.md   Modularity design — injectable seams, 6 slices
+├── cycle-14-scout.md        Scout agent pitch — ADK design, source list, seen-cache
+├── cycle-14-scout-v1.1.md   Scout v1.1 — Tier 1/2 triage, project-aware, GitHub stats
 └── ...                      Historical cycle pitches and research
 ```
 

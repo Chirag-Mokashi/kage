@@ -21,3 +21,14 @@ def _post_json(url: str, payload: dict, headers: dict | None = None, timeout: in
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
+
+
+def _get(url: str, headers: dict | None = None, timeout: int = 30) -> str:
+    """GET sibling of _post_json — returns decoded body text. Same UA-centralization rationale."""
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "kage/0.5", **(headers or {})},
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode()

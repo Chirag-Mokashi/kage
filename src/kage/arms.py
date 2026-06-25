@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import datetime as _dt
 import json
+import re
 import shlex
 import subprocess
 import urllib.parse
@@ -58,6 +59,9 @@ async def _connect_arm(arm_name: str):
         async with sse_client(url=arm['mcp_url'], headers={'Authorization': f'Bearer {token}'}) as streams:
             yield streams
     else:
+        # ponytail: 'browser' transport intentionally falls here — it is stdio on the wire.
+        # The 'browser' key selects _call_arm_browser via _TRANSPORT_HANDLERS, not a new
+        # wire protocol. Don't add elif transport == 'browser': — it would break this.
         server_params = StdioServerParameters(command=arm['mcp_command'], args=arm.get('mcp_args', []))
         async with stdio_client(server_params) as streams:
             yield streams
@@ -121,6 +125,33 @@ async def _call_arm_mcp(
         return None
 
 
+async def _call_arm_browser(
+    arm_name: str, _arm_cfg: dict, question: str, identity: str, timeout: float,
+) -> str | None:
+    ts = _dt.datetime.now().astimezone().isoformat(timespec='seconds')
+    try:
+        async with asyncio.timeout(timeout):
+            async with _connect_arm(arm_name) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    m = re.search(r'https?://\S+', question)
+                    url = m.group().rstrip('.,;:!?)\\]>') if m else (
+                        'https://search.brave.com/search?q='
+                        + urllib.parse.quote_plus(question[:300])
+                    )
+                    nav = await session.call_tool('browser_navigate', {'url': url})
+                    if getattr(nav, 'isError', False):
+                        _privacy._write_audit({'type': 'arm_call', 'arm': arm_name, 'tool': 'browser_navigate', 'identity': identity, 'ts': ts, 'success': False})
+                        return None
+                    result = await session.call_tool('browser_snapshot', {})
+                    data = _serialize_arm_result(result)
+                    _privacy._write_audit({'type': 'arm_call', 'arm': arm_name, 'tool': 'browser_navigate+snapshot', 'identity': identity, 'ts': ts, 'success': data is not None})
+                    return data
+    except Exception:
+        _privacy._write_audit({'type': 'arm_call', 'arm': arm_name, 'tool': 'browser', 'identity': identity, 'ts': ts, 'success': False})
+        return None
+
+
 _TRANSPORT_HANDLERS: dict[str, Callable] = {}
 
 
@@ -138,6 +169,14 @@ register_arm('calendar', ['calendar', 'schedule', 'meeting', 'event', 'appointme
 register_arm('gmail', ['email', 'mail', 'inbox', 'thread', 'draft', 'unread', 'reply', 'newsletter', 'attachment'], 'shell', _call_arm_shell)
 _TRANSPORT_HANDLERS.setdefault('stdio', _call_arm_mcp)
 _TRANSPORT_HANDLERS.setdefault('sse', _call_arm_mcp)
+
+register_arm(
+    'browser',
+    ['search', 'browse', 'website', 'article', 'web', 'news',
+     'look up', 'find online', 'read about'],
+    'browser',
+    _call_arm_browser,
+)
 
 
 async def _call_arm(arm_name: str, question: str, identity: str, timeout: float = 30.0) -> str | None:

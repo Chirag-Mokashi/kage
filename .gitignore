@@ -49,6 +49,9 @@ htmlcov/
 .coverage
 .tox/
 
+# Playwright MCP runtime output (page snapshots + console logs)
+.playwright-mcp/
+
 # Local AI data — never commit memory/embeddings
 data/
 ~/.kage/

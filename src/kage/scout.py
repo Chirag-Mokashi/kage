@@ -27,26 +27,47 @@ _LITELLM_PREFIX = {"claude": "anthropic", "openai": "openai", "gemini": "gemini"
 _BROAD_INSTRUCTION = (
     "You are Scout's triage stage. You receive a corpus of recent items from Hacker News, "
     "arXiv, GitHub, Reddit, and RSS feeds.\n\n"
-    "Task: Filter and cluster. Select only genuinely notable items — novel research, significant "
-    "releases, meaningful technical discussions. Drop noise, duplicates, listicles, off-topic items.\n\n"
-    "Output a numbered shortlist. For each item include:\n"
-    "- Title and source\n"
-    "- One sentence on why it is notable\n"
-    "- Cluster label (e.g. LLM/agents, systems, security, tools)\n\n"
-    "Aim for 8–15 items. Quality over quantity."
+    "CRITICAL: Only include items explicitly present in the corpus above. "
+    "Do not add, invent, or infer items from your training knowledge.\n\n"
+    "Task: Filter for genuinely notable items — novel research, significant releases, "
+    "meaningful technical discussions. Drop noise, duplicates, listicles, off-topic items.\n\n"
+    "Output grouped by source. Use this exact format:\n\n"
+    "## Hacker News\n"
+    "- **Title** — one sentence on why it is notable. (Cluster: <label>)\n\n"
+    "## arXiv\n"
+    "- **Title** — one sentence on why it is notable. (Cluster: <label>)\n\n"
+    "## GitHub\n"
+    "- **repo/name** — one sentence on why it is notable. (Cluster: <label>)\n\n"
+    "## Reddit\n"
+    "- **Title** — one sentence on why it is notable. (Cluster: <label>)\n\n"
+    "## RSS\n"
+    "- **Title** — one sentence on why it is notable. (Cluster: <label>)\n\n"
+    "If a source has no notable items write: (none)\n"
+    "Quality over quantity — only include genuinely notable items."
 )
 
 _INTEGRATE_INSTRUCTION = (
-    "You are Scout's integration stage. You receive a shortlist of notable items.\n\n"
+    "You are Scout's integration stage. You receive a source-grouped shortlist of notable items.\n\n"
+    "CRITICAL: Only include items from the shortlist above. "
+    "Do not add, invent, or infer items from your training knowledge.\n\n"
     "Task:\n"
     "1. For each item call scout_recall with a short query to check what is already in personal "
     "memory. If an item is already well-covered, note it and downrank.\n"
     "2. Write a morning digest report in markdown.\n\n"
     "Report format:\n"
     "# Scout Report — {today}\n\n"
-    "For each item (grouped by cluster):\n"
+    "## Hacker News\n"
     "- [ ] **Title** (Source) — one-line summary. [New / Known: <what recall found>]\n\n"
-    "End with a short 'What to dig into today' paragraph. "
+    "## arXiv\n"
+    "- [ ] **Title** — one-line summary. [New / Known: <what recall found>]\n\n"
+    "## GitHub\n"
+    "- [ ] **repo/name** — one-line summary. [New / Known: <what recall found>]\n\n"
+    "## Reddit\n"
+    "- [ ] **Title** — one-line summary. [New / Known: <what recall found>]\n\n"
+    "## RSS\n"
+    "- [ ] **Title** — one-line summary. [New / Known: <what recall found>]\n\n"
+    "If a source has no items write: (none)\n\n"
+    "End with a short 'What to dig into today' paragraph.\n"
     "Checkboxes: [ ] unreviewed, [x] approved, [-] parked."
 )
 
@@ -292,6 +313,7 @@ def _corpus(items) -> str:
 async def _run_once_async(runner: InMemoryRunner, corpus: str) -> str:
     session = await runner.session_service.create_session(
         app_name="kage-scout", user_id="scout",
+        state={"today": str(_dt.date.today())},
     )
     message = types.Content(role="user", parts=[types.Part(text=corpus)])
     async for _ in runner.run_async(

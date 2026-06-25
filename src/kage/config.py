@@ -26,5 +26,3 @@ class Config:
         except (OSError, ValueError):
             return {}
 
-    def get(self, key, default=None):
-        return self.data.get(key, default)

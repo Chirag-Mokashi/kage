@@ -49,6 +49,8 @@ app.add_typer(_mcp_app, name="mcp")
 
 _arm_app = typer.Typer(help="Arm (MCP client) commands.")
 app.add_typer(_arm_app, name="arm")
+_scout_app = typer.Typer(help="Scout agent commands.")
+app.add_typer(_scout_app, name="scout")
 
 # ── Layout ────────────────────────────────────────────────────────────────
 KAGE_HOME = Path(os.environ.get("KAGE_HOME") or Path.home() / ".kage")  # override for relocation/tests
@@ -1611,6 +1613,48 @@ def mcp_serve() -> None:
         typer.echo("MCP not installed — run: pip install 'mcp[cli]'", err=True)
         raise typer.Exit(code=1)
     _mcp.run(transport="stdio")
+
+
+@_scout_app.command("run")
+def scout_run() -> None:
+    """Fetch all sources, run both ADK stages, write morning report, update cache."""
+    from kage import scout as _scout
+    try:
+        _scout.run("run")
+    except RuntimeError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1)
+
+
+@_scout_app.command("dry-run")
+def scout_dry_run() -> None:
+    """Fetch + broad stage only; print output, write no report or cache."""
+    from kage import scout as _scout
+    result = _scout.run("dry-run")
+    typer.echo(result or "(no output)")
+
+
+@_scout_app.command("bootstrap")
+def scout_bootstrap() -> None:
+    """One-time setup: fetch + broad stage, write bootstrap.md, seed seen-cache."""
+    from kage import scout as _scout
+    _scout.run("bootstrap")
+
+
+@_scout_app.command("status")
+def scout_status() -> None:
+    """Show last run date, cache size, and enabled state."""
+    from kage import scout as _scout
+    cfg = _config()
+    scout_cfg = cfg.get("scout", {})
+    enabled = scout_cfg.get("enabled", False)
+    cache = _scout._load_seen_cache()
+    home = runtime.config.home
+    reports = sorted((home / "scout").glob("????-??-??.md")) if (home / "scout").exists() else []
+    last = reports[-1].stem if reports else "never"
+    typer.echo(f"enabled: {enabled}")
+    typer.echo(f"last run: {last}")
+    typer.echo(f"cache size: {len(cache)} items")
 
 
 if __name__ == "__main__":  # pragma: no cover

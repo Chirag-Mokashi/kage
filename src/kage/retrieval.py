@@ -39,7 +39,10 @@ def _rerank(rows: list, query: str, top_n: int) -> list:
     reranker = _get_reranker()
     if reranker is None or not rows:
         return rows[:top_n]
-    texts = []
+    texts: list[str] = []
+    # ponytail: 1 file read per candidate (≤ _RERANK_POOL=25). Same file read once
+    # per chunk even when multiple chunks from the same note are in candidates.
+    # Upgrade: group by note_path, read once, slice all chunks.
     for row in rows:
         char_start, char_end = row[6], row[7]
         if char_start is not None and char_end is not None:
@@ -51,7 +54,7 @@ def _rerank(rows: list, query: str, top_n: int) -> list:
         else:
             text = row[4] or ""
         texts.append(text)
-    pairs = [[query, t] for t in texts]
-    scores = reranker.predict(pairs).tolist()
+    pairs = [(query, t) for t in texts]
+    scores = reranker.predict(pairs).tolist()  # type: ignore[arg-type]
     ranked = sorted(zip(scores, rows), key=lambda x: x[0], reverse=True)
     return [r for _, r in ranked[:top_n]]

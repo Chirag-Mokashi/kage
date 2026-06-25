@@ -86,6 +86,9 @@ def _session_turns(session_id: str, token_budget: int = 4000) -> list[dict]:
         kept = []
         est_total = 0
         for row in reversed(rows):
+            # ponytail: 4 chars/token approximation; real ratio is ~3.5–5 by content.
+            # Ceiling: budget misfires on code-heavy or non-Latin sessions.
+            # Upgrade: tiktoken for precise count.
             est = len(row[2]) // 4
             if est_total + est > token_budget:
                 break

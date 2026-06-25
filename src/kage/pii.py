@@ -51,6 +51,9 @@ _PII_PATTERNS: list[dict] = [
 
 def _pii_scan(text: str, extra_patterns: list[dict] | None = None) -> list[str]:
     """Scan text for PII patterns; return list of matched pattern names (empty = clean)."""
+    # ponytail: O(p) regex passes per text (p=28 patterns). Fine for typical notes.
+    # Ceiling: noticeable on notes > 50k chars in a long session.
+    # Upgrade: compile |-joined union and scan once.
     hits = []
     for entry in (_PII_PATTERNS + (extra_patterns or [])):
         try:

@@ -51,6 +51,8 @@ _arm_app = typer.Typer(help="Arm (MCP client) commands.")
 app.add_typer(_arm_app, name="arm")
 _scout_app = typer.Typer(help="Scout agent commands.")
 app.add_typer(_scout_app, name="scout")
+_librarian_app = typer.Typer(help="Librarian agent commands.")
+app.add_typer(_librarian_app, name="librarian")
 
 # ── Layout ────────────────────────────────────────────────────────────────
 KAGE_HOME = Path(os.environ.get("KAGE_HOME") or Path.home() / ".kage")  # override for relocation/tests
@@ -1655,6 +1657,95 @@ def scout_status() -> None:
     typer.echo(f"enabled: {enabled}")
     typer.echo(f"last run: {last}")
     typer.echo(f"cache size: {len(cache)} items")
+
+
+@_librarian_app.command("run")
+def librarian_run() -> None:
+    """Process staging queue — distill, judge, and request approval for each item."""
+    from kage import librarian as _lib
+    cfg = _config()
+    result = _lib.run(cfg)
+    typer.echo(result)
+
+
+@_librarian_app.command("approve")
+def librarian_approve(approval_id: str) -> None:
+    """Write a staged note to permanent memory (post-approval)."""
+    from kage import librarian as _lib
+    ok = _lib.write_note(approval_id)
+    if ok:
+        typer.echo(f"approved and written: {approval_id}")
+    else:
+        typer.echo(f"approval not found: {approval_id}", err=True)
+        raise typer.Exit(code=1)
+
+
+@_librarian_app.command("reject")
+def librarian_reject(
+    approval_id: str,
+    reason: str = typer.Option("", "--reason", "-r", help="Optional rejection reason"),
+) -> None:
+    """Reject a pending approval request."""
+    from kage import librarian as _lib
+    ok = _lib.reject_approval(approval_id, reason)
+    if ok:
+        typer.echo(f"rejected: {approval_id}")
+    else:
+        typer.echo(f"approval not found: {approval_id}", err=True)
+        raise typer.Exit(code=1)
+
+
+@_librarian_app.command("queue")
+def librarian_queue(held: bool = typer.Option(False, "--held", help="Show held items instead of pending")) -> None:
+    """Show queue counts and recent items."""
+    from kage import librarian as _lib
+    status = "held" if held else "pending"
+    items = _lib.get_staging_queue(status=status)
+    stats = _lib.get_catalog_stats()
+    typer.echo(f"queue [{status}]: {len(items)} items  (total notes: {stats['note_count']})")
+    for item in items[:10]:
+        preview = (item.get("content", "") or "")[:80].replace("\n", " ")
+        typer.echo(f"  {item['id'][:8]}  {item['source']:<10}  {preview}")
+    if len(items) > 10:
+        typer.echo(f"  … and {len(items) - 10} more")
+
+
+@_librarian_app.command("locate")
+def librarian_locate(query: str) -> None:
+    """Metadata lookup — where is this topic in memory? (no bodies, paths only)"""
+    from kage import librarian as _lib
+    results = _lib.locate_memory(query)
+    if not results:
+        typer.echo("no matches")
+        return
+    for r in results:
+        typer.echo(f"  {r['content_path']}  recalled={r['recalled_count']}  source={r.get('source', '')}")
+
+
+@_librarian_app.command("scan")
+def librarian_scan() -> None:
+    """Run a staleness scan on the full memory catalog (on-demand)."""
+    # ponytail: currently delegates to run() — the agent's _LIBRARIAN_INSTRUCTION already
+    # includes staleness annotation. Upgrade path: add a dedicated scan-only LlmAgent prompt
+    # that skips the PROMOTE/HOLD/DISCARD routing and only annotates stale notes.
+    from kage import librarian as _lib
+    cfg = _config()
+    result = _lib.run(cfg)
+    typer.echo(result)
+
+
+@_librarian_app.command("status")
+def librarian_status() -> None:
+    """Catalog stats: note count, queue depth, last run, notes by source."""
+    from kage import librarian as _lib
+    stats = _lib.get_catalog_stats()
+    typer.echo(f"notes:      {stats['note_count']}")
+    typer.echo(f"queue:      {stats['queue_depth']} pending")
+    typer.echo(f"last run:   {stats.get('last_run', 'never')}")
+    if stats.get("notes_by_source"):
+        typer.echo("by source:")
+        for src, count in stats["notes_by_source"].items():
+            typer.echo(f"  {src:<12} {count}")
 
 
 if __name__ == "__main__":  # pragma: no cover

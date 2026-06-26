@@ -90,6 +90,67 @@ class Store:
                 conn.commit()
             except sqlite3.OperationalError:
                 pass  # column already exists in an existing DB
+            try:
+                conn.execute("ALTER TABLE memories ADD COLUMN source TEXT DEFAULT 'user'")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE memories ADD COLUMN recalled_count INTEGER DEFAULT 0")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE memories ADD COLUMN last_recalled TEXT DEFAULT NULL")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE memories ADD COLUMN librarian_flag TEXT DEFAULT 'none'")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE memories ADD COLUMN superseded_by TEXT DEFAULT NULL")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE memories ADD COLUMN tags TEXT DEFAULT NULL")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS staging_queue (
+                    id           TEXT PRIMARY KEY,
+                    content      TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    source       TEXT NOT NULL,
+                    project      TEXT DEFAULT NULL,
+                    identity     TEXT DEFAULT NULL,
+                    status       TEXT NOT NULL DEFAULT 'pending',
+                    created_at   TEXT NOT NULL,
+                    decision     TEXT,
+                    reason       TEXT,
+                    reviewed_at  TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_sq_status ON staging_queue(status);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_sq_hash ON staging_queue(content_hash, status);
+
+                CREATE TABLE IF NOT EXISTS approval_queue (
+                    id                TEXT PRIMARY KEY,
+                    staging_id        TEXT,
+                    note_id           TEXT,
+                    action            TEXT NOT NULL,
+                    reason            TEXT NOT NULL,
+                    sanitized_preview TEXT NOT NULL,
+                    note_json         TEXT NOT NULL,
+                    created_at        TEXT NOT NULL,
+                    decided_at        TEXT,
+                    decision          TEXT,
+                    FOREIGN KEY (staging_id) REFERENCES staging_queue(id)
+                );
+            """)
         finally:
             conn.close()
 

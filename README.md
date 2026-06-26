@@ -19,11 +19,11 @@ kage is defined at three nested levels, all simultaneously true:
 
 ---
 
-## Current state — v0.15.0
+## Current state — v0.16.0
 
 kage ships as a headless CLI and MCP server. The full UI layer (via Odysseus integration) is in progress.
 
-**Honest status:** today kage is a *context-gated forwarder with a hard identity wall, stateful sessions, arm routing for live external data, and a first proactive agent — Scout*. It retrieves your notes, enforces the identity × project partition before any note reaches retrieval, gates what may leave your machine, holds multi-turn conversation state, and forwards a grounded query to the model *you* select (switchable mid-session, with the privacy gate re-run on switch). Scout fetches external signals (Hacker News, arXiv, GitHub, Reddit, RSS) on demand, classifies them into Tier 1 (Actionable) / Tier 2 (Good to Know) using a local ADK pipeline, and writes a morning digest to `~/.kage/scout/`. The full *broker* behavior (continuous monitoring, Librarian/Monitor agents promoting findings to memory) is on the roadmap below. The BROKER level above describes the direction; this section describes what runs today.
+**Honest status:** today kage is a *context-gated forwarder with a hard identity wall, stateful sessions, arm routing for live external data, and two proactive agents — Scout and Librarian*. It retrieves your notes, enforces the identity × project partition before any note reaches retrieval, gates what may leave your machine, holds multi-turn conversation state, and forwards a grounded query to the model *you* select (switchable mid-session, with the privacy gate re-run on switch). Scout fetches external signals (Hacker News, arXiv, GitHub, Reddit, RSS) on demand, classifies them into Tier 1 (Actionable) / Tier 2 (Good to Know) using a local ADK pipeline, and writes a morning digest to `~/.kage/scout/`. Librarian processes Scout's findings through a 3e-gated distill-and-judge pipeline and presents promotion requests for your approval — nothing reaches permanent memory without an explicit `kage librarian approve`. The full *broker* behavior (continuous monitoring via Monitor) is on the roadmap below.
 
 ```
   ┌─────────────────────────────────────────────────────────────┐
@@ -32,6 +32,14 @@ kage ships as a headless CLI and MCP server. The full UI layer (via Odysseus int
   │  HN · arXiv · GitHub · Reddit · RSS                        │
   │  ADK Workflow: ScoutBroad (local) → ScoutIntegrate (cloud) │
   │  Tier 1/2 triage · project-aware · ~/.kage/scout/          │
+  └─────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │  LIBRARIAN (memory curator — HITL approval gate)            │
+  │  kage librarian run / queue / approve / reject / status    │
+  │  staging queue → distill_and_judge (3e gate + LLM)         │
+  │  PROMOTE / HOLD / DISCARD · human approves every write     │
+  │  nothing enters ~/.kage/memory/ without kage librarian approve│
   └─────────────────────────────────────────────────────────────┘
 
   ┌─────────────────────────────────────────────────────────────┐
@@ -135,6 +143,13 @@ kage scout dry-run                  Fetch + triage only — print digest and dis
 kage scout bootstrap                Seed the seen-cache without writing a report.
                                     Run once before the first kage scout run.
 kage scout status                   Show cache size, last run date, token log summary.
+
+kage librarian run                  Process pending staging items — distill, judge, queue for approval.
+kage librarian queue                Show items awaiting your approval (--held for held items).
+kage librarian approve <id>         Write an approved note to permanent memory.
+kage librarian reject <id>          Reject an approval request (item stays in staging).
+kage librarian locate <query>       Search permanent memory (pre-check before depositing).
+kage librarian status               Show catalog stats: note count, queue depth, last run.
 ```
 
 Arms are configured under `arms` in `~/.kage/config.json`. Each arm declares a
@@ -318,9 +333,11 @@ kage today is a passive broker — it answers when called. The target is an acti
   Cycle 12   Modularity                 SHIPPED — injectable seams, 16 modules, registries
   Cycle 13   Arms expansion             SHIPPED — gmail arm (osascript) + browser arm (Playwright MCP)
   Cycle 14   Scout agent                SHIPPED — proactive ADK Workflow, Tier 1/2 triage, project-aware
-  Cycle 15   Librarian agent            Promote scout findings to project memory, Layer 2 scaffold
+  Cycle 15   Librarian agent            SHIPPED — ADK LlmAgent, HITL approval gate, 3e-gated distill-and-judge
   Cycle 16   Monitor agent              Continuous watcher, alert routing
 ```
+
+Cycle 15 shipped Librarian — kage's sole writer to permanent memory. Librarian runs as an ADK `LlmAgent` with 10 tools over a two-table staging pipeline (`staging_queue` → `approval_queue`). Every item deposited by Scout (or manually via `kage librarian`) passes through a 3e-gated `distill_and_judge` call: PII is scrubbed unconditionally, existing notes are checked for dedup and supersession, and the LLM judges PROMOTE / HOLD / DISCARD against five criteria (durability, actionability, novelty, specificity, contradiction). PROMOTE items surface in `kage librarian queue` awaiting your approval — nothing reaches `~/.kage/memory/` without `kage librarian approve`. Write order is DB-first (stale pointer recoverable via `kage reindex`; ghost file undetectable), writes are idempotent, and a dual-lock (threading + lockfile) prevents concurrent runs.
 
 Cycle 14 shipped Scout — kage's first proactive behavior. Scout fetches public signals from five sources (HN, arXiv, GitHub, Reddit, RSS) on demand, classifies them into Tier 1 (Actionable — things that could become a cycle or implementation decision) and Tier 2 (Good to Know — news, trends, opinion) using a two-stage ADK Workflow, and writes a project-aware morning digest. ScoutBroad (local Qwen3) triages; ScoutIntegrate (cloud Claude) writes full business-ruthlessness cards for Tier 1 items, consulting project memory via `scout_recall` before every card. Scout finds. You decide. Librarian remembers.
 
@@ -366,12 +383,14 @@ src/kage/
 ├── chunk.py        Note chunking — pure text logic, no I/O
 ├── pii.py          PII patterns + scanner — pure, no I/O
 ├── scout.py        Scout agent — fetch (5 sources), dedup, corpus, ADK pipeline, report writer
+├── librarian.py    Librarian agent — staging queue, distill_and_judge, HITL approval, memory write
 └── mcp_server.py   MCP server (FastMCP, stdio transport)
 
 tests/
-├── test_cli.py     372 tests — CLI commands + all seam behaviors
-├── test_scout.py    46 tests — fetch layer, corpus, dedup, ADK pipeline, project injection
-├── test_seams.py    13 tests — seam contracts + registry functions
+├── test_cli.py         372 tests — CLI commands + all seam behaviors
+├── test_scout.py        46 tests — fetch layer, corpus, dedup, ADK pipeline, project injection
+├── test_librarian.py    18 tests — schema migration, staging queue, distill_and_judge, HITL loop
+├── test_seams.py        13 tests — seam contracts + registry functions
 └── fakes.py        Test doubles: FakeEmbedder, FakeVectorIndex, RecordingCloud, FakeConfig
 
 docs/
@@ -379,6 +398,7 @@ docs/
 ├── cycle-12-modularity.md   Modularity design — injectable seams, 6 slices
 ├── cycle-14-scout.md        Scout agent pitch — ADK design, source list, seen-cache
 ├── cycle-14-scout-v1.1.md   Scout v1.1 — Tier 1/2 triage, project-aware, GitHub stats
+├── cycle-15-librarian.md    Librarian agent pitch — staging pipeline, HITL design, cold reviews
 └── ...                      Historical cycle pitches and research
 ```
 

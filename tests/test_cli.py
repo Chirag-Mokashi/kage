@@ -2936,7 +2936,17 @@ def test_pii_scan_matches_pan():
 
 
 def test_pii_scan_matches_openai_key():
-    assert "OpenAI key" in cli._pii_scan("key=sk-abcdefghijklmnopqrstuv")
+    assert "OpenAI/Anthropic key" in cli._pii_scan("sk-proj-stdKAG8g91AgyX4LjkxqSWjnlBajd5eMWu43s5q")
+    assert "OpenAI/Anthropic key" in cli._pii_scan("sk-ant-api03-abcdefghijklmnopqrstuvwxyz12345678")
+    assert "OpenAI/Anthropic key" in cli._pii_scan("sk-or-v1-6e4f1991bb3203c5e2c9de11ed99a059dca166")
+
+
+def test_pii_scan_api_key_in_context():
+    assert "API key in context" in cli._pii_scan("MISTRAL_API_KEY=hfuyc7Mrp8OKPwUTVeTXjo6Dp6WbixZj")
+    assert "API key in context" in cli._pii_scan("OPENROUTER_API_KEY: sk-or-v1-6e4f1991bb3203c5e2c9de")
+    assert "API key in context" in cli._pii_scan('"api_key": "fw_LygtnpFfM8qJp5sAYskkY9xxxxxxxxx"')
+    assert "API key in context" in cli._pii_scan("groq api-key: gsk_MubcKry7lH6v1X7l3kP1WGdy")
+    assert "API key in context" not in cli._pii_scan("remember to set OPENAI_API_KEY in your env file")
 
 
 def test_pii_scan_matches_email():
@@ -3074,12 +3084,12 @@ def test_disclosure_gate_withholds_pii_detected(monkeypatch, tmp_path):
     """Gate must block a note that matches a PII pattern even without the local_only flag."""
     h = _save_home(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
-    mem_id = cli._save("my key is sk-abcdefghijklmnopqrstuv", None)
+    mem_id = cli._save("my key is sk-abcdefghijklmnopqrstuv1234567890xxxxx", None)
     cfg = cli._config()
     allowed, withheld = cli._disclosure_gate([_fake_row(mem_id)], cfg)
     assert allowed == []
     assert withheld[0]["reason"] == "pii_detected"
-    assert "OpenAI key" in withheld[0]["pii_patterns"]
+    assert "OpenAI/Anthropic key" in withheld[0]["pii_patterns"]
 
 
 def test_disclosure_gate_allows_clean_note(monkeypatch, tmp_path):

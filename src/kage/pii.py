@@ -30,7 +30,9 @@ _PII_PATTERNS: list[dict] = [
     {"name": "CVV",              "pattern": r"(?i)cvv\s*[:=]\s*\d{3,4}"},
     # CREDENTIALS AND KEYS
     {"name": "Password field",   "pattern": r"(?i)(password|passwd|pwd|secret)\s*[:=]\s*\S+"},
-    {"name": "OpenAI key",       "pattern": r"\bsk-[A-Za-z0-9]{20,}\b"},
+    {"name": "OpenAI/Anthropic key", "pattern": r"\bsk-[A-Za-z0-9_-]{32,}"},
+    {"name": "API key in context",      "pattern": r"(?i)\w*api[\s_-]?key\s*[\"']?\s*[:=]\s*[\"']?\s*\S{8,}"},
+    {"name": "Secret/token in context", "pattern": r"(?i)\b(?:secret|access|auth)[\s_-]?(?:key|token)\s*[\"']?\s*[:=]\s*[\"']?\s*\S{8,}"},
     {"name": "Google key",       "pattern": r"\bAIza[A-Za-z0-9_-]{35}\b"},
     {"name": "GitHub PAT",       "pattern": r"\bghp_[A-Za-z0-9]{36}\b"},
     {"name": "GitHub OAuth",     "pattern": r"\bgho_[A-Za-z0-9]{36}\b"},

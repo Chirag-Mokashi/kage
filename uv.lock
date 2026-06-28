@@ -2155,6 +2155,7 @@ dependencies = [
     { name = "chromadb" },
     { name = "google-adk", extra = ["extensions"] },
     { name = "mcp", extra = ["cli"] },
+    { name = "psutil" },
     { name = "typer" },
 ]
 
@@ -2172,6 +2173,7 @@ requires-dist = [
     { name = "chromadb", specifier = ">=1.5.9" },
     { name = "google-adk", extras = ["extensions"], specifier = ">=2.3.0" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.0" },
+    { name = "psutil", specifier = ">=5.9" },
     { name = "typer", specifier = ">=0.12" },
 ]
 

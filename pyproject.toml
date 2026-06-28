@@ -31,12 +31,6 @@ dev = [
 rerank = [
     "sentence-transformers>=3",
 ]
-macos = [
-    "pyobjc-framework-AppKit>=10.0",
-    "pyobjc-framework-Quartz>=10.0",
-    "pyobjc-framework-ApplicationServices>=10.0",
-    "pyobjc-framework-ScriptingBridge>=10.0",
-]
 
 [tool.pytest.ini_options]
 pythonpath = ["tests"]

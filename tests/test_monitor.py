@@ -340,3 +340,61 @@ def test_read_antigravity_ctx(mon_env, monkeypatch):
     assert result["workspace_md"] == "# Antigravity context"
     assert len(result["recent_mcp_calls"]) == 1
     assert result["recent_mcp_calls"][0]["source"] == "antigravity"
+
+
+def test_monitor_digest_output_key_set(mon_env, monkeypatch):
+    """build_monitor must set output_key='monitor_digest' on digest_agent."""
+    from kage import monitor
+    from kage.monitor import build_monitor
+    monkeypatch.setattr(monitor, "_litellm_target", lambda p, c: ("ollama_chat/qwen3:14b", None, None))
+    cfg = {"local_model": "qwen3:14b", "cloud_provider": "openrouter-free"}
+    workflow = build_monitor(cfg)
+    digest_agent = workflow.edges[1][1]
+    assert digest_agent.output_key == "monitor_digest"
+
+
+def test_check_mcp_health_stdio_ping(monkeypatch):
+    """check_mcp_health must send a JSON-RPC initialize ping and return healthy."""
+    import asyncio
+    import json as _json
+    from unittest.mock import MagicMock, AsyncMock
+    import kage.monitor as _mon
+    from kage import runtime
+
+    # Config with one enabled stdio arm
+    monkeypatch.setattr(runtime, "config", MagicMock())
+    runtime.config.data = {
+        "arms": {
+            "test-mcp": {
+                "enabled": True,
+                "transport": "stdio",
+                "mcp_command": "echo hello",
+            }
+        }
+    }
+
+    # Fake process whose stdout returns a valid JSON-RPC result
+    response_line = (_json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}) + "\n").encode()
+
+    fake_stdout = MagicMock()
+    fake_stdout.readline = AsyncMock(return_value=response_line)
+
+    fake_stdin = MagicMock()
+    fake_stdin.write = MagicMock()
+    fake_stdin.drain = AsyncMock()
+
+    fake_proc = MagicMock()
+    fake_proc.stdin = fake_stdin
+    fake_proc.stdout = fake_stdout
+    fake_proc.kill = MagicMock()
+    fake_proc.wait = AsyncMock()
+
+    async def fake_subprocess_exec(*args, **kwargs):
+        return fake_proc
+
+    monkeypatch.setattr(_mon.asyncio, "create_subprocess_exec", fake_subprocess_exec)
+
+    result = asyncio.run(_mon.check_mcp_health())
+
+    assert "test-mcp" in result
+    assert result["test-mcp"]["status"] == "healthy"

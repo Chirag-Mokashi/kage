@@ -1,3 +1,4 @@
+from unittest.mock import MagicMock
 from kage import scout
 
 
@@ -308,6 +309,7 @@ def test_run_filters_seen_items_from_corpus(monkeypatch, tmp_path):
         home = tmp_path
     class FakeRuntime:
         config = FakeConfig()
+        store = MagicMock()
     monkeypatch.setattr(scout, "runtime", FakeRuntime())
     scout.run("bootstrap")
     assert len(run_once_calls) == 1
@@ -328,6 +330,7 @@ def test_bootstrap_seeds_cache(monkeypatch, tmp_path):
         home = tmp_path
     class FakeRuntime:
         config = FakeConfig()
+        store = MagicMock()
     monkeypatch.setattr(scout, "runtime", FakeRuntime())
     scout.run("bootstrap")
     assert len(update_cache_calls) == 1
@@ -340,6 +343,7 @@ def test_run_refuses_on_empty_cache(monkeypatch, tmp_path):
         home = tmp_path
     class FakeRuntime:
         config = FakeConfig()
+        store = MagicMock()
     monkeypatch.setattr(scout, "runtime", FakeRuntime())
     monkeypatch.setattr(scout, "_load_seen_cache", lambda: set())
     monkeypatch.setattr(scout, "fetch", lambda cfg: [])
@@ -354,6 +358,7 @@ def test_dry_run_skips_report_and_cache(monkeypatch, tmp_path):
         home = tmp_path
     class FakeRuntime:
         config = FakeConfig()
+        store = MagicMock()
     monkeypatch.setattr(scout, "runtime", FakeRuntime())
     monkeypatch.setattr(scout, "_load_seen_cache", lambda: {"existing_key"})
     monkeypatch.setattr(scout, "fetch", lambda cfg: [{"source": "hn", "title": "T", "url": "http://x", "score": 1, "snippet": ""}])
@@ -368,12 +373,15 @@ def test_dry_run_skips_report_and_cache(monkeypatch, tmp_path):
     assert update_cache_calls == []
 
 
+
+
 def test_run_calls_run_once_with_corpus(monkeypatch, tmp_path):
     class FakeConfig:
         data = {"scout": {"cloud_provider": "openrouter-free"}}
         home = tmp_path
     class FakeRuntime:
         config = FakeConfig()
+        store = MagicMock()
     monkeypatch.setattr(scout, "runtime", FakeRuntime())
     monkeypatch.setattr(scout, "_load_seen_cache", lambda: set())
     monkeypatch.setattr(scout, "fetch", lambda cfg: [{"source": "hn", "title": "HN item", "url": "http://h", "score": 5, "snippet": "snip"}])
@@ -573,3 +581,97 @@ def test_integrate_instruction_has_step1():
 
 def test_integrate_instruction_handles_none_tier():
     assert "only '(none)'" in scout._INTEGRATE_INSTRUCTION
+
+
+def test_scout_deposits_tier1_to_queue(monkeypatch, tmp_path):
+    """scout.run() must deposit Tier 1 items to librarian queue, skip Tier 2."""
+    from unittest.mock import patch
+
+    tier1_output = (
+        "## Tier 1\n"
+        "- First item\n"
+        "- Second item\n"
+        "## Tier 2\n"
+        "- Should not deposit\n"
+    )
+
+    class FakeConfig:
+        data = {"scout": {"cloud_provider": "openrouter-free"}}
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+        store = MagicMock()
+
+    monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    monkeypatch.setattr(scout, "_load_seen_cache", lambda: set())
+    monkeypatch.setattr(scout, "fetch", lambda cfg: [
+        {"source": "hn", "title": "T", "url": "http://x", "score": 1, "snippet": "s"}
+    ])
+    monkeypatch.setattr(scout, "_run_once", lambda runner, corpus: tier1_output)
+    monkeypatch.setattr(scout, "_write_report", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_update_cache", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_resolve_context", lambda *a: ("personal", None, "default"))
+
+    with patch("kage.scout.deposit_to_queue") as mock_deposit:
+        scout.run("bootstrap")
+
+    assert mock_deposit.call_count == 2
+    calls = [c.args[0] for c in mock_deposit.call_args_list]
+    assert "First item" in calls
+    assert "Second item" in calls
+    assert "Should not deposit" not in calls
+
+
+def test_scout_pii_seam_strips_email():
+    """_pii_seam must redact PII in llm_request contents before cloud dispatch."""
+    class FakePart:
+        def __init__(self, text):
+            self.text = text
+    class FakeContent:
+        def __init__(self, text):
+            self.parts = [FakePart(text)]
+    class FakeRequest:
+        def __init__(self, text):
+            self.contents = [FakeContent(text)]
+
+    req = FakeRequest("contact admin@example.com for help")
+    scout._pii_seam(None, req)
+    assert "admin@example.com" not in req.contents[0].parts[0].text
+    assert "[REDACTED_PII]" in req.contents[0].parts[0].text
+
+
+def test_scout_run_writes_scout_runs(monkeypatch, tmp_path):
+    """scout.run() must create and insert a row in scout_runs after each run."""
+    import sqlite3
+    from kage.store import Store
+
+    db_path = tmp_path / "kage.db"
+    _store = Store(db_path)
+    _store.init_schema()
+
+    class FakeConfig:
+        data = {"scout": {"cloud_provider": "openrouter-free"}}
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+        store = _store
+
+    monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    monkeypatch.setattr(scout, "_load_seen_cache", lambda: set())
+    monkeypatch.setattr(scout, "fetch", lambda cfg: [
+        {"source": "hn", "title": "T", "url": "http://x", "score": 1, "snippet": "s"}
+    ])
+    monkeypatch.setattr(scout, "_run_once", lambda runner, corpus: "## Tier 1\n- T\n")
+    monkeypatch.setattr(scout, "_write_report", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_update_cache", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None)
+
+    scout.run("bootstrap")
+
+    conn = sqlite3.connect(str(db_path))
+    rows = conn.execute("SELECT notes_fetched, mode FROM scout_runs").fetchall()
+    conn.close()
+    assert len(rows) == 1
+    assert rows[0][0] == 1
+    assert rows[0][1] == "bootstrap"

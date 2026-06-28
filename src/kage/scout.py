@@ -9,6 +9,8 @@ from kage import privacy as _privacy
 from kage import runtime
 from kage.cli import _search, _disclosure_gate
 from kage.context import _resolve_context
+from kage.librarian import deposit_to_queue
+from kage.pii import _gate_text
 import os
 import asyncio
 from google.genai import types
@@ -254,7 +256,12 @@ def scout_recall(query: str) -> list[dict]:
 
 
 def _pii_seam(callback_context, llm_request):
-    # ponytail: v1 pass-through — Layer 3e v2 will implement reversible value-substitution here
+    if llm_request.contents:
+        for content in llm_request.contents:
+            if hasattr(content, "parts"):
+                for part in content.parts:
+                    if hasattr(part, "text") and part.text:
+                        part.text = _gate_text(part.text)
     return None
 
 
@@ -425,5 +432,31 @@ def run(mode: str) -> str:
     if mode != "dry-run":
         _write_report(mode, final)
         _update_cache(cache, items)               # dry-run writes neither report nor cache
+        _, project, _ = _resolve_context(None, None)
+        try:
+            in_tier1 = False
+            for line in final.splitlines():
+                if line.startswith("## Tier 1"):
+                    in_tier1 = True
+                    continue
+                if line.startswith("## Tier 2") or line.startswith("---"):
+                    break
+                if in_tier1 and line.startswith("- "):
+                    deposit_to_queue(line.lstrip("- "), "scout", project=project)
+        except Exception:
+            pass
     _token_log(mode, items, final)
+
+    conn = runtime.store.connect()
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS scout_runs "
+        "(created_at TEXT, notes_fetched INTEGER, mode TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO scout_runs (created_at, notes_fetched, mode) VALUES (?, ?, ?)",
+        (_dt.datetime.now().astimezone().isoformat(timespec="seconds"), len(items), mode),
+    )
+    conn.commit()
+    conn.close()
+
     return final

@@ -15,7 +15,7 @@ from kage.librarian import (
     _apply_migrations, _connect, _acquire_lockfile, _release_lockfile,
     _gate_text, distill_and_judge, ApprovalRequest,
     deposit_to_queue, request_approval, write_note, reject_approval,
-    get_catalog_stats, _LOCKFILE,
+    get_catalog_stats, get_staging_queue, _LOCKFILE,
 )
 
 
@@ -328,3 +328,75 @@ def test_get_catalog_stats_returns_expected_keys(lib_env):
     assert isinstance(stats["note_count"], int)
     assert isinstance(stats["queue_depth"], int)
     assert isinstance(stats["notes_by_source"], dict)
+
+
+def test_librarian_uses_cloud_provider_key(lib_env, monkeypatch, tmp_path):
+    """distill_and_judge must resolve provider from cloud_provider, not default_provider."""
+    import json as _json
+    from unittest.mock import MagicMock
+    from kage import librarian, runtime
+
+    # Write config.json with cloud_provider but NO default_provider key
+    (tmp_path / ".kage" / "config.json").write_text(
+        _json.dumps({"cloud_provider": "openrouter-free"})
+    )
+
+    captured = {}
+    def fake_complete(provider, _system, _messages, _cfg):
+        captured["provider"] = provider
+        return '{"decision": "promote", "reason": "test", "tags": []}'
+
+    fake_cloud = MagicMock()
+    fake_cloud.complete.side_effect = fake_complete
+    monkeypatch.setattr(runtime, "cloud", fake_cloud)
+
+    librarian.distill_and_judge("some content", "scout")
+
+    assert captured.get("provider") == "openrouter-free"
+
+
+def test_get_staging_queue_without_monitor_migration(lib_env):
+    """get_staging_queue must not raise on a fresh DB where Monitor never ran."""
+    # lib_env already called librarian._apply_migrations via _connect() internally.
+    # Monitor's _apply_migrations is intentionally NOT called here.
+    from kage.librarian import get_staging_queue
+    result = get_staging_queue()   # must not raise sqlite3.OperationalError
+    assert isinstance(result, list)
+
+
+def test_get_staging_queue_respects_batch_size(lib_env):
+    """get_staging_queue must cap results at librarian.batch_size from config."""
+    import json as _json
+    # Write config with batch_size=3
+    (lib_env / "config.json").write_text(_json.dumps({"librarian": {"batch_size": 3}}))
+    # Deposit 5 items
+    for i in range(5):
+        deposit_to_queue(f"item {i}", "test")
+    result = get_staging_queue()
+    assert len(result) == 3
+
+
+def test_distill_and_judge_sleeps_with_delay(lib_env, monkeypatch):
+    """distill_and_judge must call time.sleep(delay_seconds) when configured."""
+    import json as _json
+    import kage.librarian as _lib
+    from unittest.mock import MagicMock
+    from kage import runtime
+
+    # Write config with delay_seconds=2
+    (lib_env / "config.json").write_text(
+        _json.dumps({"librarian": {"delay_seconds": 2}, "cloud_provider": "openrouter-free"})
+    )
+
+    # Mock cloud to return valid JSON
+    fake_cloud = MagicMock()
+    fake_cloud.complete.return_value = '{"decision": "promote", "reason": "test", "tags": []}'
+    monkeypatch.setattr(runtime, "cloud", fake_cloud)
+
+    # Capture sleep calls
+    sleep_calls = []
+    monkeypatch.setattr(_lib.time, "sleep", lambda s: sleep_calls.append(s))
+
+    _lib.distill_and_judge("some content", "scout")
+
+    assert sleep_calls == [2]

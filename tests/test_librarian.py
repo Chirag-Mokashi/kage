@@ -400,3 +400,22 @@ def test_distill_and_judge_sleeps_with_delay(lib_env, monkeypatch):
     _lib.distill_and_judge("some content", "scout")
 
     assert sleep_calls == [2]
+
+
+def test_librarian_gate_applies_vault_pattern(lib_env, monkeypatch):
+    """librarian._gate_text must redact vault patterns with [SENSITIVE:<label>]."""
+    import json as _json
+    import pathlib
+
+    (lib_env / "sensitive.json").write_text(_json.dumps({
+        "patterns": [{"id": "cc3dd4ee", "label": "employer-name", "pattern": r"Initech", "added_at": "2026-06-29"}]
+    }))
+    home = lib_env.parent
+    monkeypatch.setattr(pathlib.Path, "home", lambda: home)
+
+    from kage.librarian import _gate_text
+    result = _gate_text("I work at Initech on a secret project", {})
+
+    assert "[SENSITIVE:employer-name]" in result
+    assert "Initech" not in result
+    assert "[REDACTED_PII]" not in result

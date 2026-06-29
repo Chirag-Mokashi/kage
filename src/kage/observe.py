@@ -8,6 +8,11 @@ from typing import Optional
 import logging
 from kage import runtime
 
+try:
+    from AppKit import NSWorkspace as _NSWorkspace
+except ImportError:
+    _NSWorkspace = None
+
 logger = logging.getLogger(__name__)
 
 _AFK_THRESHOLD = 180.0
@@ -147,8 +152,14 @@ def _observe_loop() -> None:
             conn.close()
         except Exception:
             pass
+        try:
+            fi = _NSWorkspace.sharedWorkspace().frontmostApplication()
+            app_name = fi.localizedName() or ""
+            bundle   = fi.bundleIdentifier() or ""
+        except Exception:
+            app_name, bundle = "", ""
         ev = ObserveEvent(
-            ts=time.time(), app="", bundle="",
+            ts=time.time(), app=app_name, bundle=bundle,
             window=_pii_strip(window), ax_text=_pii_strip(ax_text),
             trigger=CaptureTrigger.IDLE.value, duration=0.0,
             project=project, identity=identity,
@@ -160,11 +171,11 @@ def read_observe_log(hours: float = 1.0) -> list[dict]:
     try:
         cutoff = time.time() - hours * 3600
         kage_dir = Path.home() / ".kage" / "observe"
-        today = datetime.now().strftime("%Y-%m-%d")
-        files = [kage_dir / f"{today}.jsonl"]
-        if hours > 12:
-            yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-            files.append(kage_dir / f"{yesterday}.jsonl")
+        days_back = int(hours / 24) + 1
+        files = [
+            kage_dir / f"{(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d')}.jsonl"
+            for i in range(days_back)
+        ]
         result = []
         for fp in files:
             if not fp.exists():

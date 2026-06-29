@@ -11,6 +11,7 @@ The provider dispatch (claude / openai-compat / gemini) is moved verbatim from
 from __future__ import annotations
 
 import os
+import subprocess
 import urllib.error
 from collections.abc import Callable
 
@@ -64,14 +65,30 @@ def _dispatch_gemini(pcfg: dict, key: str, system: str, messages: list[dict]) ->
          "parts": [{"text": m["content"]}]}
         for m in messages
     ]
-    out = _post_json(url, {
+    body: dict = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": contents,
-    })
+    }
+    if pcfg.get("search_grounding"):
+        body["tools"] = [{"google_search": {}}]
+    out = _post_json(url, body)
     candidates = out.get("candidates") or []
     if not candidates or "content" not in candidates[0]:
         raise CloudError("Gemini returned no content")
     return candidates[0]["content"]["parts"][0]["text"].strip()
+
+
+def _dispatch_shell_llm(pcfg: dict, key: str, system: str, messages: list[dict]) -> str:
+    cmd = pcfg["command"]
+    model = pcfg.get("model", "")
+    prompt = system + "\n\n" + messages[-1]["content"]
+    try:
+        result = subprocess.run([cmd, "--print", "--model", model, prompt], capture_output=True, text=True, timeout=120)
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError) as exc:
+        raise CloudError(f"shell-llm '{cmd}' failed: {exc}") from exc
+    if result.returncode != 0 or not result.stdout.strip():
+        raise CloudError(f"shell-llm '{cmd}' exited {result.returncode}: {result.stderr[:200]}")
+    return result.stdout.strip()
 
 
 _PROVIDER_REGISTRY: dict[str, Callable[[dict, str, str, list[dict]], str]] = {}
@@ -88,6 +105,7 @@ register_provider_type("claude", _dispatch_claude)
 register_provider_type("openai", _dispatch_openai_compat)
 register_provider_type("openai-compat", _dispatch_openai_compat)
 register_provider_type("gemini", _dispatch_gemini)
+register_provider_type("shell-llm", _dispatch_shell_llm)
 
 
 class CloudClient:
@@ -103,9 +121,10 @@ class CloudClient:
                 f"Add providers.{provider_name} to ~/.kage/config.json"
             )
         pcfg = {**default_pcfg, **user_pcfg}
-        key = os.environ.get(pcfg["api_key_env"], "")
-        if not key:
-            raise CloudError(f"{pcfg['api_key_env']} not set (provider: {provider_name})")
+        api_key_env = pcfg.get("api_key_env", "")
+        key = os.environ.get(api_key_env, "") if api_key_env else ""
+        if not key and api_key_env:
+            raise CloudError(f"{api_key_env} not set (provider: {provider_name})")
         ptype = pcfg.get("type", "openai-compat")
         dispatch_fn = _PROVIDER_REGISTRY.get(ptype)
         if dispatch_fn is None:

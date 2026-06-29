@@ -36,6 +36,7 @@ from kage import arms as _arms
 # CloudError + DEFAULT_PROVIDERS now live in kage.cloud (Cycle 12 Slice 1); re-export so
 # cli.CloudError / cli.DEFAULT_PROVIDERS stay the public/test surface.
 from kage.cloud import CloudError, DEFAULT_PROVIDERS  # noqa: E402,F401
+from kage.router import _classify, _candidates
 
 
 app = typer.Typer(
@@ -946,6 +947,7 @@ def ask(
     no_sources: bool = typer.Option(False, "--no-sources", help="Suppress the Sources block."),
     always_ask: bool = typer.Option(False, "--always-ask", help="Re-prompt before each cloud dispatch (overrides session approval memory)."),
     identity: str = typer.Option(None, "--identity", "-i", help="Identity scope (default: personal)."),
+    auto: bool = typer.Option(False, "--auto", help="Classify query and auto-route to the best model."),
 ) -> None:
     """Answer a question using your recalled notes — local model by default, --cloud to use a cloud provider."""
     _require_init()
@@ -953,6 +955,18 @@ def ask(
 
     rows = _search(question, project, limit, any_terms=True, identity=identity)
     cfg = _config()
+    candidates: list[str] = []
+    task_class: str = "chat"
+
+    if auto:
+        if cloud or provider:
+            typer.echo("[kage] --auto is mutually exclusive with --cloud / --provider.", err=True)
+            raise typer.Exit(code=1)
+        task_class = _classify(question)
+        candidates = _candidates(task_class, cfg)
+        if candidates:
+            cloud = True
+            provider = candidates[0]
 
     # 3e disclosure gate — runs before context assembly, cloud path only
     provider_name: str = ""
@@ -1079,24 +1093,42 @@ def ask(
         effective_context = context
     thinking = ""
 
+    answer = ""
     if cloud:
-        default_pcfg = DEFAULT_PROVIDERS.get(provider_name, {})
-        user_pcfg = cfg.get("providers", {}).get(provider_name, {})
-        pcfg = {**default_pcfg, **user_pcfg}
-        model = pcfg.get("model", provider_name)
-        typer.echo(f"· asking {model} via {provider_name} ({len(rows)} note(s) as context)…\n")
         user_msg = question if arm_context else f"CONTEXT:\n{effective_context}\n\nQUESTION: {question}"
-        try:
-            answer = _call_cloud(
-                provider_name,
-                system,
-                user_msg,
-                cfg,
-            )
-        except CloudError as e:
-            typer.echo(str(e), err=True)
-            raise typer.Exit(code=1)
-    else:
+        if auto and candidates:
+            for pname in candidates:
+                _pcfg = {**DEFAULT_PROVIDERS.get(pname, {}), **cfg.get("providers", {}).get(pname, {})}
+                _model = _pcfg.get("model", pname)
+                if task_class == "multimodal" and pname == candidates[0]:
+                    typer.echo("[kage] Multimodal route: no attachment provided — answering from notes only.")
+                typer.echo(f"· asking {_model} via {pname} ({len(rows)} note(s) as context)…\n")
+                try:
+                    answer = _call_cloud(pname, system, user_msg, cfg)
+                    if pname != candidates[0]:
+                        _write_audit({"ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"), "provider": pname, "project": project, "notes_retrieved": len(rows), "notes_withheld": 0, "withheld_reasons": [], "pii_detected": [], "user_approved": True, "outcome": "dispatched_fallback"})
+                    break
+                except CloudError:
+                    if pname != candidates[-1]:
+                        for p in candidates:
+                            _session_approvals[p] = True
+                        typer.echo(f"[kage] {pname} failed, trying fallback…")
+                    else:
+                        if task_class == "research":
+                            typer.echo("[kage] Web search unavailable. Answering from notes only.")
+                        cloud = False
+        else:
+            default_pcfg = DEFAULT_PROVIDERS.get(provider_name, {})
+            user_pcfg = cfg.get("providers", {}).get(provider_name, {})
+            pcfg = {**default_pcfg, **user_pcfg}
+            model = pcfg.get("model", provider_name)
+            typer.echo(f"· asking {model} via {provider_name} ({len(rows)} note(s) as context)…\n")
+            try:
+                answer = _call_cloud(provider_name, system, user_msg, cfg)
+            except CloudError as e:
+                typer.echo(str(e), err=True)
+                raise typer.Exit(code=1)
+    if not cloud:
         model = cfg.get("model", "qwen3:14b")
         url = cfg.get("ollama_url", "http://localhost:11434") + "/api/generate"
         typer.echo(f"· asking {model} ({len(rows)} note(s) as context)…\n")

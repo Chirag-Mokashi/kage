@@ -447,10 +447,11 @@ def build_monitor(cfg: dict):
     from google.adk.models.lite_llm import LiteLlm
     from google.adk.workflow import Workflow, START
 
+    from kage.sensitive import scan_sensitive_patterns
     observe_tools = [
         read_pipeline_state, read_session_log, read_observe_log, check_mcp_health,
         read_system_metrics, read_command_history, read_antigravity_ctx, ping_kage_mcp,
-        write_alert, set_item_priority,
+        write_alert, set_item_priority, scan_sensitive_patterns,
     ]
     local_model = cfg.get("local_model", "qwen3:14b")
     observe_agent = LlmAgent(

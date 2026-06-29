@@ -339,6 +339,16 @@ def _gate_text(content: str, cfg: dict) -> str:
             sanitized = re.sub(entry["pattern"], "[REDACTED_PII]", sanitized)
         except re.error:
             pass  # skip malformed user-configured patterns
+    # vault patterns: separate pass so they emit [SENSITIVE:<label>], not [REDACTED_PII]
+    try:
+        from kage.sensitive import load_vault
+        for p in load_vault().get("patterns", []):
+            try:
+                sanitized = re.sub(p["pattern"], f"[SENSITIVE:{p['label']}]", sanitized, flags=re.IGNORECASE)
+            except re.error:
+                pass
+    except Exception:
+        pass
     return sanitized
 
 

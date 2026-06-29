@@ -56,6 +56,8 @@ _librarian_app = typer.Typer(help="Librarian agent commands.")
 app.add_typer(_librarian_app, name="librarian")
 _monitor_app = typer.Typer(help="Monitor agent commands.")
 app.add_typer(_monitor_app, name="monitor")
+_sensitive_app = typer.Typer(help="Sensitive vault commands.")
+app.add_typer(_sensitive_app, name="sensitive")
 
 # ── Layout ────────────────────────────────────────────────────────────────
 KAGE_HOME = Path(os.environ.get("KAGE_HOME") or Path.home() / ".kage")  # override for relocation/tests
@@ -1878,6 +1880,51 @@ def monitor_uninstall() -> None:
     _sp.run(["launchctl", "bootout", f"gui/{_os.getuid()}", str(plist_path)], check=False)
     plist_path.unlink(missing_ok=True)
     typer.echo("Monitor uninstalled.")
+
+
+@_sensitive_app.command("list")
+def sensitive_list() -> None:
+    """List all user-defined sensitive patterns in the vault."""
+    from kage.sensitive import load_vault
+    vault = load_vault()
+    patterns = vault.get("patterns", [])
+    if not patterns:
+        typer.echo("No patterns in vault. Use: kage sensitive add <label> <pattern>")
+    else:
+        for p in patterns:
+            typer.echo(f"[{p['id']}]  {p['label']}  →  {p['pattern']}")
+    typer.echo(
+        "\nNote: vault patterns are enforced in scout and librarian paths only."
+        " `kage ask` and `kage chat` do not apply vault patterns in this release."
+    )
+
+
+@_sensitive_app.command("add")
+def sensitive_add(label: str = typer.Argument(..., help="Short label for this pattern"),
+                  pattern: str = typer.Argument(..., help="Regex or literal string")) -> None:
+    """Add a sensitive pattern to the vault."""
+    import re as _re
+    from kage.sensitive import add_pattern
+    try:
+        add_pattern(label, pattern)
+        typer.echo(f"Added: {label}  →  {pattern}")
+    except _re.error as exc:
+        typer.echo(f"Error: invalid regex — {exc}", err=True)
+        raise typer.Exit(code=1)
+
+
+@_sensitive_app.command("scan")
+def sensitive_scan() -> None:
+    """Scan memory notes for built-in PII and vault pattern hits."""
+    from kage.sensitive import bootstrap
+    results = bootstrap(MEMORY_DIR)
+    if not results:
+        typer.echo("No sensitive patterns found in memory.")
+    else:
+        for item in results:
+            typer.echo(f"{item['path']}")
+            for h in item["hits"]:
+                typer.echo(f"  · {h}")
 
 
 if __name__ == "__main__":  # pragma: no cover

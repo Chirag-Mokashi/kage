@@ -58,6 +58,12 @@ def _gate_text(text: str) -> str:
             text = re.sub(entry["pattern"], "[REDACTED_PII]", text)
         except re.error:
             pass
+    try:
+        from kage.sensitive import load_vault
+        for p in load_vault().get("patterns", []):
+            text = re.sub(p["pattern"], f"[SENSITIVE:{p['label']}]", text, flags=re.IGNORECASE)
+    except Exception:
+        pass  # vault missing or malformed — fail open
     return text
 
 

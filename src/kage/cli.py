@@ -53,6 +53,8 @@ _scout_app = typer.Typer(help="Scout agent commands.")
 app.add_typer(_scout_app, name="scout")
 _librarian_app = typer.Typer(help="Librarian agent commands.")
 app.add_typer(_librarian_app, name="librarian")
+_monitor_app = typer.Typer(help="Monitor agent commands.")
+app.add_typer(_monitor_app, name="monitor")
 
 # ── Layout ────────────────────────────────────────────────────────────────
 KAGE_HOME = Path(os.environ.get("KAGE_HOME") or Path.home() / ".kage")  # override for relocation/tests
@@ -1256,7 +1258,22 @@ def status(
             permission = arm.get("permission", "read")
             mark = "✓" if enabled else "·"
             typer.echo(f"    {mark} {arm_name:<12}  {transport:<5}  {permission}")
-    typer.echo("  ✓ everything local — nothing has left this Mac\n")
+    typer.echo("  ✓ everything local — nothing has left this Mac")
+    # Active Monitor alerts (silent when none)
+    try:
+        _alert_conn = _connect()
+        _alerts = _alert_conn.execute(
+            "SELECT level, msg, created_at FROM monitor_alerts WHERE resolved=0 ORDER BY created_at DESC LIMIT 5"
+        ).fetchall()
+        _alert_conn.close()
+        if _alerts:
+            typer.echo("\n  alerts")
+            for _level, _msg, _at in _alerts:
+                _at_short = _at[:16].replace("T", " ") if _at else ""
+                typer.echo(f"    [{_level}]  {_at_short}  {_msg}")
+    except Exception:
+        pass
+    typer.echo("")
 
 
 @app.command()
@@ -1383,6 +1400,14 @@ def doctor() -> None:
     typer.echo(f"  {'✓' if audit_ok else '⚠'} audit log  {_disp(KAGE_HOME / 'audit.jsonl')}")
     if not audit_ok:
         typer.echo("      → check write permissions on ~/.kage")
+
+    # Advisory — Accessibility TCC (needed by observe.py)
+    try:
+        from ApplicationServices import AXIsProcessTrusted  # type: ignore
+        ax_ok = AXIsProcessTrusted()
+        typer.echo(f"  {'✓' if ax_ok else '·'} Accessibility TCC{'' if ax_ok else ' — grant in System Settings → Privacy → Accessibility → add Terminal (or the uv binary for launchd)'}")
+    except ImportError:
+        typer.echo("  · Accessibility TCC — pyobjc-framework-ApplicationServices not installed (optional, needed by kage monitor)")
 
     # Advisory — arm health
     arms_cfg = cfg.get("arms", {})
@@ -1746,6 +1771,81 @@ def librarian_status() -> None:
         typer.echo("by source:")
         for src, count in stats["notes_by_source"].items():
             typer.echo(f"  {src:<12} {count}")
+
+
+@_monitor_app.command("run")
+def monitor_run() -> None:
+    """Run one Monitor pass — reads all signals, writes alerts, produces digest."""
+    from kage import monitor as _mon
+    cfg = _config()
+    typer.echo("Monitor running…")
+    digest = _mon._run_once_impl(cfg)
+    typer.echo(digest if digest else "(no digest produced)")
+
+
+@_monitor_app.command("last")
+def monitor_last() -> None:
+    """Print the most recent Monitor digest."""
+    monitor_dir = KAGE_HOME / "monitor"
+    mds = sorted(monitor_dir.glob("*.md"), reverse=True) if monitor_dir.exists() else []
+    if not mds:
+        typer.echo("No Monitor digests found. Run: kage monitor run")
+        return
+    typer.echo(mds[0].read_text())
+
+
+@_monitor_app.command("status")
+def monitor_status() -> None:
+    """Print Monitor state.json summary: health, queue, alerts, active model."""
+    state_path = KAGE_HOME / "monitor" / "state.json"
+    if not state_path.exists():
+        typer.echo("No Monitor state found. Run: kage monitor run")
+        return
+    try:
+        state = json.loads(state_path.read_text())
+        typer.echo(f"last updated:  {state.get('last_updated', '?')}")
+        if state.get("digest_preview"):
+            typer.echo(f"digest:        {state['digest_preview'][:120]}…")
+        alerts = state.get("alerts", [])
+        if alerts:
+            typer.echo(f"alerts:        {len(alerts)} active")
+            for a in alerts[:3]:
+                typer.echo(f"  [{a.get('level','?')}] {a.get('msg','')}")
+    except (OSError, ValueError) as e:
+        typer.echo(f"Error reading state.json: {e}")
+
+
+@_monitor_app.command("install")
+def monitor_install() -> None:
+    """Generate launchd plist and load Monitor to run every 5 minutes."""
+    import shutil as _shutil
+    from kage import monitor as _mon
+    from kage.arms import _resolve_repo_root
+    uv_path = _shutil.which("uv")
+    if not uv_path:
+        typer.echo("Error: uv not found on PATH. Install uv first.", err=True)
+        raise typer.Exit(1)
+    project_root = _resolve_repo_root()
+    home = str(Path.home())
+    log_dir = Path.home() / ".kage" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    plist_path = Path.home() / ".config" / "kage" / "dev.kage.monitor.plist"
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    plist_path.write_text(_mon._generate_plist(uv_path, project_root, home))
+    import subprocess as _sp, os as _os
+    _sp.run(["launchctl", "bootout", f"gui/{_os.getuid()}", str(plist_path)], check=False)
+    _sp.run(["launchctl", "bootstrap", f"gui/{_os.getuid()}", str(plist_path)], check=True)
+    typer.echo(f"Monitor installed. Runs every 5 minutes. Logs: {log_dir}")
+
+
+@_monitor_app.command("uninstall")
+def monitor_uninstall() -> None:
+    """Unload Monitor from launchd and remove the plist."""
+    import subprocess as _sp, os as _os
+    plist_path = Path.home() / ".config" / "kage" / "dev.kage.monitor.plist"
+    _sp.run(["launchctl", "bootout", f"gui/{_os.getuid()}", str(plist_path)], check=False)
+    plist_path.unlink(missing_ok=True)
+    typer.echo("Monitor uninstalled.")
 
 
 if __name__ == "__main__":  # pragma: no cover

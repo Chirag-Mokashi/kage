@@ -201,6 +201,56 @@ def _detect_arms(question: str, identity: str) -> list[str]:
     ]
 
 
+def _resolve_repo_root() -> str:
+    # Walk up from arms.py: src/kage/arms.py → src/kage → src → repo root
+    # config.home is ~/.kage — its parent is ~ (wrong). Use __file__ instead.
+    from pathlib import Path
+    return str(Path(__file__).resolve().parent.parent.parent)
+
+
+_INTERNAL_ARMS: dict[str, dict] = {
+    "kage-mcp": {
+        "transport": "stdio",
+        "command": ["uv", "run", "--project", _resolve_repo_root(), "kage", "mcp", "serve"],
+        "tools": ["kage_recall", "kage_remember", "kage_ask", "kage_status"],
+        "description": "kage's own MCP server — agent-to-agent bus",
+    }
+}
+
+
+async def _call_internal_arm(
+    arm_name: str, tool_name: str, input: str, timeout: float = 10.0,
+) -> dict:
+    """Call a tool on a hardcoded internal arm (not user-configured).
+    Raises ValueError for unknown arm_name. Returns tool result as dict."""
+    arm = _INTERNAL_ARMS.get(arm_name)
+    if arm is None:
+        raise ValueError(f"Unknown internal arm: {arm_name!r}")
+    ts = _dt.datetime.now().astimezone().isoformat(timespec='seconds')
+    try:
+        async with asyncio.timeout(timeout):
+            server_params = StdioServerParameters(
+                command=arm["command"][0], args=arm["command"][1:]
+            )
+            async with stdio_client(server_params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(tool_name, {"input": input})
+                    texts = [block.text for block in result.content if hasattr(block, "text")]
+                    data = "\n".join(texts) if texts else ""
+                    _privacy._write_audit({
+                        "type": "internal_arm_call", "arm": arm_name,
+                        "tool": tool_name, "ts": ts, "success": True,
+                    })
+                    return {"output": data, "arm": arm_name, "tool": tool_name}
+    except Exception as e:
+        _privacy._write_audit({
+            "type": "internal_arm_call", "arm": arm_name,
+            "tool": tool_name, "ts": ts, "success": False,
+        })
+        return {"output": "", "arm": arm_name, "tool": tool_name, "error": str(e)}
+
+
 async def _check_arm_health(arm_name: str) -> bool:
     arm = runtime.config.data.get('arms', {}).get(arm_name, {})
     if arm.get('transport') == 'shell':

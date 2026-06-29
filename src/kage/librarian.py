@@ -1,4 +1,4 @@
-import asyncio, hashlib, json, os, pathlib, re, sqlite3, threading, uuid
+import asyncio, hashlib, json, os, pathlib, re, sqlite3, threading, time, uuid
 from dataclasses import dataclass
 from datetime import date, datetime
 from google.adk.agents import LlmAgent
@@ -72,6 +72,10 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
             FOREIGN KEY (staging_id) REFERENCES staging_queue(id)
         );
     """)
+    try:
+        conn.execute("ALTER TABLE staging_queue ADD COLUMN priority INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
 
 
 def _connect() -> sqlite3.Connection:
@@ -119,17 +123,19 @@ def _bootstrap_catalog() -> int:
     return count
 
 
-def get_staging_queue(status: str = "pending") -> list[dict]:
+def get_staging_queue(status: str = "pending", limit: int | None = None) -> list[dict]:
     """Return staging queue items. status: 'pending' | 'held' | 'all'"""
+    if limit is None:
+        limit = runtime.config.data.get("librarian", {}).get("batch_size", 10)
     conn = None
     try:
         conn = _connect()
         conn.row_factory = sqlite3.Row
         if status == "all":
             cur = conn.cursor()
-            cur.execute("SELECT * FROM staging_queue ORDER BY priority DESC, created_at ASC")
+            cur.execute("SELECT * FROM staging_queue ORDER BY priority DESC, created_at ASC LIMIT ?", (limit,))
         else:
-            cur = conn.execute("SELECT * FROM staging_queue WHERE status = ? ORDER BY priority DESC, created_at ASC", (status,))
+            cur = conn.execute("SELECT * FROM staging_queue WHERE status = ? ORDER BY priority DESC, created_at ASC LIMIT ?", (status, limit))
         return [dict(row) for row in cur.fetchall()]
     finally:
         if conn:
@@ -370,7 +376,7 @@ def distill_and_judge(content: str, source: str) -> dict:
     messages = [{"role": "user", "content": user_msg}]
 
     # Step D — cloud dispatch
-    provider = cfg.get("librarian", {}).get("cloud_provider", cfg.get("default_provider", "claude"))
+    provider = cfg.get("librarian", {}).get("cloud_provider", cfg.get("cloud_provider", "claude"))
     try:
         raw = runtime.cloud.complete(provider, _DISTILL_SYSTEM, messages, cfg)
     except Exception as exc:
@@ -379,6 +385,9 @@ def distill_and_judge(content: str, source: str) -> dict:
             "dedup": {"verdict": "DISTINCT"}, "contradiction": {"found": False},
             "note": {"title": "", "body": "", "tags": []}, "staleness": [],
         }
+    delay = cfg.get("librarian", {}).get("delay_seconds", 0)
+    if delay:
+        time.sleep(delay)
 
     # Step E — parse JSON; strip code fences if model wraps despite instruction
     try:
@@ -693,7 +702,7 @@ def _litellm_target(provider: str, cfg: dict) -> tuple[str, str | None, str | No
 def build_librarian(cfg: dict) -> LlmAgent:
     """Build the Librarian LlmAgent with all 10 tools wired as ADK FunctionTools."""
     provider = cfg.get("librarian", {}).get("cloud_provider",
-               cfg.get("default_provider", "claude"))
+               cfg.get("cloud_provider", "claude"))
     model_str, api_key, api_base = _litellm_target(provider, cfg)
     # Pass api_key / api_base ONLY when non-None — empty string makes some LiteLLM providers
     # attempt a doomed auth handshake; None api_base lets native vendors use their own endpoint.

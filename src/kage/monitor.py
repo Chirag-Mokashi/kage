@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shutil
 import sqlite3
 import time
 import uuid
@@ -171,13 +170,40 @@ async def check_mcp_health() -> dict:
                         }
                     else:
                         result[name] = {"status": "error", "error": "no command", "latency_ms": 0}
-                else:
+                elif arm.get("transport") == "stdio":
                     mcp_cmd = arm.get("mcp_command", "")
-                    if mcp_cmd and shutil.which(mcp_cmd.split()[0]):
+                    if mcp_cmd:
+                        parts = mcp_cmd.split()
+                        proc = await asyncio.create_subprocess_exec(
+                            *parts,
+                            stdin=asyncio.subprocess.PIPE,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.DEVNULL,
+                        )
+                        init_msg = (
+                            '{"jsonrpc":"2.0","id":1,"method":"initialize",'
+                            '"params":{"protocolVersion":"2024-11-05","capabilities":{},'
+                            '"clientInfo":{"name":"kage-health","version":"1"}}}\n'
+                        )
+                        proc.stdin.write(init_msg.encode())
+                        await proc.stdin.drain()
+                        line = await proc.stdout.readline()
+                        proc.kill()
+                        await proc.wait()
+                        try:
+                            resp = json.loads(line)
+                            ok = "result" in resp
+                        except Exception:
+                            ok = False
                         latency_ms = round((time.monotonic() - t0) * 1000)
-                        result[name] = {"status": "healthy", "latency_ms": latency_ms}
+                        result[name] = {
+                            "status": "healthy" if ok else "degraded",
+                            "latency_ms": latency_ms,
+                        }
                     else:
-                        result[name] = {"status": "unknown", "latency_ms": 0}
+                        result[name] = {"status": "error", "error": "no mcp_command", "latency_ms": 0}
+                else:
+                    result[name] = {"status": "unknown", "latency_ms": 0}
         except asyncio.TimeoutError:
             result[name] = {"status": "timeout", "latency_ms": 3000}
         except Exception as e:
@@ -445,6 +471,7 @@ def build_monitor(cfg: dict):
         model=LiteLlm(**digest_kwargs),
         instruction=_MONITOR_DIGEST_INSTRUCTION,
         before_model_callback=_pii_seam,
+        output_key="monitor_digest",
     )
     return Workflow(
         name="Monitor",
@@ -466,13 +493,11 @@ def _run_once_impl(cfg: dict) -> str:
     session = asyncio.run(
         runner.session_service.create_session(app_name="kage-monitor", user_id="kage")
     )
-    events = list(runner.run(user_id="kage", session_id=session.id, new_message=content))
-    digest = ""
-    for ev in events:
-        if hasattr(ev, "content") and ev.content and hasattr(ev.content, "parts") and ev.content.parts:
-            for part in ev.content.parts:
-                if hasattr(part, "text") and part.text:
-                    digest = part.text
+    list(runner.run(user_id="kage", session_id=session.id, new_message=content))
+    session = asyncio.run(runner.session_service.get_session(
+        app_name="kage-monitor", user_id="kage", session_id=session.id
+    ))
+    digest = (session.state.get("monitor_digest") or "") if session else ""
 
     monitor_dir = Path(runtime.config.home) / "monitor"
     monitor_dir.mkdir(parents=True, exist_ok=True)

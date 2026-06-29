@@ -127,9 +127,9 @@ def get_staging_queue(status: str = "pending") -> list[dict]:
         conn.row_factory = sqlite3.Row
         if status == "all":
             cur = conn.cursor()
-            cur.execute("SELECT * FROM staging_queue ORDER BY created_at ASC")
+            cur.execute("SELECT * FROM staging_queue ORDER BY priority DESC, created_at ASC")
         else:
-            cur = conn.execute("SELECT * FROM staging_queue WHERE status = ? ORDER BY created_at ASC", (status,))
+            cur = conn.execute("SELECT * FROM staging_queue WHERE status = ? ORDER BY priority DESC, created_at ASC", (status,))
         return [dict(row) for row in cur.fetchall()]
     finally:
         if conn:

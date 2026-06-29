@@ -51,6 +51,16 @@ _PII_PATTERNS: list[dict] = [
 ]
 
 
+def _gate_text(text: str) -> str:
+    """Strip PII from text before cloud dispatch. No cfg — uses built-in patterns only."""
+    for entry in _PII_PATTERNS:
+        try:
+            text = re.sub(entry["pattern"], "[REDACTED_PII]", text)
+        except re.error:
+            pass
+    return text
+
+
 def _pii_scan(text: str, extra_patterns: list[dict] | None = None) -> list[str]:
     """Scan text for PII patterns; return list of matched pattern names (empty = clean)."""
     # ponytail: O(p) regex passes per text (p=28 patterns). Fine for typical notes.

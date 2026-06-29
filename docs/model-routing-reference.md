@@ -54,16 +54,16 @@ Source key: ¹ Official · ² Estimated from prior version lineage · ³ Third-p
 
 ---
 
-## Task Class → Model Routing (locked 2026-06-27)
+## Task Class → Model Routing (locked 2026-06-28)
 
-| Class | Dispatch | Primary | Fallback |
-|---|---|---|---|
-| **code** | 7-step dev workflow | Plan/Review → Claude Opus (CLI) · Write → local Qwen3 | Plan/Review → Claude Sonnet (CLI) |
-| **reasoning** | 2-step (decompose → answer) | Claude Opus (CLI) | gpt-oss-120b free |
-| **chat** | Single dispatch | Local Qwen3 14B | Groq llama-3.3-70b (--cloud flag) |
-| **research** | Single dispatch | Gemini 2.5-flash (search grounding) | Warn user — no silent degradation |
-| **multimodal** | Single dispatch | Gemini 2.5-flash | gpt-4o |
-| **system-ctrl** | LOCAL ONLY | Qwen3 14B | n/a (hard rule) |
+| Class | Dispatch | Primary | Fallback 1 | Fallback 2 |
+|---|---|---|---|---|
+| **code** | 7-step dev workflow: Plan→cloud, Write→local, Review→cloud, Run→local | Plan/Review → Claude Opus/Sonnet (CLI) | Plan → gemini-3-1-pro · Review → gemini-3-5-flash | — |
+| **reasoning** | 2-step: decompose + answer (same model, no local step) | Claude Opus (CLI) | gemini-3-1-pro | gpt-oss-120b free |
+| **chat** | Single dispatch | Qwen3 14B local | Groq llama-3.3-70b (--cloud flag triggers) | local (when Groq rate limits) |
+| **research** | Single dispatch | gemini-2.5-flash (Google Search grounding) | warn user — no silent degradation to non-web model | — |
+| **multimodal** | Single dispatch | gemini-3-5-flash (image + video + audio) | gemini-2.5-flash | — |
+| **system-ctrl** | LOCAL ONLY — hard rule, never cloud | Qwen3 14B local | n/a | n/a |
 
 ---
 

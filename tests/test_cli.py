@@ -4795,3 +4795,102 @@ def test_browser_arm_snapshot_error_returns_none(monkeypatch):
     assert len(calls) == 2
     assert calls[0][0] == 'browser_navigate'
     assert calls[1][0] == 'browser_snapshot'
+
+
+# ── --auto flag (Cycle 18) ────────────────────────────────────────────────────
+
+def test_ask_auto_routes_code_to_claude_opus(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    monkeypatch.setattr(cli, "_classify", lambda q: "code")
+    monkeypatch.setattr(cli, "_candidates", lambda cls, cfg: ["claude-opus"])
+    captured = []
+    monkeypatch.setattr(cli, "_call_cloud", lambda name, *a, **kw: captured.append(name) or "ans")
+    r = CliRunner().invoke(cli.app, ["ask", "q", "--auto"])
+    assert r.exit_code == 0
+    assert captured == ["claude-opus"]
+
+
+def test_ask_auto_chat_class_stays_local(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    monkeypatch.setattr(cli, "_classify", lambda q: "chat")
+    monkeypatch.setattr(cli, "_candidates", lambda cls, cfg: [])
+    cloud_calls = []
+    monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: cloud_calls.append(True) or "ans")
+    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: {"response": "local ans"})
+    r = CliRunner().invoke(cli.app, ["ask", "q", "--auto"])
+    assert r.exit_code == 0
+    assert cloud_calls == []
+
+
+def test_ask_auto_fallback_on_cloud_error(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    monkeypatch.setattr(cli, "_classify", lambda q: "code")
+    monkeypatch.setattr(cli, "_candidates", lambda cls, cfg: ["claude-opus", "gemini-3-1-pro"])
+    call_log = []
+    def fake_cloud(name, *a, **kw):
+        call_log.append(name)
+        if name == "claude-opus":
+            raise cli.CloudError("unavailable")
+        return "fallback ans"
+    monkeypatch.setattr(cli, "_call_cloud", fake_cloud)
+    r = CliRunner().invoke(cli.app, ["ask", "q", "--auto"])
+    assert r.exit_code == 0
+    assert call_log == ["claude-opus", "gemini-3-1-pro"]
+    assert "fallback ans" in r.output
+
+
+def test_ask_auto_all_candidates_fail_falls_to_local(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    monkeypatch.setattr(cli, "_classify", lambda q: "code")
+    monkeypatch.setattr(cli, "_candidates", lambda cls, cfg: ["claude-opus"])
+    monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: (_ for _ in ()).throw(cli.CloudError("fail")))
+    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: {"response": "local fallback"})
+    r = CliRunner().invoke(cli.app, ["ask", "q", "--auto"])
+    assert r.exit_code == 0
+    assert "local fallback" in r.output
+
+
+def test_ask_auto_research_shows_warning_on_failure(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    monkeypatch.setattr(cli, "_classify", lambda q: "research")
+    monkeypatch.setattr(cli, "_candidates", lambda cls, cfg: ["gemini-research"])
+    monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: (_ for _ in ()).throw(cli.CloudError("fail")))
+    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: {"response": "local ans"})
+    r = CliRunner().invoke(cli.app, ["ask", "q", "--auto"])
+    assert "Web search unavailable" in r.output
+
+
+def test_ask_auto_mutually_exclusive_with_cloud(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    r = CliRunner().invoke(cli.app, ["ask", "q", "--auto", "--cloud"])
+    assert r.exit_code == 1
+
+
+def test_ask_auto_mutually_exclusive_with_provider(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    r = CliRunner().invoke(cli.app, ["ask", "q", "--auto", "--provider", "gemini"])
+    assert r.exit_code == 1
+
+
+def test_ask_cloud_path_unchanged_without_auto(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    captured = []
+    monkeypatch.setattr(cli, "_call_cloud", lambda name, *a, **kw: captured.append(name) or "ans")
+    CliRunner().invoke(cli.app, ["ask", "q", "--cloud", "--provider", "openai"])
+    assert captured == ["openai"]
+
+
+def test_ask_auto_multimodal_prints_notice(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    monkeypatch.setattr(cli, "_classify", lambda q: "multimodal")
+    monkeypatch.setattr(cli, "_candidates", lambda cls, cfg: ["gemini-3-5-flash"])
+    monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: "ans")
+    r = CliRunner().invoke(cli.app, ["ask", "q", "--auto"])
+    assert "no attachment" in r.output

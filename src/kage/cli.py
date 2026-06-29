@@ -1809,12 +1809,42 @@ def librarian_status() -> None:
 
 @_monitor_app.command("run")
 def monitor_run() -> None:
-    """Run one Monitor pass — reads all signals, writes alerts, produces digest."""
+    """Run one Monitor pass — observe (local) then digest (cloud)."""
     from kage import monitor as _mon
     cfg = _config()
-    typer.echo("Monitor running…")
-    digest = _mon._run_once_impl(cfg)
-    typer.echo(digest if digest else "(no digest produced)")
+    typer.echo("Monitor: observing…")
+    try:
+        _mon._observe_impl(cfg)
+    except Exception as e:
+        typer.echo(f"observe error: {e}", err=True)
+        return
+    typer.echo("Monitor: digesting…")
+    try:
+        _mon._digest_impl(cfg)
+    except Exception as e:
+        typer.echo(f"digest error: {e}", err=True)
+        return
+    typer.echo("Monitor: done.")
+
+
+@_monitor_app.command("observe")
+def monitor_observe() -> None:
+    """Run one MonitorObserve pass (local Qwen3 only)."""
+    from kage import monitor as _mon
+    try:
+        _mon._observe_impl(_config())
+    except Exception as e:
+        typer.echo(f"observe error: {e}", err=True)
+
+
+@_monitor_app.command("digest")
+def monitor_digest() -> None:
+    """Run MonitorDigest on today's accumulated observations (cloud)."""
+    from kage import monitor as _mon
+    try:
+        _mon._digest_impl(_config())
+    except Exception as e:
+        typer.echo(f"digest error: {e}", err=True)
 
 
 @_monitor_app.command("last")
@@ -1851,8 +1881,8 @@ def monitor_status() -> None:
 
 @_monitor_app.command("install")
 def monitor_install() -> None:
-    """Generate launchd plist and load Monitor to run every 5 minutes."""
-    import shutil as _shutil
+    """Generate launchd plists and install Monitor observe (5 min) + digest (07:00 daily)."""
+    import shutil as _shutil, subprocess as _sp, os as _os
     from kage import monitor as _mon
     from kage.arms import _resolve_repo_root
     uv_path = _shutil.which("uv")
@@ -1863,22 +1893,31 @@ def monitor_install() -> None:
     home = str(Path.home())
     log_dir = Path.home() / ".kage" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    plist_path = Path.home() / ".config" / "kage" / "dev.kage.monitor.plist"
-    plist_path.parent.mkdir(parents=True, exist_ok=True)
-    plist_path.write_text(_mon._generate_plist(uv_path, project_root, home))
-    import subprocess as _sp, os as _os
-    _sp.run(["launchctl", "bootout", f"gui/{_os.getuid()}", str(plist_path)], check=False)
-    _sp.run(["launchctl", "bootstrap", f"gui/{_os.getuid()}", str(plist_path)], check=True)
-    typer.echo(f"Monitor installed. Runs every 5 minutes. Logs: {log_dir}")
+    uid = f"gui/{_os.getuid()}"
+    for gen_fn, label in [
+        (_mon._generate_observe_plist, "dev.kage.monitor.observe"),
+        (_mon._generate_digest_plist,  "dev.kage.monitor.digest"),
+    ]:
+        plist_path = Path.home() / ".config" / "kage" / f"{label}.plist"
+        plist_path.parent.mkdir(parents=True, exist_ok=True)
+        plist_path.write_text(gen_fn(uv_path, project_root, home))
+        _sp.run(["launchctl", "bootout", uid, str(plist_path)], check=False)
+        _sp.run(["launchctl", "bootstrap", uid, str(plist_path)], check=True)
+    old = Path.home() / ".config" / "kage" / "dev.kage.monitor.plist"
+    if old.exists():
+        _sp.run(["launchctl", "bootout", uid, str(old)], check=False)
+    typer.echo(f"Monitor installed (observe + digest). Logs: {log_dir}")
 
 
 @_monitor_app.command("uninstall")
 def monitor_uninstall() -> None:
-    """Unload Monitor from launchd and remove the plist."""
+    """Unload Monitor from launchd and remove both plists."""
     import subprocess as _sp, os as _os
-    plist_path = Path.home() / ".config" / "kage" / "dev.kage.monitor.plist"
-    _sp.run(["launchctl", "bootout", f"gui/{_os.getuid()}", str(plist_path)], check=False)
-    plist_path.unlink(missing_ok=True)
+    uid = f"gui/{_os.getuid()}"
+    for label in ["dev.kage.monitor.observe", "dev.kage.monitor.digest"]:
+        plist_path = Path.home() / ".config" / "kage" / f"{label}.plist"
+        _sp.run(["launchctl", "bootout", uid, str(plist_path)], check=False)
+        plist_path.unlink(missing_ok=True)
     typer.echo("Monitor uninstalled.")
 
 

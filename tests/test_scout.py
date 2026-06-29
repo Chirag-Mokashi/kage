@@ -23,7 +23,8 @@ def test_fetch_reddit_prefilters_body(monkeypatch):
     assert results[0]["snippet"] == ""
     assert results[0]["url"] == "https://reddit.com/r/x/1"
     assert results[0]["score"] == 7
-    assert "SECRETBODY" not in str(results)
+    assert "SECRETBODY" not in scout._corpus(results)
+    assert results[0].get("body") is not None
 
 
 def test_fetch_github_auth_header(monkeypatch):
@@ -212,32 +213,6 @@ def test_scout_recall_empty_query_returns_empty(monkeypatch):
     assert scout.scout_recall("") == []
 
 
-def test_build_pipeline_bootstrap_skips_cloud():
-    pipeline = scout.build_pipeline({}, cloud=False)
-    names = {n.name for n in pipeline.graph.nodes}
-    assert "ScoutBroad" in names
-    assert "ScoutIntegrate" not in names
-
-
-def test_build_pipeline_cloud_has_two_stages(monkeypatch):
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    fake_cfg = {
-        "scout": {"cloud_provider": "openrouter-free"},
-        "providers": {
-            "openrouter-free": {
-                "type": "openai-compat",
-                "api_key_env": "OPENROUTER_API_KEY",
-                "base_url": "https://openrouter.ai/api/v1",
-                "chat_path": "/chat/completions",
-                "model": "openrouter/free",
-            }
-        }
-    }
-    pipeline = scout.build_pipeline(fake_cfg, cloud=True)
-    names = {n.name for n in pipeline.graph.nodes}
-    assert "ScoutBroad" in names
-    assert "ScoutIntegrate" in names
-
 
 def test_litellm_target_maps_openrouter(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
@@ -296,14 +271,13 @@ def test_litellm_target_native_claude_returns_none_base(monkeypatch):
 
 
 def test_run_filters_seen_items_from_corpus(monkeypatch, tmp_path):
-    item = {"source": "hn", "title": "Old", "url": "http://old", "score": 1, "snippet": ""}
-    existing_key = scout._key(item)
-    run_once_calls = []
+    old_item = {"source": "hn", "title": "Old", "url": "http://old", "score": 1, "snippet": ""}
+    new_item = {"source": "hn", "title": "New", "url": "http://new", "score": 2, "snippet": ""}
+    existing_key = scout._key(old_item)
+    numbered_calls = []
     monkeypatch.setattr(scout, "_load_seen_cache", lambda: {existing_key})
-    monkeypatch.setattr(scout, "fetch", lambda cfg: [item])
-    monkeypatch.setattr(scout, "_run_once", lambda runner, corpus: run_once_calls.append(corpus) or "")
+    monkeypatch.setattr(scout, "fetch", lambda cfg: [old_item, new_item])
     monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None)
-    monkeypatch.setattr(scout, "_write_report", lambda *a, **kw: None)
     class FakeConfig:
         data = {"scout": {"cloud_provider": "openrouter-free"}}
         home = tmp_path
@@ -311,9 +285,23 @@ def test_run_filters_seen_items_from_corpus(monkeypatch, tmp_path):
         config = FakeConfig()
         store = MagicMock()
     monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    monkeypatch.setattr(scout, "build_broad_pipeline", lambda *a, **kw: None)
+    class FakeSession:
+        id = "s1"
+        state = {"shortlist_indices": ""}
+    class FakeService:
+        async def create_session(self, **kw): return FakeSession()
+        async def get_session(self, **kw): return FakeSession()
+    class FakeRunner:
+        session_service = FakeService()
+        def run(self, **kw):
+            numbered_calls.append(kw.get("new_message"))
+            return iter([])
+    monkeypatch.setattr(scout, "InMemoryRunner", lambda *a, **kw: FakeRunner())
     scout.run("bootstrap")
-    assert len(run_once_calls) == 1
-    assert "Old" not in run_once_calls[0]
+    assert len(numbered_calls) == 1
+    assert "Old" not in numbered_calls[0].parts[0].text
+    assert "New" in numbered_calls[0].parts[0].text
 
 
 def test_bootstrap_seeds_cache(monkeypatch, tmp_path):
@@ -321,10 +309,9 @@ def test_bootstrap_seeds_cache(monkeypatch, tmp_path):
     update_cache_calls = []
     monkeypatch.setattr(scout, "_load_seen_cache", lambda: set())
     monkeypatch.setattr(scout, "fetch", lambda cfg: [item])
-    monkeypatch.setattr(scout, "_run_once", lambda runner, corpus: "bootstrap report")
-    monkeypatch.setattr(scout, "_write_report", lambda *a, **kw: None)
     monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None)
     monkeypatch.setattr(scout, "_update_cache", lambda cache, items: update_cache_calls.append(items))
+    monkeypatch.setattr(scout, "build_broad_pipeline", lambda *a, **kw: None)
     class FakeConfig:
         data = {"scout": {"cloud_provider": "openrouter-free"}}
         home = tmp_path
@@ -332,6 +319,16 @@ def test_bootstrap_seeds_cache(monkeypatch, tmp_path):
         config = FakeConfig()
         store = MagicMock()
     monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    class FakeSession:
+        id = "s1"
+        state = {"shortlist_indices": "1. reason"}
+    class FakeService:
+        async def create_session(self, **kw): return FakeSession()
+        async def get_session(self, **kw): return FakeSession()
+    class FakeRunner:
+        session_service = FakeService()
+        def run(self, **kw): return iter([])
+    monkeypatch.setattr(scout, "InMemoryRunner", lambda *a, **kw: FakeRunner())
     scout.run("bootstrap")
     assert len(update_cache_calls) == 1
     assert update_cache_calls[0][0]["title"] == "Paper"
@@ -353,6 +350,14 @@ def test_run_refuses_on_empty_cache(monkeypatch, tmp_path):
 
 
 def test_dry_run_skips_report_and_cache(monkeypatch, tmp_path):
+    item = {"source": "hn", "title": "T", "url": "http://x", "score": 1, "snippet": ""}
+    write_report_calls, update_cache_calls = [], []
+    monkeypatch.setattr(scout, "_load_seen_cache", lambda: set())
+    monkeypatch.setattr(scout, "fetch", lambda cfg: [item])
+    monkeypatch.setattr(scout, "_write_report", lambda *a, **kw: write_report_calls.append(1))
+    monkeypatch.setattr(scout, "_update_cache", lambda *a, **kw: update_cache_calls.append(1))
+    monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "build_broad_pipeline", lambda *a, **kw: None)
     class FakeConfig:
         data = {"scout": {"cloud_provider": "openrouter-free"}}
         home = tmp_path
@@ -360,56 +365,22 @@ def test_dry_run_skips_report_and_cache(monkeypatch, tmp_path):
         config = FakeConfig()
         store = MagicMock()
     monkeypatch.setattr(scout, "runtime", FakeRuntime())
-    monkeypatch.setattr(scout, "_load_seen_cache", lambda: {"existing_key"})
-    monkeypatch.setattr(scout, "fetch", lambda cfg: [{"source": "hn", "title": "T", "url": "http://x", "score": 1, "snippet": ""}])
-    monkeypatch.setattr(scout, "_run_once", lambda runner, corpus: "canned report")
-    write_report_calls = []
-    update_cache_calls = []
-    monkeypatch.setattr(scout, "_write_report", lambda *a, **kw: write_report_calls.append(1), raising=False)
-    monkeypatch.setattr(scout, "_update_cache", lambda *a, **kw: update_cache_calls.append(1))
-    monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None, raising=False)
+    class FakeSession:
+        id = "s1"
+        state = {"shortlist_indices": ""}
+    class FakeService:
+        async def create_session(self, **kw): return FakeSession()
+        async def get_session(self, **kw): return FakeSession()
+    class FakeRunner:
+        session_service = FakeService()
+        def run(self, **kw): return iter([])
+    monkeypatch.setattr(scout, "InMemoryRunner", lambda *a, **kw: FakeRunner())
     scout.run(mode="dry-run")
     assert write_report_calls == []
     assert update_cache_calls == []
 
 
 
-
-def test_run_calls_run_once_with_corpus(monkeypatch, tmp_path):
-    class FakeConfig:
-        data = {"scout": {"cloud_provider": "openrouter-free"}}
-        home = tmp_path
-    class FakeRuntime:
-        config = FakeConfig()
-        store = MagicMock()
-    monkeypatch.setattr(scout, "runtime", FakeRuntime())
-    monkeypatch.setattr(scout, "_load_seen_cache", lambda: set())
-    monkeypatch.setattr(scout, "fetch", lambda cfg: [{"source": "hn", "title": "HN item", "url": "http://h", "score": 5, "snippet": "snip"}])
-    run_once_calls = []
-    monkeypatch.setattr(scout, "_run_once", lambda runner, corpus: run_once_calls.append(corpus) or "report")
-    monkeypatch.setattr(scout, "_write_report", lambda *a, **kw: None, raising=False)
-    monkeypatch.setattr(scout, "_update_cache", lambda *a, **kw: None)
-    monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None, raising=False)
-    scout.run("bootstrap")
-    assert len(run_once_calls) == 1
-    assert "hn" in run_once_calls[0]
-
-
-def test_run_once_async_returns_state(monkeypatch):
-    monkeypatch.setattr(scout, "_resolve_context", lambda *a: ("personal", "kage", None))
-    import asyncio
-    class FakeSession:
-        id = "s1"
-        state = {"report": "FINAL REPORT", "shortlist": "shortlist text"}
-    class FakeService:
-        async def create_session(self, **kw): return FakeSession()
-        async def get_session(self, **kw): return FakeSession()
-    class FakeRunner:
-        session_service = FakeService()
-        async def run_async(self, **kw):
-            if False: yield
-    result = asyncio.run(scout._run_once_async(FakeRunner(), "some corpus"))
-    assert result == "FINAL REPORT"
 
 
 def test_write_report_creates_dated_file(monkeypatch, tmp_path):
@@ -519,46 +490,36 @@ def test_corpus_github_cap_atomicity():
     assert corpus == ""  # entire two-line block rejected, not just second line
 
 
-def test_run_once_injects_project(monkeypatch):
-    import asyncio
-    monkeypatch.setattr(scout, "_resolve_context", lambda *a: ("personal", "hsi", None))
-    captured = {}
+
+def test_run_stage1_uses_numbered_corpus(monkeypatch, tmp_path):
+    numbered_calls = []
+    monkeypatch.setattr(scout, "_load_seen_cache", lambda: set())
+    monkeypatch.setattr(scout, "fetch", lambda cfg: [{"source": "hn", "title": "HN item", "url": "http://h", "score": 5, "snippet": "s"}])
+    monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "build_broad_pipeline", lambda *a, **kw: None)
+    class FakeConfig:
+        data = {"scout": {}}
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+        store = MagicMock()
+    monkeypatch.setattr(scout, "runtime", FakeRuntime())
     class FakeSession:
         id = "s1"
-        state = {}
+        state = {"shortlist_indices": ""}
     class FakeService:
-        async def create_session(self, **kw):
-            captured.update(kw)
-            return FakeSession()
-        async def get_session(self, **kw):
-            return FakeSession()
+        async def create_session(self, **kw): return FakeSession()
+        async def get_session(self, **kw): return FakeSession()
     class FakeRunner:
         session_service = FakeService()
-        async def run_async(self, **kw):
-            if False: yield
-    asyncio.run(scout._run_once_async(FakeRunner(), "corpus"))
-    assert captured["state"]["project"] == "hsi"
-
-
-def test_run_once_project_fallback(monkeypatch):
-    import asyncio
-    monkeypatch.setattr(scout, "_resolve_context", lambda *a: ("personal", None, None))
-    captured = {}
-    class FakeSession:
-        id = "s1"
-        state = {}
-    class FakeService:
-        async def create_session(self, **kw):
-            captured.update(kw)
-            return FakeSession()
-        async def get_session(self, **kw):
-            return FakeSession()
-    class FakeRunner:
-        session_service = FakeService()
-        async def run_async(self, **kw):
-            if False: yield
-    asyncio.run(scout._run_once_async(FakeRunner(), "corpus"))
-    assert captured["state"]["project"] == "kage"
+        def run(self, **kw):
+            numbered_calls.append(kw.get("new_message"))
+            return iter([])
+    monkeypatch.setattr(scout, "InMemoryRunner", lambda *a, **kw: FakeRunner())
+    scout.run("bootstrap")
+    assert len(numbered_calls) == 1
+    assert "1." in numbered_calls[0].parts[0].text
+    assert "[hn]" in numbered_calls[0].parts[0].text
 
 
 def test_broad_instruction_has_grounding_rule():
@@ -594,6 +555,7 @@ def test_scout_deposits_tier1_to_queue(monkeypatch, tmp_path):
         "## Tier 2\n"
         "- Should not deposit\n"
     )
+    item = {"source": "hn", "title": "T", "url": "http://x", "score": 1, "snippet": "s"}
 
     class FakeConfig:
         data = {"scout": {"cloud_provider": "openrouter-free"}}
@@ -602,19 +564,47 @@ def test_scout_deposits_tier1_to_queue(monkeypatch, tmp_path):
         config = FakeConfig()
         store = MagicMock()
 
+    # Two sequential runners: stage1 → shortlist_indices, stage3 → report
+    class FakeSess1:
+        id = "s1"
+        state = {"shortlist_indices": "1. reason"}
+    class FakeSess3:
+        id = "s3"
+        state = {"report": tier1_output}
+    class FakeSvc1:
+        async def create_session(self, **kw): return FakeSess1()
+        async def get_session(self, **kw): return FakeSess1()
+    class FakeSvc3:
+        async def create_session(self, **kw): return FakeSess3()
+        async def get_session(self, **kw): return FakeSess3()
+    class FakeRun1:
+        session_service = FakeSvc1()
+        def run(self, **kw): return iter([])
+    class FakeRun3:
+        session_service = FakeSvc3()
+        def run(self, **kw): return iter([])
+
+    call_idx = [0]
+    runners = [FakeRun1(), FakeRun3()]
+    def make_runner(*a, **kw):
+        r = runners[call_idx[0]]
+        call_idx[0] += 1
+        return r
+
     monkeypatch.setattr(scout, "runtime", FakeRuntime())
-    monkeypatch.setattr(scout, "_load_seen_cache", lambda: set())
-    monkeypatch.setattr(scout, "fetch", lambda cfg: [
-        {"source": "hn", "title": "T", "url": "http://x", "score": 1, "snippet": "s"}
-    ])
-    monkeypatch.setattr(scout, "_run_once", lambda runner, corpus: tier1_output)
+    monkeypatch.setattr(scout, "_load_seen_cache", lambda: {"old_key"})  # non-empty so mode="run" allowed
+    monkeypatch.setattr(scout, "fetch", lambda cfg: [item])
+    monkeypatch.setattr(scout, "build_broad_pipeline", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "build_integrate_pipeline", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "InMemoryRunner", make_runner)
+    monkeypatch.setattr(scout, "_fetch_full", lambda it: "")
     monkeypatch.setattr(scout, "_write_report", lambda *a, **kw: None)
     monkeypatch.setattr(scout, "_update_cache", lambda *a, **kw: None)
     monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None)
-    monkeypatch.setattr(scout, "_resolve_context", lambda *a: ("personal", None, "default"))
+    monkeypatch.setattr(scout, "_resolve_context", lambda *a: ("personal", "kage", "default"))
 
     with patch("kage.scout.deposit_to_queue") as mock_deposit:
-        scout.run("bootstrap")
+        scout.run("run")
 
     assert mock_deposit.call_count == 2
     calls = [c.args[0] for c in mock_deposit.call_args_list]
@@ -662,10 +652,20 @@ def test_scout_run_writes_scout_runs(monkeypatch, tmp_path):
     monkeypatch.setattr(scout, "fetch", lambda cfg: [
         {"source": "hn", "title": "T", "url": "http://x", "score": 1, "snippet": "s"}
     ])
-    monkeypatch.setattr(scout, "_run_once", lambda runner, corpus: "## Tier 1\n- T\n")
     monkeypatch.setattr(scout, "_write_report", lambda *a, **kw: None)
     monkeypatch.setattr(scout, "_update_cache", lambda *a, **kw: None)
     monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "build_broad_pipeline", lambda *a, **kw: None)
+    class FakeSession:
+        id = "s1"
+        state = {"shortlist_indices": ""}
+    class FakeService:
+        async def create_session(self, **kw): return FakeSession()
+        async def get_session(self, **kw): return FakeSession()
+    class FakeRunner:
+        session_service = FakeService()
+        def run(self, **kw): return iter([])
+    monkeypatch.setattr(scout, "InMemoryRunner", lambda *a, **kw: FakeRunner())
 
     scout.run("bootstrap")
 
@@ -675,3 +675,261 @@ def test_scout_run_writes_scout_runs(monkeypatch, tmp_path):
     assert len(rows) == 1
     assert rows[0][0] == 1
     assert rows[0][1] == "bootstrap"
+
+
+def test_parse_shortlist_indices_valid():
+    text = "3. reason\n7. reason"
+    items = [{"source": "hn", "title": f"Item {i}"} for i in range(10)]
+    result = scout._parse_shortlist_indices(text, items)
+    assert result == [items[2], items[6]]
+
+def test_parse_shortlist_indices_out_of_bounds():
+    text = "99. reason"
+    items = [{"source": "hn", "title": f"Item {i}"} for i in range(10)]
+    result = scout._parse_shortlist_indices(text, items)
+    assert result == []
+
+def test_parse_shortlist_indices_empty_on_malformed():
+    text = "no leading digits\nsome text"
+    items = [{"source": "hn", "title": f"Item {i}"} for i in range(10)]
+    result = scout._parse_shortlist_indices(text, items)
+    assert result == []
+
+def test_parse_shortlist_indices_deduplicates():
+    text = "2. first\n2. duplicate"
+    items = [{"source": "hn", "title": f"Item {i}"} for i in range(10)]
+    result = scout._parse_shortlist_indices(text, items)
+    assert result == [items[1]]
+
+def test_parse_shortlist_indices_max_8():
+    text = "1.\n2.\n3.\n4.\n5.\n6.\n7.\n8.\n9.\n10."
+    items = [{"source": "hn", "title": f"Item {i}"} for i in range(10)]
+    result = scout._parse_shortlist_indices(text, items)
+    assert result == items[:8]
+
+
+def test_fetch_full_github_decodes_readme(monkeypatch):
+    import json, base64
+    item = {"title": "owner/repo", "source": "github", "url": ""}
+    monkeypatch.setattr(scout._http, "_get", lambda *a, **kw: json.dumps({"content": base64.b64encode(b"hello").decode()}))
+    assert scout._fetch_full(item) == "hello"
+
+
+def test_fetch_full_reddit_uses_body_field(monkeypatch):
+    item = {"source": "reddit", "body": "body text", "url": ""}
+    calls = []
+    monkeypatch.setattr(scout._http, "_get", lambda *a, **kw: calls.append(1) or "")
+    assert scout._fetch_full(item) == "body text"
+    assert calls == []
+
+
+def test_fetch_full_youtube_returns_empty():
+    assert scout._fetch_full({"source": "youtube", "url": "http://y"}) == ""
+
+
+def test_fetch_full_arxiv_capped_at_2000(monkeypatch):
+    item = {"source": "arxiv", "url": "http://arxiv.org/abs/1234"}
+    monkeypatch.setattr(scout._http, "_get", lambda *a, **kw: "x" * 5000)
+    assert len(scout._fetch_full(item)) == 2000
+
+
+def test_fetch_full_jina_reader_other(monkeypatch):
+    item = {"source": "rss", "url": "http://article"}
+    monkeypatch.setattr(scout._http, "_get", lambda *a, **kw: "article text")
+    assert scout._fetch_full(item) == "article text"
+
+
+def test_fetch_full_fails_gracefully(monkeypatch):
+    item = {"source": "github", "title": "owner/repo", "url": ""}
+    monkeypatch.setattr(scout._http, "_get", lambda *a, **kw: (_ for _ in ()).throw(Exception("network error")))
+    assert scout._fetch_full(item) == ""
+
+
+def _make_item(n):
+    return {"source": "hn", "title": f"Item {n}", "url": f"http://{n}", "score": 0, "snippet": f"snip{n}"}
+
+
+def test_corpus_enriched_two_sections():
+    items = [_make_item(1), _make_item(2)]
+    shortlisted = [items[0]]
+    full_map = {id(items[0]): "Full content for item 1"}
+    result = scout._corpus_enriched(items, shortlisted, full_map)
+    assert "=== FULL CONTENT ===" in result
+    assert "=== HEADLINES ===" in result
+
+
+def test_corpus_enriched_cap():
+    items = [_make_item(1)]
+    shortlisted = [items[0]]
+    full_map = {id(items[0]): "a" * (scout._ENRICHED_CORPUS_CAP + 100)}
+    result = scout._corpus_enriched(items, shortlisted, full_map)
+    assert len(result) <= scout._ENRICHED_CORPUS_CAP
+
+
+def test_corpus_enriched_shortlisted_not_in_headlines():
+    items = [_make_item(1), _make_item(2)]
+    shortlisted = [items[0]]
+    full_map = {id(items[0]): "Full content"}
+    result = scout._corpus_enriched(items, shortlisted, full_map)
+    headlines_section = result.split("=== HEADLINES ===")[1]
+    assert items[0]["title"] not in headlines_section
+
+
+def test_corpus_enriched_empty_shortlist():
+    items = [_make_item(1), _make_item(2)]
+    result = scout._corpus_enriched(items, [], {})
+    assert result.startswith("=== FULL CONTENT ===")
+    headlines_section = result.split("=== HEADLINES ===")[1]
+    assert items[0]["title"] in headlines_section
+    assert items[1]["title"] in headlines_section
+
+
+def test_build_broad_pipeline_has_scoutbroad():
+    cfg = {"local_model": "qwen3:14b", "scout": {}}
+    pipeline = scout.build_broad_pipeline(cfg)
+    node_names = {n.name for n in pipeline.graph.nodes}
+    assert "ScoutBroad" in node_names
+
+
+def test_build_integrate_pipeline_has_scoutintegrate(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    cfg = {
+        "scout": {"cloud_provider": "openrouter-free"},
+        "providers": {
+            "openrouter-free": {
+                "type": "openai-compat",
+                "api_key_env": "OPENROUTER_API_KEY",
+                "base_url": "https://openrouter.ai/api/v1",
+                "chat_path": "/chat/completions",
+                "model": "openrouter/free",
+            }
+        }
+    }
+    pipeline = scout.build_integrate_pipeline(cfg)
+    node_names = {n.name for n in pipeline.graph.nodes}
+    assert "ScoutIntegrate" in node_names
+
+
+def test_run_two_stage_pipeline(monkeypatch, tmp_path):
+    """run('run') calls broad → fetch_full → integrate → returns report."""
+    report_text = "## Tier 1\n- Good item\n## Tier 2\n- Meh item"
+    item = {"source": "hn", "title": "Good item", "url": "http://x", "score": 1, "snippet": "s"}
+
+    class FakeSess1:
+        id = "s1"
+        state = {"shortlist_indices": "1. because it is good"}
+    class FakeSess3:
+        id = "s3"
+        state = {"report": report_text}
+    class FakeSvc1:
+        async def create_session(self, **kw): return FakeSess1()
+        async def get_session(self, **kw): return FakeSess1()
+    class FakeSvc3:
+        async def create_session(self, **kw): return FakeSess3()
+        async def get_session(self, **kw): return FakeSess3()
+    class FakeRun1:
+        session_service = FakeSvc1()
+        def run(self, **kw): return iter([])
+    class FakeRun3:
+        session_service = FakeSvc3()
+        def run(self, **kw): return iter([])
+
+    call_idx = [0]
+    instances = [FakeRun1(), FakeRun3()]
+    def make_runner(*a, **kw):
+        r = instances[call_idx[0]]
+        call_idx[0] += 1
+        return r
+
+    class FakeConfig:
+        data = {"scout": {"cloud_provider": "openrouter-free"}}
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+        store = MagicMock()
+
+    monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    monkeypatch.setattr(scout, "_load_seen_cache", lambda: {"old"})
+    monkeypatch.setattr(scout, "fetch", lambda cfg: [item])
+    monkeypatch.setattr(scout, "build_broad_pipeline", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "build_integrate_pipeline", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "InMemoryRunner", make_runner)
+    monkeypatch.setattr(scout, "_fetch_full", lambda it: "full content")
+    monkeypatch.setattr(scout, "_write_report", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_update_cache", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_resolve_context", lambda *a: ("personal", "kage", None))
+
+    result = scout.run("run")
+    assert result == report_text
+
+
+def test_dry_run_stops_after_stage1(monkeypatch, tmp_path):
+    """run('dry-run') returns shortlist_text without calling build_integrate_pipeline."""
+    integrate_calls = []
+    item = {"source": "hn", "title": "T", "url": "http://x", "score": 1, "snippet": "s"}
+
+    class FakeSess:
+        id = "s1"
+        state = {"shortlist_indices": "1. good"}
+    class FakeSvc:
+        async def create_session(self, **kw): return FakeSess()
+        async def get_session(self, **kw): return FakeSess()
+    class FakeRun:
+        session_service = FakeSvc()
+        def run(self, **kw): return iter([])
+
+    class FakeConfig:
+        data = {"scout": {"cloud_provider": "openrouter-free"}}
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+        store = MagicMock()
+
+    monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    monkeypatch.setattr(scout, "_load_seen_cache", lambda: set())
+    monkeypatch.setattr(scout, "fetch", lambda cfg: [item])
+    monkeypatch.setattr(scout, "build_broad_pipeline", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "build_integrate_pipeline", lambda *a: integrate_calls.append(1) or None)
+    monkeypatch.setattr(scout, "InMemoryRunner", lambda *a, **kw: FakeRun())
+    monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None)
+
+    result = scout.run("dry-run")
+    assert result == "1. good"
+    assert integrate_calls == []
+
+
+def test_bootstrap_stops_after_stage1(monkeypatch, tmp_path):
+    """run('bootstrap') returns shortlist_text without calling build_integrate_pipeline."""
+    integrate_calls = []
+    item = {"source": "hn", "title": "T", "url": "http://x", "score": 1, "snippet": "s"}
+
+    class FakeSess:
+        id = "s1"
+        state = {"shortlist_indices": "2. reason"}
+    class FakeSvc:
+        async def create_session(self, **kw): return FakeSess()
+        async def get_session(self, **kw): return FakeSess()
+    class FakeRun:
+        session_service = FakeSvc()
+        def run(self, **kw): return iter([])
+
+    class FakeConfig:
+        data = {"scout": {"cloud_provider": "openrouter-free"}}
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+        store = MagicMock()
+
+    monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    monkeypatch.setattr(scout, "_load_seen_cache", lambda: set())
+    monkeypatch.setattr(scout, "fetch", lambda cfg: [item])
+    monkeypatch.setattr(scout, "build_broad_pipeline", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "build_integrate_pipeline", lambda *a: integrate_calls.append(1) or None)
+    monkeypatch.setattr(scout, "InMemoryRunner", lambda *a, **kw: FakeRun())
+    monkeypatch.setattr(scout, "_update_cache", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None)
+
+    result = scout.run("bootstrap")
+    assert result == "2. reason"
+    assert integrate_calls == []

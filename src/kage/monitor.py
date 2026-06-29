@@ -385,6 +385,55 @@ def _generate_plist(uv_path: str, project_root: str, home: str) -> str:
 </dict></plist>"""
 
 
+def _generate_observe_plist(uv_path: str, project_root: str, home: str) -> str:
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.kage.monitor.observe</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{uv_path}</string>
+    <string>run</string><string>--project</string>
+    <string>{project_root}</string>
+    <string>kage</string><string>monitor</string><string>observe</string>
+  </array>
+  <key>StartInterval</key><integer>300</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>{home}</string>
+    <key>OLLAMA_HOST</key><string>http://localhost:11434</string>
+  </dict>
+  <key>StandardOutPath</key><string>{home}/.kage/logs/monitor-observe.log</string>
+  <key>StandardErrorPath</key><string>{home}/.kage/logs/monitor-observe.err</string>
+</dict></plist>"""
+
+
+def _generate_digest_plist(uv_path: str, project_root: str, home: str) -> str:
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.kage.monitor.digest</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{uv_path}</string>
+    <string>run</string><string>--project</string>
+    <string>{project_root}</string>
+    <string>kage</string><string>monitor</string><string>digest</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>{home}</string>
+    <key>OLLAMA_HOST</key><string>http://localhost:11434</string>
+  </dict>
+  <key>StandardOutPath</key><string>{home}/.kage/logs/monitor-digest.log</string>
+  <key>StandardErrorPath</key><string>{home}/.kage/logs/monitor-digest.err</string>
+</dict></plist>"""
+
+
 # ── ADK Workflow ──────────────────────────────────────────────────────────────
 
 _MONITOR_OBSERVE_INSTRUCTION = (
@@ -480,6 +529,52 @@ def build_monitor(cfg: dict):
     )
 
 
+def build_monitor_observe(cfg: dict):
+    """Return ADK Workflow with MonitorObserve only (local Qwen3, 24/7)."""
+    from google.adk.agents import LlmAgent
+    from google.adk.models.lite_llm import LiteLlm
+    from google.adk.workflow import Workflow, START
+
+    from kage.sensitive import scan_sensitive_patterns
+    observe_tools = [
+        read_pipeline_state, read_session_log, read_observe_log, check_mcp_health,
+        read_system_metrics, read_command_history, read_antigravity_ctx, ping_kage_mcp,
+        write_alert, set_item_priority, scan_sensitive_patterns,
+    ]
+    local_model = cfg.get("local_model", "qwen3:14b")
+    observe_agent = LlmAgent(
+        name="MonitorObserve",
+        model=LiteLlm(model=f"ollama_chat/{local_model}"),
+        instruction=_MONITOR_OBSERVE_INSTRUCTION,
+        tools=observe_tools,
+        output_key="monitor_findings",
+    )
+    return Workflow(name="kage_monitor_obs", edges=[(START, observe_agent)])
+
+
+def build_monitor_digest(cfg: dict):
+    """Return ADK Workflow with MonitorDigest only (cloud, once daily)."""
+    from google.adk.agents import LlmAgent
+    from google.adk.models.lite_llm import LiteLlm
+    from google.adk.workflow import Workflow, START
+
+    provider = cfg.get("monitor", {}).get("cloud_provider", cfg.get("cloud_provider", "openrouter-free"))
+    model_str, api_key, api_base = _litellm_target(provider, cfg)
+    digest_kwargs: dict = {"model": model_str}
+    if api_key:
+        digest_kwargs["api_key"] = api_key
+    if api_base:
+        digest_kwargs["api_base"] = api_base
+    digest_agent = LlmAgent(
+        name="MonitorDigest",
+        model=LiteLlm(**digest_kwargs),
+        instruction=_MONITOR_DIGEST_INSTRUCTION,
+        before_model_callback=_pii_seam,
+        output_key="monitor_digest",
+    )
+    return Workflow(name="kage_monitor_dig", edges=[(START, digest_agent)])
+
+
 def _run_once_impl(cfg: dict) -> str:
     """Run one Monitor pass. Returns the digest text."""
     from google.adk.runners import InMemoryRunner
@@ -509,3 +604,87 @@ def _run_once_impl(cfg: dict) -> str:
         "digest_preview": digest[:200] if digest else "",
     })
     return digest
+
+
+def _observe_impl(cfg: dict) -> None:
+    """Run one MonitorObserve pass and append findings to today's JSONL file."""
+    from google.adk.runners import InMemoryRunner
+    import google.genai.types as genai_types
+
+    agent = build_monitor_observe(cfg)
+    runner = InMemoryRunner(node=agent, app_name="kage-monitor-obs")
+    content = genai_types.Content(
+        role="user",
+        parts=[genai_types.Part(text="Run a monitoring observation pass.")],
+    )
+    session = asyncio.run(
+        runner.session_service.create_session(app_name="kage-monitor-obs", user_id="kage")
+    )
+    list(runner.run(user_id="kage", session_id=session.id, new_message=content))
+    session = asyncio.run(runner.session_service.get_session(
+        app_name="kage-monitor-obs", user_id="kage", session_id=session.id
+    ))
+    findings = (session.state.get("monitor_findings") or "") if session else ""
+
+    monitor_dir = Path(runtime.config.home) / "monitor"
+    monitor_dir.mkdir(parents=True, exist_ok=True)
+    today = datetime.now().strftime("%Y-%m-%d")
+    obs_path = monitor_dir / f"observations-{today}.jsonl"
+    record = {"ts": datetime.now().astimezone().isoformat(), "findings": findings}
+    with obs_path.open("a") as f:
+        f.write(json.dumps(record) + "\n")
+    _write_state_json({"last_observe": record["ts"], "latest_findings": findings[:500]})
+
+
+def _digest_impl(cfg: dict) -> None:
+    """Read today's observations and run MonitorDigest to produce daily .md."""
+    from google.adk.runners import InMemoryRunner
+    import google.genai.types as genai_types
+
+    monitor_dir = Path(runtime.config.home) / "monitor"
+    monitor_dir.mkdir(parents=True, exist_ok=True)
+    today = datetime.now().strftime("%Y-%m-%d")
+    obs_path = monitor_dir / f"observations-{today}.jsonl"
+
+    if not obs_path.exists():
+        digest_input = "No observations recorded today."
+    else:
+        lines = obs_path.read_text().splitlines()
+        records = []
+        for line in lines:
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+        if not records:
+            digest_input = "No observations recorded today."
+        else:
+            parts, total = [], 0
+            for i, r in enumerate(reversed(records)):
+                chunk = f"Observation run {len(records)-i} ({r['ts']}): {r['findings']}\n---\n"
+                if total + len(chunk) > 50_000:
+                    break
+                parts.append(chunk)
+                total += len(chunk)
+            digest_input = "".join(reversed(parts)) or "No observations recorded today."
+
+    agent = build_monitor_digest(cfg)
+    runner = InMemoryRunner(node=agent, app_name="kage-monitor-dig")
+    content = genai_types.Content(
+        role="user",
+        parts=[genai_types.Part(text=digest_input)],
+    )
+    session = asyncio.run(
+        runner.session_service.create_session(app_name="kage-monitor-dig", user_id="kage")
+    )
+    list(runner.run(user_id="kage", session_id=session.id, new_message=content))
+    session = asyncio.run(runner.session_service.get_session(
+        app_name="kage-monitor-dig", user_id="kage", session_id=session.id
+    ))
+    digest = (session.state.get("monitor_digest") or "") if session else ""
+
+    (monitor_dir / f"{today}.md").write_text(digest)
+    _write_state_json({
+        "last_updated": datetime.now(timezone.utc).isoformat(),
+        "digest_preview": digest[:200] if digest else "",
+    })

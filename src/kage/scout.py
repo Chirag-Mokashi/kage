@@ -25,6 +25,7 @@ _UA = {"User-Agent": "kage-scout/0.1"}
 # ponytail: 100k cap leaves ~6k token headroom in Qwen3's 32k window;
 # ceiling = Qwen3 ctx limit; upgrade path = raise cap if model is swapped for larger ctx
 _CORPUS_CHAR_CAP = 100_000
+_ENRICHED_CORPUS_CAP = 80_000
 _SCOUT_RECALL_LIMIT = 5
 _LITELLM_PREFIX = {"claude": "anthropic", "openai": "openai", "gemini": "gemini", "openai-compat": "openai"}
 
@@ -50,16 +51,34 @@ _BROAD_INSTRUCTION = (
     "Where [source] is one of: hn, arxiv, github, reddit, rss.\n"
     "If a tier has no items write: (none)"
 )
-# ponytail: ScoutIntegrate receives ScoutBroad's output as its user message (ADK Workflow
-# passes previous node's final response to next node). Format compliance depends on Qwen3 14B.
-# If Tier 1/Tier 2 headers are malformed or [source] tags are inconsistent, ScoutIntegrate
-# sees noise and may hallucinate structure. Upgrade path = validate shortlist format before
-# passing to cloud stage (e.g. regex check for "## Tier" headers before run_async).
+
+_BROAD_SHORTLIST_INSTRUCTION = (
+    "You are Scout's shortlisting stage. You receive a numbered list of recent items (titles and snippets).\n\n"
+    "Your ONLY job: identify the 5-8 items most worth reading in full — items where the headline is ambiguous, "
+    "potentially high-signal, or where the snippet suggests depth worth exploring.\n\n"
+    "Do NOT classify into Tier 1/Tier 2. Do NOT analyze. Just pick item numbers.\n\n"
+    "Output format — exactly one line per chosen item:\n"
+    "N. one sentence: why this item is worth reading in full\n\n"
+    "Where N is the item's number from the list above (integer only, e.g. '3.' or '15.').\n"
+    "If fewer than 5 items are worth investigating, output only those.\n"
+    "Maximum 8 items."
+)
+# ponytail: ScoutIntegrate receives the enriched corpus as its user message in run().
+# Format compliance depends on Qwen3 14B (ScoutBroad stage). If index output is malformed,
+# _parse_shortlist_indices returns [] → cloud stage sees only headlines (graceful fallback).
+# Upgrade path = validate shortlist format before Stage 3.
+# ponytail: _pii_seam fires as before_model_callback on ScoutIntegrate; whether ADK includes
+# the full corpus in llm_request.contents depends on ADK internals. Ceiling: if ADK excludes
+# the initial user message from contents, Jina-fetched content bypasses the gate.
+# Upgrade path = pre-gate enriched corpus in run() before runner invocation.
 
 _INTEGRATE_INSTRUCTION = (
-    "You are Scout's integration stage. You receive a classified shortlist of items "
-    "as your input message above.\n\n"
-    "CRITICAL: Only include items from the shortlist above. "
+    "You are Scout's integration stage. You receive a corpus in two sections:\n"
+    "=== FULL CONTENT === items where the full article or README was fetched — "
+    "judge these on actual content, not just the headline.\n"
+    "=== HEADLINES === items with title and snippet only — judge these from the snippet.\n"
+    "Classify ALL items (both sections) into Tier 1 or Tier 2.\n\n"
+    "CRITICAL: Only include items from the corpus above. "
     "Do not add, invent, or infer items from your training knowledge.\n\n"
     "Step 1 — Project context (do this FIRST, before analyzing any item):\n"
     "Call scout_recall with the query: "
@@ -154,6 +173,7 @@ def _fetch_reddit(cfg) -> list[dict]:
                 "url": f"https://reddit.com{d['permalink']}",
                 "score": d.get("score", 0),
                 "snippet": "",
+                "body": d.get("selftext", "")[:3000],
             })
     return results
 
@@ -291,34 +311,44 @@ def _litellm_target(provider: str, cfg: dict) -> tuple[str, str | None, str | No
     return model, api_key, api_base
 
 
-def build_pipeline(cfg: dict, *, cloud: bool) -> Workflow:
-    # Pass 1+2 — broad gather + noise filter. Local Qwen3 via LiteLLM→Ollama. $0, never leaves machine.
+
+def _parse_shortlist_indices(text: str, items: list[dict]) -> list[dict]:
+    """Extract item indices from ScoutBroad's shortlist output (1-indexed)."""
+    import re
+    chosen, seen = [], set()
+    for line in text.splitlines():
+        m = re.match(r"^(\d+)\.", line.strip())
+        if m:
+            idx = int(m.group(1)) - 1
+            if 0 <= idx < len(items) and idx not in seen:
+                chosen.append(items[idx])
+                seen.add(idx)
+            if len(chosen) >= 8:
+                break
+    return chosen
+
+
+def build_broad_pipeline(cfg: dict) -> Workflow:
+    """1-node Workflow: ScoutBroad shortlisting only (local Qwen3)."""
+    local_model = cfg.get("local_model", "qwen3:14b")
     broad = LlmAgent(
         name="ScoutBroad",
-        model=LiteLlm(model="ollama_chat/qwen3:14b"),
-        instruction=_BROAD_INSTRUCTION,
-        output_key="shortlist",
+        model=LiteLlm(model=f"ollama_chat/{local_model}"),
+        instruction=_BROAD_SHORTLIST_INSTRUCTION,
+        output_key="shortlist_indices",
     )
-    # Workflow graph: LlmAgents go straight into the edge tuples (auto-wrapped as nodes).
-    # START is the graph entry; the corpus arrives as the first node's input message.
-    if not cloud:
-        return Workflow(name="Scout", edges=[(START, broad)])
+    return Workflow(name="ScoutBroad", edges=[(START, broad)])
 
-    # Pass 3+4 — verify + integrate against existing memory, write the morning report. Cloud judgment.
-    provider = cfg["scout"].get("cloud_provider", "openrouter-free")
+
+def build_integrate_pipeline(cfg: dict) -> Workflow:
+    """1-node Workflow: ScoutIntegrate classification on enriched corpus (cloud)."""
+    provider = cfg.get("scout", {}).get("cloud_provider", "openrouter-free")
     model_str, api_key, api_base = _litellm_target(provider, cfg)
-    # Pass api_key / api_base ONLY when present. An empty-string key makes some LiteLLM providers
-    # attempt a doomed auth handshake; a None api_base lets native vendors use their own endpoint.
     kwargs = {"model": model_str}
     if api_key:
         kwargs["api_key"] = api_key
     if api_base:
         kwargs["api_base"] = api_base
-    # ponytail: ADK substitutes {project}/{today} from session state into instruction strings at
-    # run time (confirmed empirically — v0.14.0 shipped {today} substitution and produced correct
-    # dates in reports). Ceiling: if ADK removes this feature, {project} appears literally in the
-    # report and Step 1 scout_recall query fires with "{project} current stack..." (silent failure).
-    # Upgrade path: explicit _INTEGRATE_INSTRUCTION.format(project=..., today=...) in _run_once_async.
     integrate = LlmAgent(
         name="ScoutIntegrate",
         model=LiteLlm(**kwargs),
@@ -327,8 +357,7 @@ def build_pipeline(cfg: dict, *, cloud: bool) -> Workflow:
         before_model_callback=_pii_seam,
         output_key="report",
     )
-    # broad → integrate runs sequentially; integrate's output_key="report" is the terminal state.
-    return Workflow(name="Scout", edges=[(START, broad), (broad, integrate)])
+    return Workflow(name="ScoutIntegrate", edges=[(START, integrate)])
 
 
 def _corpus(items) -> str:
@@ -359,30 +388,6 @@ def _corpus(items) -> str:
             break
     return corpus
 
-
-async def _run_once_async(runner: InMemoryRunner, corpus: str) -> str:
-    _, project, _ = _resolve_context(None, None)   # sync file read, safe in CLI batch
-    session = await runner.session_service.create_session(
-        app_name="kage-scout", user_id="scout",
-        state={
-            "today": str(_dt.date.today()),
-            "project": project or "kage",
-        },
-    )
-    message = types.Content(role="user", parts=[types.Part(text=corpus)])
-    async for _ in runner.run_async(
-        user_id="scout", session_id=session.id, new_message=message,
-    ):
-        pass  # drain the stream — each node's answer lands in session state via output_key, not in the events
-    # The original `session` object is NOT mutated; re-fetch to read the terminal state.
-    final = await runner.session_service.get_session(
-        app_name="kage-scout", user_id="scout", session_id=session.id,
-    )
-    return final.state.get("report") or final.state.get("shortlist") or ""
-
-
-def _run_once(runner: InMemoryRunner, corpus: str) -> str:
-    return asyncio.run(_run_once_async(runner, corpus))   # batch entrypoint — own the event loop
 
 
 def _write_report(mode: str, final: str) -> None:
@@ -417,6 +422,43 @@ def _token_log(mode: str, items: list, final: str) -> None:
         f.write(json.dumps(record) + "\n")
 
 
+def _fetch_full(item: dict) -> str:
+    """Fetch full content for a shortlisted item. Returns '' on any failure."""
+    source = item.get("source", "")
+    url = item.get("url", "")
+    try:
+        if source == "github":
+            raw = _http._get(
+                f"https://api.github.com/repos/{item['title']}/readme",
+                headers={**_UA, "Accept": "application/vnd.github+json"},
+                timeout=10,
+            )
+            import base64 as _b64
+            return _b64.b64decode(json.loads(raw)["content"]).decode()[:3000]
+        if source == "reddit":
+            return item.get("body", "")
+        if source == "youtube":
+            return ""  # ponytail: seam open — yt-dlp wires here post-July 6
+        cap = 2000 if source == "arxiv" else 5000
+        return _http._get(f"https://r.jina.ai/{url}", headers=_UA, timeout=15)[:cap]
+    except Exception:
+        return ""
+
+
+def _corpus_enriched(items: list[dict], shortlisted: list[dict], full_map: dict) -> str:
+    """Enriched corpus: full content for shortlisted items, headlines for the rest."""
+    full_section = "=== FULL CONTENT ===\n"
+    for it in shortlisted:
+        content = full_map.get(id(it), "")
+        full_section += f"[{it['source']}] {it['title']}\n{content}\n\n"
+
+    remaining = [it for it in items if it not in shortlisted]
+    headlines_section = "=== HEADLINES ===\n" + _corpus(remaining)
+
+    combined = full_section + headlines_section
+    return combined[:_ENRICHED_CORPUS_CAP]
+
+
 def run(mode: str) -> str:
     cfg = runtime.config.data
     cache = _load_seen_cache()
@@ -424,27 +466,62 @@ def run(mode: str) -> str:
         raise RuntimeError("seen-cache empty — run: kage scout bootstrap")
 
     items = [it for it in fetch(cfg) if _key(it) not in cache]
-    corpus = _corpus(items)
-    pipeline = build_pipeline(cfg, cloud=(mode == "run"))   # dry-run → cloud=False intentionally (broad pass only, no egress)
+    if not items:
+        return ""
 
-    runner = InMemoryRunner(node=pipeline, app_name="kage-scout")   # node=, not agent= — Workflow is a BaseNode
-    final = _run_once(runner, corpus)
-    if mode != "dry-run":
-        _write_report(mode, final)
-        _update_cache(cache, items)               # dry-run writes neither report nor cache
-        _, project, _ = _resolve_context(None, None)
-        try:
-            in_tier1 = False
-            for line in final.splitlines():
-                if line.startswith("## Tier 1"):
-                    in_tier1 = True
-                    continue
-                if line.startswith("## Tier 2") or line.startswith("---"):
-                    break
-                if in_tier1 and line.startswith("- "):
-                    deposit_to_queue(line.lstrip("- "), "scout", project=project)
-        except Exception:
-            pass
+    # Stage 1: numbered shallow corpus → shortlist indices (local Qwen3)
+    numbered = "\n".join(
+        f"{i+1}. [{it['source']}] {it['title']} — {it.get('snippet','')}"
+        for i, it in enumerate(items)
+    )
+    runner1 = InMemoryRunner(node=build_broad_pipeline(cfg), app_name="kage-scout-broad")
+    sess1 = asyncio.run(runner1.session_service.create_session(app_name="kage-scout-broad", user_id="kage"))
+    list(runner1.run(user_id="kage", session_id=sess1.id, new_message=types.Content(role="user", parts=[types.Part(text=numbered)])))
+    sess1 = asyncio.run(runner1.session_service.get_session(app_name="kage-scout-broad", user_id="kage", session_id=sess1.id))
+    shortlist_text = (sess1.state.get("shortlist_indices") or "") if sess1 else ""
+
+    # dry-run and bootstrap stop here — no cloud cost
+    if mode in ("dry-run", "bootstrap"):
+        if mode == "bootstrap":
+            _update_cache(cache, items)
+        _token_log(mode, items, shortlist_text)
+        conn = runtime.store.connect()
+        conn.execute("CREATE TABLE IF NOT EXISTS scout_runs (created_at TEXT, notes_fetched INTEGER, mode TEXT)")
+        conn.execute("INSERT INTO scout_runs (created_at, notes_fetched, mode) VALUES (?, ?, ?)",
+                     (_dt.datetime.now().astimezone().isoformat(timespec="seconds"), len(items), mode))
+        conn.commit(); conn.close()
+        return shortlist_text
+
+    # Stage 2: deep fetch for shortlisted items
+    shortlisted = _parse_shortlist_indices(shortlist_text, items)
+    full_map = {id(it): _fetch_full(it) for it in shortlisted}
+
+    # Stage 3: integrate on enriched corpus (cloud)
+    enriched = _corpus_enriched(items, shortlisted, full_map)
+    _, project, _ = _resolve_context(None, None)
+    runner2 = InMemoryRunner(node=build_integrate_pipeline(cfg), app_name="kage-scout-int")
+    sess2 = asyncio.run(runner2.session_service.create_session(
+        app_name="kage-scout-int", user_id="kage",
+        state={"today": str(_dt.date.today()), "project": project or "kage"},
+    ))
+    list(runner2.run(user_id="kage", session_id=sess2.id, new_message=types.Content(role="user", parts=[types.Part(text=enriched)])))
+    sess2 = asyncio.run(runner2.session_service.get_session(app_name="kage-scout-int", user_id="kage", session_id=sess2.id))
+    final = (sess2.state.get("report") or "") if sess2 else ""
+
+    _write_report(mode, final)
+    _update_cache(cache, items)
+    try:
+        in_tier1 = False
+        for line in final.splitlines():
+            if line.startswith("## Tier 1"):
+                in_tier1 = True
+                continue
+            if line.startswith("## Tier 2") or line.startswith("---"):
+                break
+            if in_tier1 and line.startswith("- "):
+                deposit_to_queue(line.lstrip("- "), "scout", project=project)
+    except Exception:
+        pass
     _token_log(mode, items, final)
 
     conn = runtime.store.connect()

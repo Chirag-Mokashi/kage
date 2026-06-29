@@ -3,7 +3,7 @@ import json
 import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from kage import runtime
+from kage import runtime, monitor
 from kage.config import Config
 from kage.store import Store
 from kage.monitor import (
@@ -398,3 +398,260 @@ def test_check_mcp_health_stdio_ping(monkeypatch):
 
     assert "test-mcp" in result
     assert result["test-mcp"]["status"] == "healthy"
+
+
+# ── Cycle 20: plist generators ────────────────────────────────────────────────
+
+def test_generate_observe_plist_start_interval():
+    result = monitor._generate_observe_plist("/usr/bin/uv", "/proj", "/home/user")
+    assert "StartInterval" in result
+    assert "<integer>300</integer>" in result
+    assert "observe" in result
+    assert "StartCalendarInterval" not in result
+
+
+def test_generate_digest_plist_calendar_interval():
+    result = monitor._generate_digest_plist("/usr/bin/uv", "/proj", "/home/user")
+    assert "StartCalendarInterval" in result
+    assert "<integer>7</integer>" in result
+    assert "digest" in result
+    assert "StartInterval" not in result
+
+
+# ── Cycle 20: build functions ─────────────────────────────────────────────────
+
+def test_build_monitor_observe_single_node():
+    pipeline = monitor.build_monitor_observe({"local_model": "qwen3:14b"})
+    node_names = {n.name for n in pipeline.graph.nodes}
+    assert "MonitorObserve" in node_names
+    assert "MonitorDigest" not in node_names
+
+
+def test_build_monitor_digest_single_node(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    cfg = {
+        "monitor": {"cloud_provider": "openrouter-free"},
+        "providers": {
+            "openrouter-free": {
+                "type": "openai-compat",
+                "api_key_env": "OPENROUTER_API_KEY",
+                "base_url": "https://openrouter.ai/api/v1",
+                "model": "openrouter/free",
+            }
+        },
+    }
+    pipeline = monitor.build_monitor_digest(cfg)
+    node_names = {n.name for n in pipeline.graph.nodes}
+    assert "MonitorDigest" in node_names
+    assert "MonitorObserve" not in node_names
+
+
+# ── Cycle 20: _observe_impl ───────────────────────────────────────────────────
+
+def _make_fake_runner(findings="cpu normal"):
+    import json as _json
+    class FakeSess:
+        id = "s1"
+        state = {"monitor_findings": findings}
+    class FakeSvc:
+        async def create_session(self, **kw): return FakeSess()
+        async def get_session(self, **kw): return FakeSess()
+    class FakeRun:
+        session_service = FakeSvc()
+        def run(self, **kw): return iter([])
+    return FakeRun
+
+
+def test_observe_impl_writes_observations_jsonl(monkeypatch, tmp_path):
+    import datetime as _dt, json as _json, google.adk.runners as _runners
+    class FakeConfig:
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+    monkeypatch.setattr(monitor, "runtime", FakeRuntime())
+    monkeypatch.setattr(monitor, "build_monitor_observe", lambda cfg: None)
+    monkeypatch.setattr(_runners, "InMemoryRunner", lambda *a, **kw: _make_fake_runner()())
+    monitor._observe_impl({})
+    today = _dt.datetime.now().strftime("%Y-%m-%d")
+    obs_path = tmp_path / "monitor" / f"observations-{today}.jsonl"
+    assert obs_path.exists()
+    record = _json.loads(obs_path.read_text().strip())
+    assert "findings" in record
+
+
+def test_observe_impl_updates_state_json(monkeypatch, tmp_path):
+    import json as _json, google.adk.runners as _runners
+    class FakeConfig:
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+    monkeypatch.setattr(monitor, "runtime", FakeRuntime())
+    monkeypatch.setattr(monitor, "build_monitor_observe", lambda cfg: None)
+    monkeypatch.setattr(_runners, "InMemoryRunner", lambda *a, **kw: _make_fake_runner()())
+    monitor._observe_impl({})
+    state = _json.loads((tmp_path / "monitor" / "state.json").read_text())
+    assert "last_observe" in state
+
+
+# ── Cycle 20: _digest_impl ────────────────────────────────────────────────────
+
+def test_digest_impl_empty_observations(monkeypatch, tmp_path):
+    import google.adk.runners as _runners
+    captured = []
+    class FakeSess:
+        id = "s1"
+        state = {"monitor_digest": ""}
+    class FakeSvc:
+        async def create_session(self, **kw): return FakeSess()
+        async def get_session(self, **kw): return FakeSess()
+    class FakeRun:
+        session_service = FakeSvc()
+        def run(self, **kw):
+            captured.append(kw.get("new_message"))
+            return iter([])
+    class FakeConfig:
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+    monkeypatch.setattr(monitor, "runtime", FakeRuntime())
+    monkeypatch.setattr(monitor, "build_monitor_digest", lambda cfg: None)
+    monkeypatch.setattr(_runners, "InMemoryRunner", lambda *a, **kw: FakeRun())
+    monitor._digest_impl({})
+    assert len(captured) == 1
+    assert captured[0].parts[0].text == "No observations recorded today."
+
+
+def test_digest_impl_writes_md_file(monkeypatch, tmp_path):
+    import datetime as _dt, json as _json, google.adk.runners as _runners
+    today = _dt.datetime.now().strftime("%Y-%m-%d")
+    monitor_dir = tmp_path / "monitor"
+    monitor_dir.mkdir(parents=True, exist_ok=True)
+    obs_path = monitor_dir / f"observations-{today}.jsonl"
+    obs_path.write_text(_json.dumps({"ts": "2026-06-29T07:00:00+00:00", "findings": "all ok"}) + "\n")
+    class FakeSess:
+        id = "s1"
+        state = {"monitor_digest": "## Daily digest"}
+    class FakeSvc:
+        async def create_session(self, **kw): return FakeSess()
+        async def get_session(self, **kw): return FakeSess()
+    class FakeRun:
+        session_service = FakeSvc()
+        def run(self, **kw): return iter([])
+    class FakeConfig:
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+    monkeypatch.setattr(monitor, "runtime", FakeRuntime())
+    monkeypatch.setattr(monitor, "build_monitor_digest", lambda cfg: None)
+    monkeypatch.setattr(_runners, "InMemoryRunner", lambda *a, **kw: FakeRun())
+    monitor._digest_impl({})
+    md_path = monitor_dir / f"{today}.md"
+    assert md_path.exists()
+    assert "## Daily digest" in md_path.read_text()
+
+
+def test_digest_impl_reads_observations(monkeypatch, tmp_path):
+    import datetime as _dt, json as _json, google.adk.runners as _runners
+    today = _dt.datetime.now().strftime("%Y-%m-%d")
+    monitor_dir = tmp_path / "monitor"
+    monitor_dir.mkdir(parents=True, exist_ok=True)
+    (monitor_dir / f"observations-{today}.jsonl").write_text(
+        _json.dumps({"ts": "2026-06-29T07:00:00+00:00", "findings": "CPU_SPIKE_SIGNAL"}) + "\n"
+    )
+    captured = []
+    class FakeSess:
+        id = "s1"
+        state = {"monitor_digest": ""}
+    class FakeSvc:
+        async def create_session(self, **kw): return FakeSess()
+        async def get_session(self, **kw): return FakeSess()
+    class FakeRun:
+        session_service = FakeSvc()
+        def run(self, **kw):
+            captured.append(kw.get("new_message"))
+            return iter([])
+    class FakeConfig:
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+    monkeypatch.setattr(monitor, "runtime", FakeRuntime())
+    monkeypatch.setattr(monitor, "build_monitor_digest", lambda cfg: None)
+    monkeypatch.setattr(_runners, "InMemoryRunner", lambda *a, **kw: FakeRun())
+    monitor._digest_impl({})
+    assert len(captured) == 1
+    assert "CPU_SPIKE_SIGNAL" in captured[0].parts[0].text
+
+
+def test_digest_impl_caps_at_50k(monkeypatch, tmp_path):
+    import datetime as _dt, json as _json, google.adk.runners as _runners
+    today = _dt.datetime.now().strftime("%Y-%m-%d")
+    monitor_dir = tmp_path / "monitor"
+    monitor_dir.mkdir(parents=True, exist_ok=True)
+    lines = "\n".join(
+        _json.dumps({"ts": "2026-06-29T07:00:00+00:00", "findings": "x" * 200})
+        for _ in range(300)
+    ) + "\n"
+    (monitor_dir / f"observations-{today}.jsonl").write_text(lines)
+    captured = []
+    class FakeSess:
+        id = "s1"
+        state = {"monitor_digest": ""}
+    class FakeSvc:
+        async def create_session(self, **kw): return FakeSess()
+        async def get_session(self, **kw): return FakeSess()
+    class FakeRun:
+        session_service = FakeSvc()
+        def run(self, **kw):
+            captured.append(kw.get("new_message"))
+            return iter([])
+    class FakeConfig:
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+    monkeypatch.setattr(monitor, "runtime", FakeRuntime())
+    monkeypatch.setattr(monitor, "build_monitor_digest", lambda cfg: None)
+    monkeypatch.setattr(_runners, "InMemoryRunner", lambda *a, **kw: FakeRun())
+    monitor._digest_impl({})
+    assert len(captured) == 1
+    assert len(captured[0].parts[0].text) <= 51000
+    assert captured[0].parts[0].text != "No observations recorded today."
+
+
+# ── Cycle 20: CLI commands ────────────────────────────────────────────────────
+
+def test_monitor_run_calls_both(monkeypatch):
+    """monitor_run() must call both _observe_impl and _digest_impl."""
+    from kage.cli import monitor_run
+    import kage.monitor as _kmon
+    observe_calls, digest_calls = [], []
+    monkeypatch.setattr(_kmon, "_observe_impl", lambda cfg: observe_calls.append(cfg))
+    monkeypatch.setattr(_kmon, "_digest_impl", lambda cfg: digest_calls.append(cfg))
+    monkeypatch.setattr("kage.cli._config", lambda: {})
+    monitor_run()
+    assert len(observe_calls) == 1
+    assert len(digest_calls) == 1
+
+
+def test_monitor_install_creates_both_plists(monkeypatch, tmp_path):
+    """monitor_install writes both plist files and calls bootout+bootstrap for each label."""
+    import shutil as _shutil, subprocess as _sp, pathlib, kage.monitor as _kmon
+    from kage.cli import monitor_install
+    from pathlib import Path
+
+    sp_calls = []
+    monkeypatch.setattr(_shutil, "which", lambda x: "/usr/local/bin/uv" if x == "uv" else None)
+    monkeypatch.setattr(_sp, "run", lambda cmd, **kw: sp_calls.append(cmd))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr("kage.arms._resolve_repo_root", lambda: str(tmp_path))
+    monkeypatch.setattr("kage.cli._config", lambda: {})
+
+    monitor_install()
+
+    # both plist files must exist
+    for label in ["dev.kage.monitor.observe", "dev.kage.monitor.digest"]:
+        plist_path = tmp_path / ".config" / "kage" / f"{label}.plist"
+        assert plist_path.exists(), f"{label}.plist not created"
+
+    # bootout + bootstrap called for each of the two plists
+    bootstrap_calls = [c for c in sp_calls if "bootstrap" in c and "bootout" not in c]
+    assert len(bootstrap_calls) == 2

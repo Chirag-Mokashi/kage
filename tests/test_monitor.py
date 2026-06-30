@@ -655,3 +655,58 @@ def test_monitor_install_creates_both_plists(monkeypatch, tmp_path):
     # bootout + bootstrap called for each of the two plists
     bootstrap_calls = [c for c in sp_calls if "bootstrap" in c and "bootout" not in c]
     assert len(bootstrap_calls) == 2
+
+
+# ── Cycle 22 — Monitor correction-count trigger ───────────────────────────────
+
+def test_digest_triggers_learn_at_threshold(monkeypatch, tmp_path):
+    """When delta >= 7, kage learn --all fires and learn_state updates."""
+    import subprocess
+    import kage.learn as learn_mod
+    from kage.learn import _write_learn_state, _read_learn_state
+    from kage.monitor import _maybe_trigger_learn
+
+    _write_learn_state({"last_learn_correction_count": 74}, home=tmp_path)
+    monkeypatch.setattr(learn_mod, "_count_total_corrections", lambda home=None: 81)
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+
+    _maybe_trigger_learn(tmp_path)
+
+    assert calls == [["kage", "learn", "--all"]]
+    assert _read_learn_state(home=tmp_path)["last_learn_correction_count"] == 81
+
+
+def test_digest_no_trigger_below_threshold(monkeypatch, tmp_path):
+    """When delta < 7, subprocess.run is NOT called."""
+    import subprocess
+    import kage.learn as learn_mod
+    from kage.learn import _write_learn_state
+    from kage.monitor import _maybe_trigger_learn
+
+    _write_learn_state({"last_learn_correction_count": 78}, home=tmp_path)
+    monkeypatch.setattr(learn_mod, "_count_total_corrections", lambda home=None: 81)
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+
+    _maybe_trigger_learn(tmp_path)
+
+    assert calls == []
+
+
+def test_digest_updates_learn_state_after_trigger(monkeypatch, tmp_path):
+    """After trigger, last_learn_correction_count is set to exact total; other keys preserved."""
+    import subprocess
+    import kage.learn as learn_mod
+    from kage.learn import _write_learn_state, _read_learn_state
+    from kage.monitor import _maybe_trigger_learn
+
+    _write_learn_state({"last_learn_correction_count": 70, "other_key": "preserved"}, home=tmp_path)
+    monkeypatch.setattr(learn_mod, "_count_total_corrections", lambda home=None: 81)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: None)
+
+    _maybe_trigger_learn(tmp_path)
+
+    state = _read_learn_state(home=tmp_path)
+    assert state["last_learn_correction_count"] == 81
+    assert state["other_key"] == "preserved"

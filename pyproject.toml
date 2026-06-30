@@ -1,6 +1,6 @@
 [project]
 name = "kage"
-version = "0.19.0"
+version = "0.22.0"
 description = "Local-first personal context broker — your notes, surfaced into your cloud AI, on your machine."
 readme = "README.md"
 license = { text = "MIT" }

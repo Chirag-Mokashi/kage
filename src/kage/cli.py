@@ -958,13 +958,12 @@ def ask(
     rows = _search(question, project, limit, any_terms=True, identity=identity)
     cfg = _config()
     candidates: list[str] = []
-    task_class: str = "chat"
+    task_class: str = _classify(question)
 
     if auto:
         if cloud or provider:
             typer.echo("[kage] --auto is mutually exclusive with --cloud / --provider.", err=True)
             raise typer.Exit(code=1)
-        task_class = _classify(question)
         candidates = _candidates(task_class, cfg)
         if candidates:
             cloud = True
@@ -1161,6 +1160,10 @@ def ask(
         model = cfg.get("model", "qwen3:14b")
         url = cfg.get("ollama_url", "http://localhost:11434") + "/api/generate"
         typer.echo(f"· asking {model} ({len(rows)} note(s) as context)…\n")
+        from kage.learn import load_learned_prompt as _load_lp
+        _learned = _load_lp(task_class, home=KAGE_HOME)
+        if _learned:
+            system = system + f"\n\n[kage learned rules — {task_class}]\n{_learned}"
         if effective_context:
             prompt = f"{system}\n\nCONTEXT (the user's notes):\n{effective_context}\n\nQUESTION: {question}"
         else:
@@ -2015,6 +2018,124 @@ def sensitive_scan() -> None:
             typer.echo(f"{item['path']}")
             for h in item["hits"]:
                 typer.echo(f"  · {h}")
+
+
+@app.command()
+def learn(
+    task_class: str = typer.Option(None, "--class", help="Task class (code/research/reasoning/multimodal/chat)"),
+    all_classes: bool = typer.Option(False, "--all", help="Force relearn all classes regardless of correction count"),
+    accept: bool = typer.Option(False, "--accept", help="Accept and save pending generated prompts"),
+    status: bool = typer.Option(False, "--status", help="Show current active prompts per class"),
+    rollback: str = typer.Option(None, "--rollback", help="Roll back named class to previous version"),
+) -> None:
+    """Improve local model quality by learning from kage-corrections."""
+    from kage.learn import (
+        run_learning_pass, save_learned_prompt, load_learned_prompt,
+        _count_total_corrections, ALL_CLASSES,
+    )
+
+    cfg = _config()
+    pending_path = KAGE_HOME / "pending_learned.json"
+    learned_path = KAGE_HOME / "learned_prompts.json"
+
+    if accept:
+        if not pending_path.exists():
+            typer.echo("[kage] No pending learned prompts. Run 'kage learn' first.")
+            raise typer.Exit(code=0)
+        try:
+            pending = json.loads(pending_path.read_text())
+        except (OSError, ValueError):
+            typer.echo("[kage] Corrupted pending_learned.json.")
+            raise typer.Exit(code=1)
+        targets = [task_class] if task_class else list(pending.keys())
+        if task_class and task_class not in pending:
+            typer.echo(f"[kage] No pending prompt for class '{task_class}'.")
+            raise typer.Exit(code=0)
+        for cls in targets:
+            data = pending[cls]
+            save_learned_prompt(
+                cls, data["prompt"], data["trace"],
+                data["source_note_ids"], data["correction_count"],
+                home=KAGE_HOME,
+            )
+            _lp = json.loads(learned_path.read_text())
+            active_ver = _lp.get(cls, {}).get("active", "?")
+            typer.echo(f"[kage] Saved {cls} rules → {active_ver} ({data['correction_count']} corrections)")
+        for cls in targets:
+            pending.pop(cls, None)
+        if pending:
+            tmp = pending_path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(pending, indent=2) + "\n")
+            os.replace(tmp, pending_path)
+        else:
+            pending_path.unlink(missing_ok=True)
+
+    elif status:
+        if not learned_path.exists():
+            typer.echo("No learned prompts yet.")
+            raise typer.Exit(code=0)
+        try:
+            data = json.loads(learned_path.read_text())
+        except (OSError, ValueError):
+            typer.echo("[kage] Corrupted learned_prompts.json.")
+            raise typer.Exit(code=1)
+        for cls in ALL_CLASSES:
+            if cls in data and data[cls].get("active"):
+                active = data[cls]["active"]
+                entry = data[cls]["versions"][active]
+                rule_count = len([ln for ln in entry["prompt"].splitlines() if ln.strip().startswith("- ")])
+                typer.echo(f"  {cls:<12} {active}  {entry['date']}  {entry['correction_count']} corrections  {rule_count} rules")
+            else:
+                typer.echo(f"  {cls:<12} (no learned prompt)")
+
+    elif rollback:
+        if not learned_path.exists():
+            typer.echo(f"[kage] Nothing to roll back for '{rollback}'.")
+            raise typer.Exit(code=0)
+        try:
+            data = json.loads(learned_path.read_text())
+        except (OSError, ValueError):
+            typer.echo("[kage] Corrupted learned_prompts.json.")
+            raise typer.Exit(code=1)
+        if rollback not in data or len(data[rollback].get("versions", {})) < 2:
+            typer.echo(f"[kage] Nothing to roll back for '{rollback}'.")
+            raise typer.Exit(code=0)
+        versions = sorted(data[rollback]["versions"].keys(), key=lambda x: int(x[1:]))
+        current = data[rollback]["active"]
+        current_idx = versions.index(current)
+        if current_idx == 0:
+            typer.echo(f"[kage] {rollback}: already at oldest version ({current}).")
+            raise typer.Exit(code=0)
+        prev_version = versions[current_idx - 1]
+        data[rollback]["active"] = prev_version
+        tmp = learned_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp, learned_path)
+        typer.echo(f"[kage] {rollback}: rolled back from {current} → {prev_version}")
+
+    else:
+        targets = [task_class] if task_class else ALL_CLASSES
+        try:
+            pending = json.loads(pending_path.read_text()) if pending_path.exists() else {}
+        except (OSError, ValueError):
+            pending = {}
+        total = _count_total_corrections(home=KAGE_HOME)
+        for cls in targets:
+            prompt, trace, ids = run_learning_pass(cls, _call_cloud, cfg, home=KAGE_HOME)
+            if not prompt:
+                typer.echo(f"[kage] No matching corrections for {cls} — skipping")
+                continue
+            typer.echo(f"\n--- {cls} rules (pending) ---")
+            typer.echo(prompt)
+            pending[cls] = {
+                "prompt": prompt, "trace": trace,
+                "source_note_ids": ids, "correction_count": total,
+            }
+        if pending:
+            tmp = pending_path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(pending, indent=2) + "\n")
+            os.replace(tmp, pending_path)
+            typer.echo("\nReview the rules above, then run `kage learn --accept` to save.")
 
 
 if __name__ == "__main__":  # pragma: no cover

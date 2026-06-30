@@ -4945,3 +4945,153 @@ def test_gate_text_delegates_to_substitute():
     result = _gate_text("my email is unique-pii-test@example.com")
     assert "[EMAIL_1]" in result
     assert "unique-pii-test@example.com" not in result
+
+
+# ── Cycle 22 — kage learn command + _classify unconditional + injection ───────
+
+def test_ask_classifies_without_auto(monkeypatch, tmp_path):
+    """_classify runs even without --auto; task_class is not stuck at 'chat'."""
+    h = _save_home(monkeypatch, tmp_path)
+    classified = []
+    original = cli._classify
+    monkeypatch.setattr(cli, "_classify", lambda q: (classified.append(original(q)) or classified[-1]))
+    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: {"response": "ok", "thinking": ""})
+    import kage.learn as _lm
+    monkeypatch.setattr(_lm, "load_learned_prompt", lambda *a, **kw: "")
+    CliRunner().invoke(cli.app, ["ask", "how do I write a python def function?"])
+    assert len(classified) == 1
+    assert classified[0] == "code"
+
+
+def test_ask_injects_learned_prompt_local(monkeypatch, tmp_path):
+    """Learned rules for the task class are prepended to the Ollama prompt."""
+    _save_home(monkeypatch, tmp_path)
+    import kage.learn as _lm
+    monkeypatch.setattr(_lm, "load_learned_prompt", lambda *a, **kw: "- Never invent signatures")
+    captured = {}
+    monkeypatch.setattr(cli, "_post_json",
+                        lambda url, payload, **kw: (captured.update({"prompt": payload["prompt"]}) or
+                                                    {"response": "ok", "thinking": ""}))
+    CliRunner().invoke(cli.app, ["ask", "show me a def function"])
+    assert "[kage learned rules" in captured.get("prompt", "")
+    assert "- Never invent signatures" in captured.get("prompt", "")
+
+
+def test_ask_no_injection_when_no_prompt(monkeypatch, tmp_path):
+    """When no learned prompt exists, the system is unchanged."""
+    _save_home(monkeypatch, tmp_path)
+    import kage.learn as _lm
+    monkeypatch.setattr(_lm, "load_learned_prompt", lambda *a, **kw: "")
+    captured = {}
+    monkeypatch.setattr(cli, "_post_json",
+                        lambda url, payload, **kw: (captured.update({"prompt": payload["prompt"]}) or
+                                                    {"response": "ok", "thinking": ""}))
+    CliRunner().invoke(cli.app, ["ask", "hello"])
+    assert "[kage learned rules" not in captured.get("prompt", "")
+
+
+def test_learn_status_no_file(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    result = CliRunner().invoke(cli.app, ["learn", "--status"])
+    assert result.exit_code == 0
+    assert "No learned prompts yet." in result.output
+
+
+def test_learn_status_shows_classes(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "learned_prompts.json").write_text(json.dumps({
+        "code": {
+            "active": "v1",
+            "versions": {
+                "v1": {"date": "2026-06-30", "correction_count": 10,
+                       "source_note_ids": [], "prompt": "- rule 1\n- rule 2", "trace": "t"}
+            }
+        }
+    }))
+    result = CliRunner().invoke(cli.app, ["learn", "--status"])
+    assert result.exit_code == 0
+    assert "v1" in result.output
+    assert "10 corrections" in result.output
+    assert "2 rules" in result.output
+    assert "(no learned prompt)" in result.output
+
+
+def test_learn_accept_no_pending(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    result = CliRunner().invoke(cli.app, ["learn", "--accept"])
+    assert result.exit_code == 0
+    assert "No pending" in result.output
+
+
+def test_learn_accept_saves_pending(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "pending_learned.json").write_text(json.dumps({
+        "code": {"prompt": "- Never invent signatures", "trace": "t",
+                 "source_note_ids": ["n1"], "correction_count": 10}
+    }))
+    result = CliRunner().invoke(cli.app, ["learn", "--accept"])
+    assert result.exit_code == 0
+    assert (h / "learned_prompts.json").exists()
+    data = json.loads((h / "learned_prompts.json").read_text())
+    assert data["code"]["versions"]["v1"]["prompt"] == "- Never invent signatures"
+    assert not (h / "pending_learned.json").exists()
+
+
+def test_learn_accept_class_filter(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "pending_learned.json").write_text(json.dumps({
+        "code": {"prompt": "- code rule", "trace": "t", "source_note_ids": [], "correction_count": 5},
+        "reasoning": {"prompt": "- reasoning rule", "trace": "t", "source_note_ids": [], "correction_count": 3},
+    }))
+    result = CliRunner().invoke(cli.app, ["learn", "--accept", "--class", "code"])
+    assert result.exit_code == 0
+    lp = json.loads((h / "learned_prompts.json").read_text())
+    assert "code" in lp
+    assert "reasoning" not in lp
+    pending = json.loads((h / "pending_learned.json").read_text())
+    assert "reasoning" in pending
+    assert "code" not in pending
+
+
+def test_learn_rollback_nothing(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    result = CliRunner().invoke(cli.app, ["learn", "--rollback", "code"])
+    assert result.exit_code == 0
+    assert "Nothing to roll back" in result.output
+
+
+def test_learn_rollback_sets_previous(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "learned_prompts.json").write_text(json.dumps({
+        "code": {
+            "active": "v2",
+            "versions": {
+                "v1": {"date": "2026-06-30", "correction_count": 5, "source_note_ids": [], "prompt": "- old", "trace": "t"},
+                "v2": {"date": "2026-07-01", "correction_count": 10, "source_note_ids": [], "prompt": "- new", "trace": "t"},
+            }
+        }
+    }))
+    result = CliRunner().invoke(cli.app, ["learn", "--rollback", "code"])
+    assert result.exit_code == 0
+    assert "v2" in result.output
+    assert "v1" in result.output
+    data = json.loads((h / "learned_prompts.json").read_text())
+    assert data["code"]["active"] == "v1"
+
+
+def test_learn_rollback_already_oldest(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "learned_prompts.json").write_text(json.dumps({
+        "code": {
+            "active": "v1",
+            "versions": {
+                "v1": {"date": "2026-06-30", "correction_count": 5, "source_note_ids": [], "prompt": "- rule", "trace": "t"},
+                "v2": {"date": "2026-07-01", "correction_count": 10, "source_note_ids": [], "prompt": "- rule2", "trace": "t"},
+            }
+        }
+    }))
+    result = CliRunner().invoke(cli.app, ["learn", "--rollback", "code"])
+    assert result.exit_code == 0
+    assert "already at oldest" in result.output
+    data = json.loads((h / "learned_prompts.json").read_text())
+    assert data["code"]["active"] == "v1"

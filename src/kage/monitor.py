@@ -636,6 +636,17 @@ def _observe_impl(cfg: dict) -> None:
     _write_state_json({"last_observe": record["ts"], "latest_findings": findings[:500]})
 
 
+def _maybe_trigger_learn(home: Path) -> None:
+    """Fire `kage learn --all` when 7+ new corrections have accumulated since the last run."""
+    import subprocess
+    from kage.learn import _count_total_corrections, _read_learn_state, _write_learn_state
+    total = _count_total_corrections(home=home)
+    state = _read_learn_state(home=home)
+    if total - state.get("last_learn_correction_count", 0) >= 7:
+        subprocess.run(["kage", "learn", "--all"], check=False)
+        _write_learn_state({**state, "last_learn_correction_count": total}, home=home)
+
+
 def _digest_impl(cfg: dict) -> None:
     """Read today's observations and run MonitorDigest to produce daily .md."""
     from google.adk.runners import InMemoryRunner
@@ -688,3 +699,5 @@ def _digest_impl(cfg: dict) -> None:
         "last_updated": datetime.now(timezone.utc).isoformat(),
         "digest_preview": digest[:200] if digest else "",
     })
+
+    _maybe_trigger_learn(Path(runtime.config.home))

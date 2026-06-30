@@ -3058,7 +3058,7 @@ def test_disclosure_gate_withholds_local_only_flag(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
     mem_id = cli._save("secret", None, local_only=True)
     cfg = cli._config()
-    allowed, withheld = cli._disclosure_gate([_fake_row(mem_id)], cfg)
+    allowed, withheld, _ = cli._disclosure_gate([_fake_row(mem_id)], cfg)
     assert allowed == []
     assert len(withheld) == 1
     assert withheld[0]["reason"] == "local_only:flag"
@@ -3075,21 +3075,22 @@ def test_disclosure_gate_withholds_local_only_project(monkeypatch, tmp_path):
     cfg_data["local_only_projects"] = ["finance"]
     (h / "config.json").write_text(_json.dumps(cfg_data))
     cfg = cli._config()
-    allowed, withheld = cli._disclosure_gate([_fake_row(mem_id, "finance")], cfg)
+    allowed, withheld, _ = cli._disclosure_gate([_fake_row(mem_id, "finance")], cfg)
     assert allowed == []
     assert withheld[0]["reason"] == "local_only:project:finance"
 
 
-def test_disclosure_gate_withholds_pii_detected(monkeypatch, tmp_path):
-    """Gate must block a note that matches a PII pattern even without the local_only flag."""
+def test_disclosure_gate_pii_allowed_with_map(monkeypatch, tmp_path):
+    """Cycle 21: PII notes are allowed through (substituted at dispatch); recorded in pii_map."""
     h = _save_home(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
     mem_id = cli._save("my key is sk-abcdefghijklmnopqrstuv1234567890xxxxx", None)
     cfg = cli._config()
-    allowed, withheld = cli._disclosure_gate([_fake_row(mem_id)], cfg)
-    assert allowed == []
-    assert withheld[0]["reason"] == "pii_detected"
-    assert "OpenAI/Anthropic key" in withheld[0]["pii_patterns"]
+    allowed, withheld, pii_map = cli._disclosure_gate([_fake_row(mem_id)], cfg)
+    assert len(allowed) == 1
+    assert withheld == []
+    assert mem_id in pii_map
+    assert "OpenAI/Anthropic key" in pii_map[mem_id]
 
 
 def test_disclosure_gate_allows_clean_note(monkeypatch, tmp_path):
@@ -3098,14 +3099,14 @@ def test_disclosure_gate_allows_clean_note(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
     mem_id = cli._save("Python is a dynamically typed language", None)
     cfg = cli._config()
-    allowed, withheld = cli._disclosure_gate([_fake_row(mem_id)], cfg)
+    allowed, withheld, _ = cli._disclosure_gate([_fake_row(mem_id)], cfg)
     assert len(allowed) == 1
     assert withheld == []
 
 
 def test_disclosure_gate_empty_rows():
     """Gate on empty input must return two empty lists without error."""
-    allowed, withheld = cli._disclosure_gate([], {})
+    allowed, withheld, _ = cli._disclosure_gate([], {})
     assert allowed == []
     assert withheld == []
 
@@ -3150,7 +3151,7 @@ def test_ask_cloud_user_denies_falls_back_to_ollama(monkeypatch, tmp_path):
     """When user answers N at the gate prompt the cloud must not be called."""
     h = _save_home(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
-    secret_id = cli._save("my Aadhaar 1234 5678 9012", None)
+    secret_id = cli._save("confidential notes", None, local_only=True)
     clean_id = cli._save("clean note", None)
     monkeypatch.setattr(cli, "_search",
         lambda *a, **kw: [_fake_row(secret_id), _fake_row(clean_id)])
@@ -3168,7 +3169,7 @@ def test_ask_cloud_session_approval_suppresses_reprompt(monkeypatch, tmp_path):
     """Second cloud call to same provider in a session must skip the prompt."""
     h = _save_home(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
-    secret_id = cli._save("my Aadhaar 1234 5678 9012", None)
+    secret_id = cli._save("confidential notes", None, local_only=True)
     clean_id = cli._save("clean note", None)
     monkeypatch.setattr(cli, "_search",
         lambda *a, **kw: [_fake_row(secret_id), _fake_row(clean_id)])
@@ -3186,7 +3187,7 @@ def test_ask_cloud_always_ask_overrides_session_memory(monkeypatch, tmp_path):
     """--always-ask must re-prompt even after a session approval."""
     h = _save_home(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
-    secret_id = cli._save("my Aadhaar 1234 5678 9012", None)
+    secret_id = cli._save("confidential notes", None, local_only=True)
     clean_id = cli._save("clean note", None)
     monkeypatch.setattr(cli, "_search",
         lambda *a, **kw: [_fake_row(secret_id), _fake_row(clean_id)])
@@ -3229,7 +3230,7 @@ def test_audit_log_written_on_denial(monkeypatch, tmp_path):
     """Gate must write an audit record with outcome denied_by_user when user answers N."""
     h = _save_home(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
-    secret_id = cli._save("Aadhaar 1234 5678 9012", None)
+    secret_id = cli._save("confidential notes", None, local_only=True)
     clean_id = cli._save("public note", None)
     monkeypatch.setattr(cli, "_search",
         lambda *a, **kw: [_fake_row(secret_id), _fake_row(clean_id)])
@@ -3381,7 +3382,7 @@ def test_disclosure_gate_uses_section_offsets(monkeypatch, tmp_path):
     mem_id = cli._save("safe content about coding", None)
     cfg = cli._config()
     row_with_offsets = (mem_id, None, "2026", f"memory/{mem_id}.md", "snip", "Intro", 0, 24)
-    allowed, withheld = cli._disclosure_gate([row_with_offsets], cfg)
+    allowed, withheld, _ = cli._disclosure_gate([row_with_offsets], cfg)
     assert len(allowed) == 1
     assert withheld == []
 
@@ -3393,7 +3394,7 @@ def test_disclosure_gate_missing_file_treated_as_clean(monkeypatch, tmp_path):
     mem_id = cli._save("something", None)
     (h / "memory" / f"{mem_id}.md").unlink()
     cfg = cli._config()
-    allowed, withheld = cli._disclosure_gate([_fake_row(mem_id)], cfg)
+    allowed, withheld, _ = cli._disclosure_gate([_fake_row(mem_id)], cfg)
     assert len(allowed) == 1
     assert withheld == []
 
@@ -3450,13 +3451,13 @@ def test_pii_scan_invalid_extra_pattern_is_skipped():
 
 
 def test_ask_cloud_require_approval_false_skips_prompt_filters_and_audits_none(monkeypatch, tmp_path):
-    """require_approval:false must skip the prompt, still withhold PII notes, and write user_approved=null."""
+    """require_approval:false must skip the prompt, still withhold local_only notes, and write user_approved=null."""
     h = _save_home(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
     cfg_data = _json.loads((h / "config.json").read_text())
     cfg_data["require_approval"] = False
     (h / "config.json").write_text(_json.dumps(cfg_data))
-    secret_id = cli._save("my Aadhaar 1234 5678 9012", None)
+    secret_id = cli._save("confidential notes", None, local_only=True)
     clean_id = cli._save("clean public note", None)
     monkeypatch.setattr(cli, "_search",
         lambda *a, **kw: [_fake_row(secret_id), _fake_row(clean_id)])
@@ -3496,7 +3497,7 @@ def test_ask_cloud_session_remember_false_always_prompts(monkeypatch, tmp_path):
     cfg_data = _json.loads((h / "config.json").read_text())
     cfg_data["session_remember_approval"] = False
     (h / "config.json").write_text(_json.dumps(cfg_data))
-    secret_id = cli._save("my Aadhaar 1234 5678 9012", None)
+    secret_id = cli._save("confidential notes", None, local_only=True)
     clean_id = cli._save("clean note", None)
     monkeypatch.setattr(cli, "_search",
         lambda *a, **kw: [_fake_row(secret_id), _fake_row(clean_id)])
@@ -3507,21 +3508,20 @@ def test_ask_cloud_session_remember_false_always_prompts(monkeypatch, tmp_path):
     assert "Proceed" in r.output  # prompt fired despite pre-existing session approval
 
 
-def test_ask_cloud_case3_pii_preamble(monkeypatch, tmp_path):
-    """When withheld note is blocked due to PII scan, preamble must say 'PII detected in'."""
+def test_ask_cloud_case3_pii_substituted_before_dispatch(monkeypatch, tmp_path):
+    """Cycle 21: PII notes pass through; substitution message shown before cloud dispatch."""
     h = _save_home(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
-    # Save a note whose text contains an Aadhaar number (PII) but is NOT flagged local_only
     pii_id = cli._save("my Aadhaar is 1234 5678 9012", None)
     clean_id = cli._save("clean note", None)
     monkeypatch.setattr(cli, "_search",
         lambda *a, **kw: [_fake_row(pii_id), _fake_row(clean_id)])
     monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: "cloud answer")
     monkeypatch.setattr(cli, "_session_approvals", {})
-    r = CliRunner().invoke(cli.app, ["ask", "q", "--cloud"], input="y\n")
+    r = CliRunner().invoke(cli.app, ["ask", "q", "--cloud"])
     assert r.exit_code == 0
-    assert "PII detected in" in r.output
-    assert "Preparing to send context" not in r.output
+    assert "substituted before dispatch" in r.output
+    assert "PII detected in" not in r.output
 
 
 # ── Reranker tests (Cycle 8 Step 3) ─────────────────────────────────────────
@@ -3745,7 +3745,7 @@ def test_disclosure_gate_stage1_blocks_cross_identity(monkeypatch, tmp_path):
         ("allowed-note", "p", "t", "path", "snip", None, None, None),
         ("blocked-note", "p", "t", "path", "snip", None, None, None),
     ]
-    result_allowed, withheld = cli._disclosure_gate(rows, {}, identity="personal", project="kage")
+    result_allowed, withheld, _ = cli._disclosure_gate(rows, {}, identity="personal", project="kage")
     assert "allowed-note" in [r[0] for r in result_allowed]
     blocked = [w for w in withheld if w["note_id"] == "blocked-note"]
     assert len(blocked) == 1
@@ -4894,3 +4894,54 @@ def test_ask_auto_multimodal_prints_notice(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_call_cloud", lambda *a, **kw: "ans")
     r = CliRunner().invoke(cli.app, ["ask", "q", "--auto"])
     assert "no attachment" in r.output
+
+
+# ── Cycle 21: Layer 3e value substitution ───────────────────────────────────
+
+
+def test_ask_cloud_substitutes_pii_before_dispatch(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    # fake row: (note_id, proj, created, path, snip, section_title, char_start, char_end)
+    fake_row = ("note-pii-1", "test", "2026-06-30T00:00:00", "memory/test/note-pii-1.md", "", None, None, None)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [fake_row])
+    monkeypatch.setattr(cli, "_disclosure_gate", lambda rows, cfg, **kw: (rows, [], {}))
+    monkeypatch.setattr(cli, "_read_body", lambda path: "My email is pii-subtest@secret.org")
+    monkeypatch.setattr(cli, "_detect_arms", lambda *a, **kw: [])
+    captured: dict = {}
+    def fake_cloud(_provider, _system, user_msg, _cfg):
+        captured["user_msg"] = user_msg
+        return "replied"
+    monkeypatch.setattr(cli, "_call_cloud", fake_cloud)
+    r = CliRunner().invoke(cli.app, ["ask", "--cloud", "--provider", "claude", "what is my email?"])
+    assert r.exit_code == 0
+    assert "pii-subtest@secret.org" not in captured.get("user_msg", "")
+    assert "[EMAIL_1]" in captured.get("user_msg", "")
+
+
+def test_ask_cloud_restores_pii_in_answer(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    fake_row = ("note-pii-2", "test", "2026-06-30T00:00:00", "memory/test/note-pii-2.md", "", None, None, None)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [fake_row])
+    monkeypatch.setattr(cli, "_disclosure_gate", lambda rows, cfg, **kw: (rows, [], {}))
+    monkeypatch.setattr(cli, "_read_body", lambda path: "My email is pii-subtest@secret.org")
+    monkeypatch.setattr(cli, "_detect_arms", lambda *a, **kw: [])
+    monkeypatch.setattr(cli, "_call_cloud", lambda provider, system, user_msg, cfg: "Your email is [EMAIL_1]")
+    r = CliRunner().invoke(cli.app, ["ask", "--cloud", "--provider", "claude", "what is my email?"])
+    assert r.exit_code == 0
+    assert "pii-subtest@secret.org" in r.output
+    assert "[EMAIL_1]" not in r.output
+
+
+def test_disclosure_gate_returns_pii_map(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    allowed, withheld, pii_map = cli._disclosure_gate([], {}, identity="personal", project=None)
+    assert isinstance(pii_map, dict)
+    assert allowed == []
+    assert withheld == []
+
+
+def test_gate_text_delegates_to_substitute():
+    from kage.pii import _gate_text
+    result = _gate_text("my email is unique-pii-test@example.com")
+    assert "[EMAIL_1]" in result
+    assert "unique-pii-test@example.com" not in result

@@ -271,7 +271,7 @@ def scout_recall(query: str) -> list[dict]:
     cfg = runtime.config.data
     identity, project, _ = _resolve_context(None, None)
     rows = _search(query, project, limit=_SCOUT_RECALL_LIMIT, identity=identity)
-    allowed, _ = _disclosure_gate(rows, cfg, identity=identity, project=project)
+    allowed, _, _ = _disclosure_gate(rows, cfg, identity=identity, project=project)
     return [{"snippet": row[4], "project": row[1]} for row in allowed]
 
 

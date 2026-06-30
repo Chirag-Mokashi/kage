@@ -222,12 +222,12 @@ def test_read_observe_log_empty(monkeypatch, mon_env):
 def test_pii_strip_email():
     result = _pii_strip("reach me at user@example.com today")
     assert "user@example.com" not in result
-    assert "[REDACTED_PII]" in result
+    assert "[EMAIL_1]" in result
 
 
 def test_pii_strip_api_key():
     result = _pii_strip("key=sk-abcdefghijklmnopqrstuvwxyz12345678")
-    assert "[REDACTED_PII]" in result
+    assert "sk-abcdefghijklmnopqrstuvwxyz12345678" not in result
 
 
 def test_pii_clean_passthrough():
@@ -308,7 +308,7 @@ def test_pii_seam_strips_email():
     req = FakeRequest("contact admin@example.com for help")
     _pii_seam(None, req)
     assert "admin@example.com" not in req.contents[0].parts[0].text
-    assert "[REDACTED_PII]" in req.contents[0].parts[0].text
+    assert "[EMAIL_1]" in req.contents[0].parts[0].text
 
 
 def test_read_command_history(mon_env, monkeypatch):

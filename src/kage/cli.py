@@ -441,7 +441,7 @@ def _write_audit(record: dict) -> None:
 _session_approvals: dict[str, bool] = {}
 
 
-def _disclosure_gate(rows: list, cfg: dict, identity: str = "personal", project: str | None = None) -> tuple[list, list[dict]]:
+def _disclosure_gate(rows: list, cfg: dict, identity: str = "personal", project: str | None = None) -> tuple[list, list[dict], dict[str, list[str]]]:
     return _privacy._disclosure_gate(rows, cfg, identity, project)
 
 
@@ -974,9 +974,9 @@ def ask(
     provider_name: str = ""
     if cloud:
         provider_name = provider or cfg.get("cloud_provider", "claude")
-        allowed_rows, withheld = _disclosure_gate(rows, cfg, identity=identity, project=project)
+        allowed_rows, withheld, pii_map = _disclosure_gate(rows, cfg, identity=identity, project=project)
         withheld_reasons = [w["reason"] for w in withheld]
-        pii_hits = [p for w in withheld for p in w["pii_patterns"]]
+        pii_hits = [p for ps in pii_map.values() for p in ps]
 
         if withheld and not allowed_rows:
             # Case 2: all notes withheld → silent Ollama fallback
@@ -990,6 +990,7 @@ def ask(
                 "notes_retrieved": len(rows), "notes_withheld": len(withheld),
                 "withheld_reasons": withheld_reasons, "pii_detected": pii_hits,
                 "user_approved": None, "outcome": "blocked_all_local",
+                "substitution_count": 0, "placeholder_labels": [],
             })
             cloud = False
         else:
@@ -1002,7 +1003,9 @@ def ask(
                 and (always_ask or not session_remember or provider_name not in _session_approvals)
             )
             if need_prompt:
-                pii_withheld = [w for w in withheld if w["pii_patterns"]]
+                # ponytail: pii_withheld is always [] since Cycle 21 — PII notes pass through
+                # (values are substituted at dispatch). Branch kept for future policy modes.
+                pii_withheld = [w for w in withheld if w.get("pii_patterns")]
                 if pii_withheld:
                     typer.echo(
                         f"\n[kage] PII detected in {len(pii_withheld)} note(s) before dispatch to {provider_name}."
@@ -1031,6 +1034,7 @@ def ask(
                     "notes_retrieved": len(rows), "notes_withheld": len(withheld),
                     "withheld_reasons": withheld_reasons, "pii_detected": pii_hits,
                     "user_approved": False, "outcome": "denied_by_user",
+                    "substitution_count": 0, "placeholder_labels": [],
                 })
                 cloud = False
             else:
@@ -1043,6 +1047,10 @@ def ask(
                     "withheld_reasons": withheld_reasons, "pii_detected": pii_hits,
                     "user_approved": None if (withheld and not require_approval) else True,
                     "outcome": "dispatched",
+                    # ponytail: substitution_count/labels are 0/[] here because substitution
+                    # runs after this approval gate. The dispatched_fallback record (auto path)
+                    # is written post-substitution and carries the real counts.
+                    "substitution_count": 0, "placeholder_labels": [],
                 })
                 rows = allowed_rows
 
@@ -1072,6 +1080,25 @@ def ask(
                     arm_results.append(f"[{_arm_name}]\n{_result}")
         asyncio.run(_arm_flow())
     arm_context = "\n\n".join(arm_results) if arm_results else ""
+
+    sub_mapping: dict[str, str] = {}
+    if cloud:
+        from kage.redact import substitute as _substitute
+        from kage.pii import _PII_PATTERNS
+        try:
+            from kage.sensitive import load_vault as _lv
+            _vault_pats = [{"name": f"SENSITIVE_{p['label']}", "pattern": p["pattern"]}
+                           for p in _lv().get("patterns", [])]
+        except Exception:
+            _vault_pats = []
+        _all_pats = _PII_PATTERNS + _vault_pats
+        context, sub_mapping = _substitute(context, _all_pats)
+        if arm_context:
+            arm_context, sub_mapping = _substitute(arm_context, _all_pats, existing_mapping=sub_mapping)
+        if sub_mapping:
+            _sub_types = sorted(set(k.rsplit("_", 1)[0].lstrip("[") for k in sub_mapping))
+            typer.echo(f"[kage] {len(sub_mapping)} PII span(s) substituted before dispatch "
+                       f"({', '.join(_sub_types[:3])}{'…' if len(_sub_types) > 3 else ''})")
 
     if arm_context:
         system = (
@@ -1108,7 +1135,7 @@ def ask(
                 try:
                     answer = _call_cloud(pname, system, user_msg, cfg)
                     if pname != candidates[0]:
-                        _write_audit({"ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"), "provider": pname, "project": project, "notes_retrieved": len(rows), "notes_withheld": 0, "withheld_reasons": [], "pii_detected": [], "user_approved": True, "outcome": "dispatched_fallback"})
+                        _write_audit({"ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"), "provider": pname, "project": project, "notes_retrieved": len(rows), "notes_withheld": 0, "withheld_reasons": [], "pii_detected": [], "user_approved": True, "outcome": "dispatched_fallback", "substitution_count": len(sub_mapping), "placeholder_labels": sorted(sub_mapping.keys())})
                     break
                 except CloudError:
                     if pname != candidates[-1]:
@@ -1145,6 +1172,10 @@ def ask(
             raise typer.Exit(code=1)
         answer = out.get("response", "").strip()
         thinking = out.get("thinking", "").strip() if think else ""
+
+    if cloud and sub_mapping and answer:
+        from kage.redact import restore as _restore
+        answer = _restore(answer, sub_mapping)
 
     if thinking:
         typer.echo(f"[thinking]\n{thinking}\n")
@@ -1544,6 +1575,7 @@ def chat(
     destination = provider or "ollama"
     session_id = _session_create(identity, project, destination)
     _last_sources: list = []
+    session_sub_mapping: dict[str, str] = {}
     typer.echo(f"kage chat  [{identity} · {project or 'all'} · {destination}]  /help for commands")
     typer.echo("-" * 60)
     while True:
@@ -1622,7 +1654,7 @@ def chat(
             safe_turns, withheld_turns = _gate_conversation(all_turns, cfg, identity, project)
             if withheld_turns:
                 typer.echo(f"[kage] {len(withheld_turns)} turn(s) withheld from {destination} (privacy gate).")
-            rows, _ = _disclosure_gate(rows, cfg, identity=identity, project=project)
+            rows, _, _repl_pii_map = _disclosure_gate(rows, cfg, identity=identity, project=project)
             history_for_answer = safe_turns
         else:
             history_for_answer = history
@@ -1642,6 +1674,17 @@ def chat(
                 _last_sources.append((note_id, path, section_title))
                 note_ids_this_turn.append(note_id)
         context = "\n\n".join(context_parts)
+        if destination != "ollama":
+            from kage.redact import substitute as _sub, restore as _rst
+            from kage.pii import _PII_PATTERNS
+            try:
+                from kage.sensitive import load_vault as _lv2
+                _vp = [{"name": f"SENSITIVE_{p['label']}", "pattern": p["pattern"]}
+                       for p in _lv2().get("patterns", [])]
+            except Exception:
+                _vp = []
+            context, session_sub_mapping = _sub(context, _PII_PATTERNS + _vp,
+                                                existing_mapping=session_sub_mapping)
         try:
             answer = next(iter(_answer(condensed, history_for_answer, context, destination, cfg)))
         except OllamaUnavailable as e:
@@ -1650,6 +1693,9 @@ def chat(
         except CloudError as e:
             typer.echo(f"[kage] Cloud error: {e}", err=True)
             continue
+        if destination != "ollama" and session_sub_mapping and answer:
+            from kage.redact import restore as _rst
+            answer = _rst(answer, session_sub_mapping)
         if destination == "ollama":
             model_name = cfg.get("ollama_model", "qwen3:14b")
         else:
@@ -1659,6 +1705,11 @@ def chat(
             model_name = pcfg.get("model", destination)
         est_tokens = len(answer) // 4
         _session_append(session_id, "user", raw, note_ids_this_turn, destination, model_name, None, None)
+        # ponytail: answer stored with real values restored (not placeholders). Consequence: if the
+        # cloud answer echoes a PII value, _gate_conversation blocks this turn from future history.
+        # Progressive context-blinding in long PII-heavy REPL sessions. Fix = store placeholder form,
+        # restore only at display (Cycle 22). session_sub_mapping also grows unboundedly; ceiling is
+        # memory (thousands of entries in a very long session); upgrade = cap and evict oldest.
         _session_append(session_id, "assistant", answer, [], destination, model_name, None, est_tokens)
         typer.echo(answer)
         typer.echo(f"\n[{model_name} · {destination} · ~{est_tokens}tok]")

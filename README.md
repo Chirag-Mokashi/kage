@@ -19,11 +19,11 @@ kage is defined at three nested levels, all simultaneously true:
 
 ---
 
-## Current state — v0.20.0
+## Current state — v0.22.0
 
 kage ships as a headless CLI and MCP server. The full UI layer (via Odysseus integration) is in progress.
 
-**Honest status:** today kage is a *context-gated forwarder with a hard identity wall, stateful sessions, arm routing for live external data, and three proactive agents — Scout, Librarian, and Monitor*. It retrieves your notes, enforces the identity × project partition before any note reaches retrieval, gates what may leave your machine (including user-defined sensitive patterns in `~/.kage/sensitive.json`), holds multi-turn conversation state, and forwards a grounded query to the model *you* select (switchable mid-session, with the privacy gate re-run on switch). Scout fetches external signals (Hacker News, arXiv, GitHub, Reddit, RSS), shortlists the most relevant via a local ADK stage, deep-fetches full content via Jina/GitHub API/Reddit body, and writes a project-aware morning digest to `~/.kage/scout/`. Librarian processes Scout's findings through a 3e-gated distill-and-judge pipeline and presents promotion requests for your approval — nothing reaches permanent memory without an explicit `kage librarian approve`. Monitor runs a macOS AX daemon that captures app-switch and typing-pause events every 5 minutes (local Qwen3) and synthesizes a daily digest at 07:00 (cloud).
+**Honest status:** today kage is a *context-gated forwarder with a hard identity wall, stateful sessions, arm routing for live external data, three proactive agents, reversible PII masking, and a prompt-learning layer*. It retrieves your notes, enforces the identity × project partition before any note reaches retrieval, gates what may leave your machine (including user-defined sensitive patterns in `~/.kage/sensitive.json`), holds multi-turn conversation state, and forwards a grounded query to the model *you* select (switchable mid-session, with the privacy gate re-run on switch). PII in notes is now *masked* before cloud dispatch — real values replaced with typed placeholders (`[EMAIL_1]`, `[API_KEY_IN_CONTEXT_1]`) and swapped back in the response — so notes are no longer withheld for containing sensitive data. Scout fetches external signals (Hacker News, arXiv, GitHub, Reddit, RSS), shortlists the most relevant via a local ADK stage, deep-fetches full content via Jina/GitHub API/Reddit body, and writes a project-aware morning digest to `~/.kage/scout/`. Librarian processes Scout's findings through a 3e-gated distill-and-judge pipeline and presents promotion requests for your approval — nothing reaches permanent memory without an explicit `kage librarian approve`. Monitor runs a macOS AX daemon that captures app-switch and typing-pause events every 5 minutes (local Qwen3) and synthesizes a daily digest at 07:00 (cloud). `kage learn` reads correction logs from `kage-corrections`, sends them to a cloud model using the ProTeGi pattern, and injects the generated rules into local Qwen3's system prompt — the local model gets better over time without weight updates.
 
 ```
   ┌─────────────────────────────────────────────────────────────┐
@@ -169,6 +169,16 @@ kage monitor uninstall              Remove both launchd plists.
 kage sensitive list                 Show all user-defined sensitive patterns in the vault.
 kage sensitive add <label> <regex>  Add a new pattern to ~/.kage/sensitive.json.
 kage sensitive scan                 Scan memory + staging queue against vault patterns.
+
+kage learn                          Generate improved system prompt rules from kage-corrections
+                                    (ProTeGi pattern — cloud reads logs, writes rules, stores in
+                                    ~/.kage/learned_prompts.json). Reviews pending; use --accept.
+kage learn --class code             Generate rules for one task class only.
+kage learn --all                    Force relearn all 5 classes regardless of correction count.
+kage learn --accept                 Accept and save pending generated rules to active prompts.
+kage learn --accept --class code    Accept only the pending rules for a specific class.
+kage learn --status                 Show active prompt version, date, correction count per class.
+kage learn --rollback <class>       Roll back a class to its previous prompt version.
 ```
 
 Arms are configured under `arms` in `~/.kage/config.json`. Each arm declares a
@@ -238,11 +248,12 @@ Every cloud dispatch goes through a disclosure gate. Nothing reaches an external
                     passport numbers, email addresses, or 26 other
                     patterns across 6 categories?
 
-  PASS → user sees a summary of what will be sent, approves, cloud is called
-  FAIL → note withheld, user notified, Ollama answers instead
+  PASS → PII values substituted with placeholders before dispatch;
+         real values swapped back into the cloud response before display
+  FAIL → note withheld (local_only or identity mismatch), user notified
 ```
 
-Every dispatch decision is written to `~/.kage/audit.jsonl`. Session approval memory means you are not re-prompted for every query to the same provider.
+As of v0.21.0, notes containing PII are no longer withheld from cloud — they pass through with real values masked (`[EMAIL_1]`, `[API_KEY_IN_CONTEXT_1]`, etc.) and restored in the response. `local_only` and the identity wall remain hard blocks. Every dispatch decision is written to `~/.kage/audit.jsonl`. Session approval memory means you are not re-prompted for every query to the same provider.
 
 Mark a note local-only at save time:
 ```bash
@@ -358,7 +369,13 @@ kage today is a passive broker — it answers when called. The target is an acti
   Cycle 18   Layer 4 router             SHIPPED — keyword task-class routing, config-driven routing table
   Cycle 19   Sensitive vault            SHIPPED — user-defined PII patterns (kage sensitive)
   Cycle 20   Monitor cadence + Scout deep fetch  SHIPPED — observe/digest cadence split, Scout two-stage fetch
+  Cycle 21   Reversible PII masking             SHIPPED — substitute/restore gate, PII notes no longer withheld
+  Cycle 22   kage learn (Layer 6)               SHIPPED — ProTeGi prompt learning, Monitor auto-trigger at N=7
 ```
+
+Cycle 22 added `kage learn` — a prompt-only learning layer. `learn.py` reads correction logs from the `kage-corrections` project via FTS, sends them to a cloud model using the ProTeGi meta-prompt pattern, and stores versioned rules in `~/.kage/learned_prompts.json`. At query time, `load_learned_prompt(task_class)` injects the active rules into local Qwen3's system prompt. Monitor now fires `kage learn --all` automatically when 7+ new corrections accumulate since the last run. Workflow: `kage learn` generates pending rules → `kage learn --status` to review → `kage learn --accept` to promote. `kage learn --rollback <class>` reverts to the previous version if a rule set degrades quality.
+
+Cycle 21 made PII handling reversible. `redact.py` provides pure `substitute()` / `restore()` functions — PII spans are replaced with typed numbered placeholders (`[EMAIL_1]`, `[AADHAAR_1]`) before cloud dispatch and swapped back from the response before display. `_disclosure_gate` now returns a three-tuple `(allowed, withheld, pii_map)`; PII no longer causes notes to be withheld — they pass through masked. `local_only` and the identity wall remain unconditional hard blocks.
 
 Cycle 20 split Monitor's cadence: observe (AX daemon, local Qwen3) runs every 5 minutes via a `StartInterval` launchd plist; digest (cloud) fires once daily at 07:00 via `StartCalendarInterval`. Scout gained a two-stage deep-fetch: ScoutBroad (local) shortlists by index number → `_fetch_full` enriches via Jina Reader / GitHub API README / Reddit body → ScoutIntegrate (cloud) works from full content, not headlines. Both `kage monitor observe` and `kage monitor digest` are now independent subcommands with their own try/except error reporting.
 
@@ -421,14 +438,18 @@ src/kage/
 ├── observe.py      macOS AX daemon — app-switch / typing-pause / idle event capture
 ├── router.py       Layer 4 keyword router — task-class classification, config-driven routing table
 ├── sensitive.py    Sensitive vault — user-defined regex PII patterns, vault CRUD, memory/queue scan
+├── redact.py       Reversible PII masking — substitute() / restore(), pure functions, no I/O
+├── learn.py        Layer 6 prompt learning — ProTeGi pattern, versioned learned_prompts.json
 └── mcp_server.py   MCP server (FastMCP, stdio transport)
 
 tests/
-├── test_cli.py         382 tests — CLI commands + all seam behaviors
+├── test_cli.py         397 tests — CLI commands + all seam behaviors
 ├── test_scout.py        64 tests — fetch layer, corpus, deep fetch, ADK pipeline, project injection
-├── test_monitor.py      44 tests — observe pass, digest pass, cadence split, launchd plists
+├── test_monitor.py      47 tests — observe pass, digest pass, cadence split, launchd plists, learn trigger
 ├── test_librarian.py    23 tests — schema migration, staging queue, distill_and_judge, HITL loop
+├── test_learn.py        18 tests — load/build/run/save, FTS filtering, bullet extraction, Blueprint #44
 ├── test_router.py       18 tests — task classification, routing table, config override
+├── test_redact.py       13 tests — substitute/restore round-trip, sequential safety, existing mapping
 ├── test_seams.py        13 tests — seam contracts + registry functions
 ├── test_sensitive.py     8 tests — vault CRUD, pattern scan, integration with privacy gate
 ├── test_observe.py       2 tests — AX daemon event capture
@@ -443,6 +464,8 @@ docs/
 ├── cycle-16-monitor.md      Monitor agent pitch — AX daemon, cadence split, launchd design
 ├── cycle-19-sensitive-vault.md  Sensitive vault pitch — user-defined patterns, vault schema
 ├── cycle-20-pitch.md        Cycle 20 pitch — Monitor cadence split, Scout two-stage deep fetch
+├── cycle-21-redact.md       Reversible PII masking pitch — substitute/restore design, 3 cold reviews
+├── cycle-22-layer6.md       Layer 6 kage learn pitch — ProTeGi pattern, learned_prompts.json schema
 └── ...                      Historical cycle pitches and research
 ```
 

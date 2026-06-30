@@ -2,7 +2,7 @@
 
 *Entry point for any Claude Code session in this repo. Lightweight orientation only — the canonical planning state lives in [docs/blueprint.md](docs/blueprint.md).*
 
-*Last updated: 2026-06-08 (implementation reality sync)*
+*Last updated: 2026-06-29 (Cycle 20 merged — v0.20.0)*
 
 ---
 
@@ -58,9 +58,9 @@ Every design decision must be checked against this list. Operational definitions
 
 ## Current State
 
-**Working CLI exists.** The repository is no longer purely Stage 0 planning: `src/kage/cli.py` implements the headless local broker thin slice and several follow-on cycles.
+**Working CLI exists.** The repository is no longer purely Stage 0 planning: `src/kage/cli.py` implements the headless local broker thin slice and all cycles through 20.
 
-Current implemented surface (through Cycle 11, v0.11.0):
+Current implemented surface (through Cycle 20, v0.20.0):
 - local markdown source of truth under `~/.kage/memory`
 - SQLite FTS5 index and project partition filter
 - ChromaDB chunk/vector index with `kage reindex`
@@ -71,9 +71,17 @@ Current implemented surface (through Cycle 11, v0.11.0):
 - `remember`, `import`, `recall`, `ask`, `list`, `forget`, `status`, `doctor`, `chat`, `use`, `where`, `arm`
 - local Ollama answering by default
 - cloud answering via named providers (`claude`, `openai`, `gemini`, `groq`, `perplexity`, plus user config)
-- **MCP client / arm routing (Cycle 11):** `_detect_arms` keyword routing, `_call_arm` graceful fallback, audit log. Three transports — `shell` (local command), `stdio` (local MCP process), `sse` (remote MCP). First live arm reads the local macOS Calendar via `icalbuddy` (`shell`, zero OAuth/cloud). Google remote SSE arms remain inert (Workspace Developer Preview rejects Gmail-domain accounts). TCC note: `shell` arm fires only from a context holding Calendar permission (Terminal/launchd); future fix = signed Swift helper invoked through the same `shell` transport.
+- **MCP client / arm routing (Cycle 11):** `_detect_arms` keyword routing, `_call_arm` graceful fallback, audit log. Three transports — `shell` (local command), `stdio` (local MCP process), `sse` (remote MCP). First live arm reads the local macOS Calendar via `icalbuddy` (`shell`, zero OAuth/cloud).
 - MCP server (`kage mcp serve`) exposing `kage_recall`, `kage_remember`, `kage_ask`, `kage_status` (Cycle 6)
-- 353 tests in `tests/test_cli.py`
+- **Modularity (Cycle 12):** 25 modules, injectable runtime seams, ProviderRegistry + ArmRegistry, egress golden tests
+- **Arms expansion (Cycle 13):** gmail arm (osascript/Mail.app, zero OAuth) + browser arm (Playwright MCP, headless stealth)
+- **Scout agent (Cycle 14):** proactive ADK Workflow — ScoutBroad (local Qwen3) shortlists → ScoutIntegrate (cloud) writes digest; 5 sources; two-stage deep fetch via Jina/GitHub API/Reddit body (Cycle 20)
+- **Librarian agent (Cycle 15):** ADK LlmAgent, 3e-gated distill-and-judge, HITL staging → approval pipeline, sole memory writer
+- **Monitor agent (Cycle 16 + 20):** macOS AX daemon (observe.py) captures app-switch/typing-pause events → `observations-YYYY-MM-DD.jsonl`; cadence split: observe runs every 5 min (launchd StartInterval), digest runs 07:00 daily (StartCalendarInterval); `kage monitor observe/digest/run/install/uninstall/status/last`
+- **Gap fixes (Cycle 17):** 10 structural gaps across scout/librarian/monitor/observe
+- **Layer 4 router (Cycle 18):** keyword task-class classification (code/research/multimodal/reasoning/chat) → ordered provider candidate list; config-driven routing table override
+- **Sensitive vault (Cycle 19):** user-defined regex PII patterns in `~/.kage/sensitive.json`; `kage sensitive list/add/scan`
+- 554 tests across 8 test files
 
 The long-term blueprint still matters for direction, but docs that say "no code yet" or "Stage 1 has not started" are historical/stale unless explicitly marked current. For implementation truth, inspect `README.md`, `src/kage/cli.py`, and `tests/test_cli.py`.
 

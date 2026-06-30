@@ -83,7 +83,7 @@ async def kage_ask(question: str, provider: str | None = None, project: str | No
             all_turns = _cli._session_turns(session_id, token_budget=10_000_000)
             safe_turns, withheld_turns = _cli._gate_conversation(all_turns, cfg, s_identity, s_project)
             withheld_count = len(withheld_turns)
-            rows, row_withheld = _cli._disclosure_gate(rows, cfg, identity=s_identity, project=s_project)
+            rows, row_withheld, _ = _cli._disclosure_gate(rows, cfg, identity=s_identity, project=s_project)
             withheld_count += len(row_withheld)
             history_for_answer = safe_turns
         else:
@@ -104,10 +104,24 @@ async def kage_ask(question: str, provider: str | None = None, project: str | No
                 source_ids.append(note_id)
                 note_ids_this_turn.append(note_id)
         context = "\n\n".join(context_parts)
+        _mcp_sess_map: dict[str, str] = {}
+        if s_destination != "ollama":
+            from kage.redact import substitute as _sub
+            from kage.pii import _PII_PATTERNS
+            try:
+                from kage.sensitive import load_vault as _lv
+                _vp = [{"name": f"SENSITIVE_{p['label']}", "pattern": p["pattern"]}
+                       for p in _lv().get("patterns", [])]
+            except Exception:
+                _vp = []
+            context, _mcp_sess_map = _sub(context, _PII_PATTERNS + _vp)
         try:
             answer = next(iter(_cli._answer(condensed, history_for_answer, context, s_destination, cfg)))
         except (_cli.OllamaUnavailable, _cli.CloudError) as exc:
             return {"error": str(exc), "answer": None, "session_id": session_id}
+        if s_destination != "ollama" and _mcp_sess_map and answer:
+            from kage.redact import restore as _rst
+            answer = _rst(answer, _mcp_sess_map)
         if s_destination == "ollama":
             model_name = cfg.get("ollama_model", "qwen3:14b")
             used_provider = f"local:{model_name}"
@@ -135,10 +149,10 @@ async def kage_ask(question: str, provider: str | None = None, project: str | No
     withheld_count = 0
     withheld_reasons: list[str] = []
     if provider:
-        allowed_rows, withheld = _cli._disclosure_gate(rows, cfg, identity=identity, project=project)
+        allowed_rows, withheld, _pii_map = _cli._disclosure_gate(rows, cfg, identity=identity, project=project)
         withheld_count = len(withheld)
         withheld_reasons = [w["reason"] for w in withheld]
-        pii_hits = [p for w in withheld for p in w["pii_patterns"]]
+        pii_hits = [p for ps in _pii_map.values() for p in ps]
         all_blocked = bool(withheld) and not allowed_rows
         outcome = "blocked_all_local_mcp" if all_blocked else "dispatched_mcp"
         _cli._write_audit({
@@ -177,6 +191,21 @@ async def kage_ask(question: str, provider: str | None = None, project: str | No
             arm_results.append(f"[{arm_name}]\n{result}")
     arm_context = "\n\n".join(arm_results) if arm_results else ""
 
+    _mcp_sub_map: dict[str, str] = {}
+    if provider:
+        from kage.redact import substitute as _sub
+        from kage.pii import _PII_PATTERNS
+        try:
+            from kage.sensitive import load_vault as _lv
+            _vp = [{"name": f"SENSITIVE_{p['label']}", "pattern": p["pattern"]}
+                   for p in _lv().get("patterns", [])]
+        except Exception:
+            _vp = []
+        _all_pats = _PII_PATTERNS + _vp
+        context, _mcp_sub_map = _sub(context, _all_pats)
+        if arm_context:
+            arm_context, _mcp_sub_map = _sub(arm_context, _all_pats, existing_mapping=_mcp_sub_map)
+
     if arm_context:
         system = (
             "You are kage, the user's personal context broker.\n\n"
@@ -207,6 +236,9 @@ async def kage_ask(question: str, provider: str | None = None, project: str | No
                 user_msg,
                 cfg,
             )
+            if _mcp_sub_map:
+                from kage.redact import restore as _rst
+                answer = _rst(answer, _mcp_sub_map)
             used_provider = provider
         except _cli.CloudError as exc:
             return {"answer": str(exc), "sources": [], "provider": provider,

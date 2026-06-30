@@ -77,7 +77,7 @@ def test_gate_text_applies_vault_pattern(tmp_path, monkeypatch):
     }))
     from kage.pii import _gate_text
     result = _gate_text("I live in Koramangala")
-    assert "[SENSITIVE:home-addr]" in result
+    assert "[SENSITIVE_HOME_ADDR_1]" in result
     assert "Koramangala" not in result
 
 

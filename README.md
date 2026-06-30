@@ -19,19 +19,26 @@ kage is defined at three nested levels, all simultaneously true:
 
 ---
 
-## Current state — v0.16.0
+## Current state — v0.20.0
 
 kage ships as a headless CLI and MCP server. The full UI layer (via Odysseus integration) is in progress.
 
-**Honest status:** today kage is a *context-gated forwarder with a hard identity wall, stateful sessions, arm routing for live external data, and two proactive agents — Scout and Librarian*. It retrieves your notes, enforces the identity × project partition before any note reaches retrieval, gates what may leave your machine, holds multi-turn conversation state, and forwards a grounded query to the model *you* select (switchable mid-session, with the privacy gate re-run on switch). Scout fetches external signals (Hacker News, arXiv, GitHub, Reddit, RSS) on demand, classifies them into Tier 1 (Actionable) / Tier 2 (Good to Know) using a local ADK pipeline, and writes a morning digest to `~/.kage/scout/`. Librarian processes Scout's findings through a 3e-gated distill-and-judge pipeline and presents promotion requests for your approval — nothing reaches permanent memory without an explicit `kage librarian approve`. The full *broker* behavior (continuous monitoring via Monitor) is on the roadmap below.
+**Honest status:** today kage is a *context-gated forwarder with a hard identity wall, stateful sessions, arm routing for live external data, and three proactive agents — Scout, Librarian, and Monitor*. It retrieves your notes, enforces the identity × project partition before any note reaches retrieval, gates what may leave your machine (including user-defined sensitive patterns in `~/.kage/sensitive.json`), holds multi-turn conversation state, and forwards a grounded query to the model *you* select (switchable mid-session, with the privacy gate re-run on switch). Scout fetches external signals (Hacker News, arXiv, GitHub, Reddit, RSS), shortlists the most relevant via a local ADK stage, deep-fetches full content via Jina/GitHub API/Reddit body, and writes a project-aware morning digest to `~/.kage/scout/`. Librarian processes Scout's findings through a 3e-gated distill-and-judge pipeline and presents promotion requests for your approval — nothing reaches permanent memory without an explicit `kage librarian approve`. Monitor runs a macOS AX daemon that captures app-switch and typing-pause events every 5 minutes (local Qwen3) and synthesizes a daily digest at 07:00 (cloud).
 
 ```
   ┌─────────────────────────────────────────────────────────────┐
   │  SCOUT (proactive agent — runs independently)               │
   │  kage scout run / dry-run / bootstrap / status             │
   │  HN · arXiv · GitHub · Reddit · RSS                        │
-  │  ADK Workflow: ScoutBroad (local) → ScoutIntegrate (cloud) │
+  │  ADK Workflow: ScoutBroad (local) → deep-fetch → ScoutIntegrate (cloud) │
   │  Tier 1/2 triage · project-aware · ~/.kage/scout/          │
+  └─────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │  MONITOR (continuous watcher — cadence-split launchd)       │
+  │  kage monitor observe / digest / run / install / status    │
+  │  observe: AX daemon → observations-YYYY-MM-DD.jsonl (5min) │
+  │  digest: cloud synthesis → YYYY-MM-DD.md (07:00 daily)     │
   └─────────────────────────────────────────────────────────────┘
 
   ┌─────────────────────────────────────────────────────────────┐
@@ -150,6 +157,18 @@ kage librarian approve <id>         Write an approved note to permanent memory.
 kage librarian reject <id>          Reject an approval request (item stays in staging).
 kage librarian locate <query>       Search permanent memory (pre-check before depositing).
 kage librarian status               Show catalog stats: note count, queue depth, last run.
+
+kage monitor observe                Run one observe pass (local Qwen3 only — no cloud).
+kage monitor digest                 Synthesize today's observations into a digest (cloud).
+kage monitor run                    Run observe then digest in sequence.
+kage monitor last                   Print the most recent digest file.
+kage monitor status                 Show observation count for today, last run timestamp.
+kage monitor install                Install both launchd plists (observe every 5min, digest at 07:00).
+kage monitor uninstall              Remove both launchd plists.
+
+kage sensitive list                 Show all user-defined sensitive patterns in the vault.
+kage sensitive add <label> <regex>  Add a new pattern to ~/.kage/sensitive.json.
+kage sensitive scan                 Scan memory + staging queue against vault patterns.
 ```
 
 Arms are configured under `arms` in `~/.kage/config.json`. Each arm declares a
@@ -330,20 +349,34 @@ kage today is a passive broker — it answers when called. The target is an acti
   Cycle 10   Stateful sessions          SHIPPED — kage chat REPL, safe model-switching
   Cycle 10.5 Active context             SHIPPED — kage use / where, resolver, MCP wired
   Cycle 11   kage as MCP client         SHIPPED — arm routing + local shell arm (calendar)
-  Cycle 12   Modularity                 SHIPPED — injectable seams, 16 modules, registries
+  Cycle 12   Modularity                 SHIPPED — injectable seams, 25 modules, registries
   Cycle 13   Arms expansion             SHIPPED — gmail arm (osascript) + browser arm (Playwright MCP)
   Cycle 14   Scout agent                SHIPPED — proactive ADK Workflow, Tier 1/2 triage, project-aware
   Cycle 15   Librarian agent            SHIPPED — ADK LlmAgent, HITL approval gate, 3e-gated distill-and-judge
-  Cycle 16   Monitor agent              Continuous watcher, alert routing
+  Cycle 16   Monitor agent              SHIPPED — AX daemon, observe/digest ADK Workflows, launchd plists
+  Cycle 17   Gap fixes                  SHIPPED — 10 structural gaps across scout/librarian/monitor/observe
+  Cycle 18   Layer 4 router             SHIPPED — keyword task-class routing, config-driven routing table
+  Cycle 19   Sensitive vault            SHIPPED — user-defined PII patterns (kage sensitive)
+  Cycle 20   Monitor cadence + Scout deep fetch  SHIPPED — observe/digest cadence split, Scout two-stage fetch
 ```
 
-Cycle 15 shipped Librarian — kage's sole writer to permanent memory. Librarian runs as an ADK `LlmAgent` with 10 tools over a two-table staging pipeline (`staging_queue` → `approval_queue`). Every item deposited by Scout (or manually via `kage librarian`) passes through a 3e-gated `distill_and_judge` call: PII is scrubbed unconditionally, existing notes are checked for dedup and supersession, and the LLM judges PROMOTE / HOLD / DISCARD against five criteria (durability, actionability, novelty, specificity, contradiction). PROMOTE items surface in `kage librarian queue` awaiting your approval — nothing reaches `~/.kage/memory/` without `kage librarian approve`. Write order is DB-first (stale pointer recoverable via `kage reindex`; ghost file undetectable), writes are idempotent, and a dual-lock (threading + lockfile) prevents concurrent runs.
+Cycle 20 split Monitor's cadence: observe (AX daemon, local Qwen3) runs every 5 minutes via a `StartInterval` launchd plist; digest (cloud) fires once daily at 07:00 via `StartCalendarInterval`. Scout gained a two-stage deep-fetch: ScoutBroad (local) shortlists by index number → `_fetch_full` enriches via Jina Reader / GitHub API README / Reddit body → ScoutIntegrate (cloud) works from full content, not headlines. Both `kage monitor observe` and `kage monitor digest` are now independent subcommands with their own try/except error reporting.
 
-Cycle 14 shipped Scout — kage's first proactive behavior. Scout fetches public signals from five sources (HN, arXiv, GitHub, Reddit, RSS) on demand, classifies them into Tier 1 (Actionable — things that could become a cycle or implementation decision) and Tier 2 (Good to Know — news, trends, opinion) using a two-stage ADK Workflow, and writes a project-aware morning digest. ScoutBroad (local Qwen3) triages; ScoutIntegrate (cloud Claude) writes full business-ruthlessness cards for Tier 1 items, consulting project memory via `scout_recall` before every card. Scout finds. You decide. Librarian remembers.
+Cycle 19 added a user-defined sensitive pattern vault at `~/.kage/sensitive.json`. Add any regex via `kage sensitive add <label> <pattern>`; the vault extends the 29-pattern built-in PII table and can be scanned across memory and the staging queue. Patterns are validated at add time and stored with an id, label, and timestamp.
+
+Cycle 18 added a Layer 4 keyword router — `router.py` classifies questions into five task classes (code, research, multimodal, reasoning, chat) by keyword match and returns an ordered list of provider candidates. The routing table is config-driven so you can override per task class in `~/.kage/config.json`.
+
+Cycle 17 addressed 10 structural gaps (G01–G10) across scout/librarian/monitor/observe — missing guards, stale imports, test seam gaps.
+
+Cycle 16 shipped Monitor — kage's third ADK agent. A macOS Accessibility daemon (`observe.py`) captures app-switch, typing-pause, scroll-stop, and idle events and appends timestamped JSON to `observations-YYYY-MM-DD.jsonl`. `build_monitor_observe` (local Qwen3) summarizes findings; `build_monitor_digest` (cloud) synthesizes the day's JSONL into a readable `~/.kage/monitor/YYYY-MM-DD.md`. `kage monitor install` registers both launchd plists with one command.
+
+Cycle 15 shipped Librarian — kage's sole writer to permanent memory. Librarian runs as an ADK `LlmAgent` with 10 tools over a two-table staging pipeline (`staging_queue` → `approval_queue`). Every item deposited by Scout (or manually via `kage librarian`) passes through a 3e-gated `distill_and_judge` call: PII is scrubbed unconditionally, existing notes are checked for dedup and supersession, and the LLM judges PROMOTE / HOLD / DISCARD against five criteria (durability, actionability, novelty, specificity, contradiction). PROMOTE items surface in `kage librarian queue` awaiting your approval — nothing reaches `~/.kage/memory/` without `kage librarian approve`. Write order is DB-first, writes are idempotent, and a dual-lock prevents concurrent runs.
+
+Cycle 14 shipped Scout — kage's first proactive behavior. Scout fetches public signals from five sources (HN, arXiv, GitHub, Reddit, RSS) on demand, classifies them into Tier 1 (Actionable) and Tier 2 (Good to Know) using a two-stage ADK Workflow, and writes a project-aware morning digest. ScoutBroad (local Qwen3) shortlists by index → deep-fetch enriches full content → ScoutIntegrate (cloud Claude) writes business-ruthlessness cards for Tier 1 items, consulting project memory via `scout_recall`. Scout finds. You decide. Librarian remembers.
 
 Cycle 13 added two arms: a gmail arm (reads Mail.app via osascript, zero OAuth, privacy-gated) and a browser arm (Playwright MCP for headless web, stealth config). Arms are declared in `~/.kage/config.json` and routed by keyword; every call hits the audit log.
 
-Cycle 12 dissolved the monolithic `cli.py` into 16 focused modules via injectable runtime seams — swapping `runtime.embed` or `runtime.cloud` now reaches every module at once, making backends genuinely swappable and arms/providers pluggable via registries. The egress golden tests lock the privacy moat: withheld note content is verified absent from every cloud payload.
+Cycle 12 dissolved the monolithic `cli.py` into 25 focused modules via injectable runtime seams — swapping `runtime.embed` or `runtime.cloud` now reaches every module at once, making backends genuinely swappable and arms/providers pluggable via registries. The egress golden tests lock the privacy moat: withheld note content is verified absent from every cloud payload.
 
 ---
 
@@ -382,23 +415,34 @@ src/kage/
 ├── session.py      Session CRUD, turn gating, query condensing
 ├── chunk.py        Note chunking — pure text logic, no I/O
 ├── pii.py          PII patterns + scanner — pure, no I/O
-├── scout.py        Scout agent — fetch (5 sources), dedup, corpus, ADK pipeline, report writer
+├── scout.py        Scout agent — fetch (5 sources), two-stage deep fetch, ADK pipeline, report writer
 ├── librarian.py    Librarian agent — staging queue, distill_and_judge, HITL approval, memory write
+├── monitor.py      Monitor agent — observe/digest ADK Workflows, cadence-split launchd plists
+├── observe.py      macOS AX daemon — app-switch / typing-pause / idle event capture
+├── router.py       Layer 4 keyword router — task-class classification, config-driven routing table
+├── sensitive.py    Sensitive vault — user-defined regex PII patterns, vault CRUD, memory/queue scan
 └── mcp_server.py   MCP server (FastMCP, stdio transport)
 
 tests/
-├── test_cli.py         372 tests — CLI commands + all seam behaviors
-├── test_scout.py        46 tests — fetch layer, corpus, dedup, ADK pipeline, project injection
-├── test_librarian.py    18 tests — schema migration, staging queue, distill_and_judge, HITL loop
+├── test_cli.py         382 tests — CLI commands + all seam behaviors
+├── test_scout.py        64 tests — fetch layer, corpus, deep fetch, ADK pipeline, project injection
+├── test_monitor.py      44 tests — observe pass, digest pass, cadence split, launchd plists
+├── test_librarian.py    23 tests — schema migration, staging queue, distill_and_judge, HITL loop
+├── test_router.py       18 tests — task classification, routing table, config override
 ├── test_seams.py        13 tests — seam contracts + registry functions
-└── fakes.py        Test doubles: FakeEmbedder, FakeVectorIndex, RecordingCloud, FakeConfig
+├── test_sensitive.py     8 tests — vault CRUD, pattern scan, integration with privacy gate
+├── test_observe.py       2 tests — AX daemon event capture
+└── fakes.py         Test doubles: FakeEmbedder, FakeVectorIndex, RecordingCloud, FakeConfig
 
 docs/
 ├── blueprint.md             Long-term architecture and planning state
-├── cycle-12-modularity.md   Modularity design — injectable seams, 6 slices
+├── cycle-12-modularity.md   Modularity design — injectable seams, 25 modules
 ├── cycle-14-scout.md        Scout agent pitch — ADK design, source list, seen-cache
 ├── cycle-14-scout-v1.1.md   Scout v1.1 — Tier 1/2 triage, project-aware, GitHub stats
 ├── cycle-15-librarian.md    Librarian agent pitch — staging pipeline, HITL design, cold reviews
+├── cycle-16-monitor.md      Monitor agent pitch — AX daemon, cadence split, launchd design
+├── cycle-19-sensitive-vault.md  Sensitive vault pitch — user-defined patterns, vault schema
+├── cycle-20-pitch.md        Cycle 20 pitch — Monitor cadence split, Scout two-stage deep fetch
 └── ...                      Historical cycle pitches and research
 ```
 

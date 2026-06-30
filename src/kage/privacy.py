@@ -16,10 +16,14 @@ def _write_audit(record: dict) -> None:
         pass
 
 
-def _disclosure_gate(rows: list, cfg: dict, identity: str = "personal", project: str | None = None) -> tuple[list, list[dict]]:
-    """Filter rows before cloud dispatch. Returns (allowed_rows, withheld_list)."""
+def _disclosure_gate(rows: list, cfg: dict, identity: str = "personal", project: str | None = None) -> tuple[list, list[dict], dict[str, list[str]]]:
+    """Filter rows before cloud dispatch. Returns (allowed_rows, withheld_list, pii_map).
+
+    pii_map: {note_id: [pii_pattern_names]} for notes that passed WITH PII present.
+    PII no longer causes withholding (Cycle 21) — substitution happens at dispatch.
+    """
     if not rows:
-        return [], []
+        return [], [], {}
 
     note_ids = [row[0] for row in rows]
     local_only_projects: list[str] = cfg.get("local_only_projects", [])
@@ -42,6 +46,7 @@ def _disclosure_gate(rows: list, cfg: dict, identity: str = "personal", project:
 
     allowed: list = []
     withheld: list[dict] = []
+    pii_map: dict[str, list[str]] = {}
     for row in rows:
         note_id: str = row[0]
         project_val: str | None = row[1]
@@ -73,12 +78,12 @@ def _disclosure_gate(rows: list, cfg: dict, identity: str = "personal", project:
 
         pii_hits = _pii_scan(text, extra_pii)
         if pii_hits:
-            withheld.append({"note_id": note_id, "reason": "pii_detected", "pii_patterns": pii_hits})
-            continue
-
+            # ponytail: PII no longer withholds — substitution happens at dispatch (Cycle 21).
+            # local_only and identity_wall remain hard blocks.
+            pii_map[note_id] = pii_hits
         allowed.append(row)
 
-    return allowed, withheld
+    return allowed, withheld, pii_map
 
 
 def _gate_conversation(

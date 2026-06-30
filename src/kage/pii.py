@@ -53,18 +53,15 @@ _PII_PATTERNS: list[dict] = [
 
 def _gate_text(text: str) -> str:
     """Strip PII from text before cloud dispatch. No cfg — uses built-in patterns only."""
-    for entry in _PII_PATTERNS:
-        try:
-            text = re.sub(entry["pattern"], "[REDACTED_PII]", text)
-        except re.error:
-            pass
+    from kage.redact import substitute
     try:
         from kage.sensitive import load_vault
-        for p in load_vault().get("patterns", []):
-            text = re.sub(p["pattern"], f"[SENSITIVE:{p['label']}]", text, flags=re.IGNORECASE)
+        vault_patterns = [{"name": f"SENSITIVE_{p['label']}", "pattern": p["pattern"]}
+                          for p in load_vault().get("patterns", [])]
     except Exception:
-        pass  # vault missing or malformed — fail open
-    return text
+        vault_patterns = []
+    redacted, _ = substitute(text, _PII_PATTERNS + vault_patterns)
+    return redacted
 
 
 def _pii_scan(text: str, extra_patterns: list[dict] | None = None) -> list[str]:

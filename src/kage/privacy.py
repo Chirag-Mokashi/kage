@@ -6,6 +6,8 @@ from kage import notes as _notes
 from kage import runtime
 from kage.pii import _pii_scan
 
+_ALWAYS_LOCAL_PROJECTS: frozenset[str] = frozenset({"kage-corrections"})
+
 
 def _write_audit(record: dict) -> None:
     """Append one JSON record to the audit log. Best-effort — never raises."""
@@ -67,6 +69,14 @@ def _disclosure_gate(rows: list, cfg: dict, identity: str = "personal", project:
             })
             continue
 
+        if project_val and project_val in _ALWAYS_LOCAL_PROJECTS:
+            withheld.append({
+                "note_id": note_id,
+                "reason": f"local_only:always_local:{project_val}",
+                "pii_patterns": [],
+            })
+            continue
+
         path, char_start, char_end = row[3], row[6], row[7]
         if char_start is not None and char_end is not None:
             text = _notes._read_section(path, char_start, char_end)
@@ -97,15 +107,15 @@ def _gate_conversation(
         return [], []
     identity_allowed = runtime.store.allowed_note_ids(identity, project)
     all_note_ids = list({nid for t in turns for nid in t["note_ids"]})
-    lo_map: dict[str, bool] = {}
+    meta_map: dict[str, tuple[bool, str | None]] = {}
     if all_note_ids:
         conn = runtime.store.connect()
         try:
             placeholders = ",".join("?" * len(all_note_ids))
-            lo_map = {
-                r[0]: bool(r[1])
+            meta_map = {
+                r[0]: (bool(r[1]), r[2])
                 for r in conn.execute(
-                    f"SELECT id, local_only FROM memories WHERE id IN ({placeholders})",
+                    f"SELECT id, local_only, project FROM memories WHERE id IN ({placeholders})",
                     all_note_ids,
                 ).fetchall()
             }
@@ -120,8 +130,13 @@ def _gate_conversation(
                 withheld.append({"turn_idx": turn["idx"], "reason": f"provenance:identity_wall:{identity}", "pii_patterns": []})
                 blocked = True
                 break
-            if lo_map.get(nid, False):
+            if meta_map.get(nid, (False, None))[0]:
                 withheld.append({"turn_idx": turn["idx"], "reason": f"provenance:local_only:{nid}", "pii_patterns": []})
+                blocked = True
+                break
+            proj = meta_map.get(nid, (False, None))[1]
+            if proj and proj in _ALWAYS_LOCAL_PROJECTS:
+                withheld.append({"turn_idx": turn["idx"], "reason": f"provenance:always_local:{proj}", "pii_patterns": []})
                 blocked = True
                 break
         if blocked:

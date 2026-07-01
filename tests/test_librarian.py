@@ -15,7 +15,7 @@ from kage.librarian import (
     _apply_migrations, _connect, _acquire_lockfile, _release_lockfile,
     _gate_text, distill_and_judge, ApprovalRequest,
     deposit_to_queue, request_approval, write_note, reject_approval,
-    get_catalog_stats, get_staging_queue, _LOCKFILE,
+    get_catalog_stats, get_staging_queue, _LOCKFILE, _DISTILL_SYSTEM,
 )
 
 
@@ -419,3 +419,90 @@ def test_librarian_gate_applies_vault_pattern(lib_env, monkeypatch):
     assert "[SENSITIVE:employer-name]" in result
     assert "Initech" not in result
     assert "[REDACTED_PII]" not in result
+
+
+# ── Cycle 24 — EPM: rejection correction notes + distill_and_judge prepend ──
+
+_VALID_JSON_EPM = (
+    '{"dedup":{"verdict":"DISTINCT"},"contradiction":{"found":false},'
+    '"quality":"HOLD","reason":"r","note":{"title":"T","body":"B","tags":[]},"staleness":[]}'
+)
+
+
+def test_reject_approval_emits_correction_note(lib_env):
+    import pathlib
+    staging_id = deposit_to_queue("rejected content", "user")
+    note_json = {"title": "Bad PROMOTE", "body": "B", "tags": [], "project": None,
+                 "identity": "personal", "source": "scout"}
+    approval_id = request_approval(staging_id, "promote", "test", note_json, "B")
+    ok = reject_approval(approval_id, "title was wrong")
+    assert ok is True
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT id, content_path FROM memories WHERE project=?",
+        ("kage-corrections-librarian",),
+    ).fetchall()
+    conn.close()
+    assert len(rows) == 1
+    content = (pathlib.Path(runtime.config.home) / rows[0][1]).read_text()
+    assert "Correction log — Librarian rejection:" in content
+    assert "Bad PROMOTE" in content
+    assert "title was wrong" in content
+
+
+def test_reject_approval_missing_id_no_note(lib_env):
+    ok = reject_approval("nonexistent-id", "reason")
+    assert ok is False
+    conn = _connect()
+    count = conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE project=?",
+        ("kage-corrections-librarian",),
+    ).fetchone()[0]
+    conn.close()
+    assert count == 0
+
+
+def test_distill_and_judge_prepends_learned_rules(lib_env, monkeypatch):
+    import json
+    import pathlib
+    learned = {
+        "librarian": {
+            "active": "v1",
+            "versions": {
+                "v1": {
+                    "prompt": "- Never promote stale content",
+                    "date": "2026-07-01",
+                    "correction_count": 3,
+                    "source_note_ids": [],
+                    "trace": "",
+                }
+            },
+        }
+    }
+    (lib_env / "learned_prompts.json").write_text(json.dumps(learned))
+    (lib_env / "config.json").write_text(json.dumps({"cloud_provider": "claude"}))
+    captured = {}
+
+    def fake_complete(provider, system, messages, cfg):
+        captured["system"] = system
+        return _VALID_JSON_EPM
+
+    monkeypatch.setattr(runtime.cloud, "complete", fake_complete)
+    distill_and_judge("some content", "manual")
+    assert "[kage learned librarian rules]" in captured["system"]
+    assert "Never promote stale content" in captured["system"]
+    assert _DISTILL_SYSTEM in captured["system"]
+
+
+def test_distill_and_judge_no_learned_rules_unchanged(lib_env, monkeypatch):
+    import json
+    (lib_env / "config.json").write_text(json.dumps({"cloud_provider": "claude"}))
+    captured = {}
+
+    def fake_complete(provider, system, messages, cfg):
+        captured["system"] = system
+        return _VALID_JSON_EPM
+
+    monkeypatch.setattr(runtime.cloud, "complete", fake_complete)
+    distill_and_judge("content", "manual")
+    assert captured["system"] == _DISTILL_SYSTEM

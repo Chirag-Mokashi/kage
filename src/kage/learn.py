@@ -62,6 +62,88 @@ def _count_total_corrections(home: Path = KAGE_HOME) -> int:
             conn.close()
 
 
+def _count_corrections(project: str, home: Path = KAGE_HOME) -> int:
+    db_path = home / "indexes" / "kage.db"
+    conn = None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        return conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE project = ?",
+            (project,),
+        ).fetchone()[0]
+    except Exception:
+        return 0
+    finally:
+        if conn:
+            conn.close()
+
+
+def _build_librarian_meta_prompt(corrections: list[str]) -> str:
+    return f"""Here are memory-curation decisions the Librarian agent made that the user rejected.
+Each entry is a wrong PROMOTE/HOLD/DISCARD verdict or wrong dedup/quality judgment.
+Write a concise set of rules (max 8 bullet points) that would stop these wrong verdicts.
+Name the concrete signal — source type, staleness, redundancy. No vague advice.
+Output ONLY the rules as a bulleted list. No preamble, no explanation.
+
+--- CORRECTIONS ---
+{chr(10).join(f"[{i+1}] {c}" for i, c in enumerate(corrections))}"""
+
+
+def run_librarian_learning_pass(
+    project: str,
+    call_cloud_fn,
+    cfg: dict,
+    home: Path = KAGE_HOME,
+) -> tuple[str, str, list[str]]:
+    db_path = home / "indexes" / "kage.db"
+    rows = []
+    conn = None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        rows = conn.execute(
+            "SELECT m.id, m.content_path "
+            "FROM memory_fts "
+            "JOIN memories m ON m.id = memory_fts.id "
+            "WHERE memory_fts MATCH ? AND m.project = ? "
+            "ORDER BY rank LIMIT ?",
+            ('"correction" "log"', project, 200),
+        ).fetchall()
+    except Exception:
+        pass
+    finally:
+        if conn:
+            conn.close()
+
+    if not rows:
+        return ("", "", [])
+
+    raw_corrections: list[tuple[str, str]] = []
+    for note_id, rel_path in rows:
+        try:
+            text = (home / rel_path).read_text()
+            raw_corrections.append((note_id, text))
+        except OSError:
+            continue
+
+    if not raw_corrections:
+        return ("", "", [])
+
+    source_note_ids = [nid for nid, _ in raw_corrections]
+    correction_texts = [txt for _, txt in raw_corrections]
+    provider_name = cfg.get("provider") or next(iter(cfg.get("providers", {"claude-sonnet": {}})))
+    meta_prompt = _build_librarian_meta_prompt(correction_texts)
+    full_trace = call_cloud_fn(provider_name, "", meta_prompt, cfg)
+
+    lines = full_trace.splitlines()
+    bullet_start = next((i for i, line in enumerate(lines) if line.strip().startswith("- ")), None)
+    if bullet_start is None:
+        prompt_rules = full_trace.strip()
+    else:
+        prompt_rules = "\n".join(lines[bullet_start:]).strip()
+
+    return (prompt_rules, full_trace, source_note_ids)
+
+
 def _read_learn_state(home: Path = KAGE_HOME) -> dict:
     path = home / "learn_state.json"
     try:

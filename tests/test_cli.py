@@ -5218,3 +5218,45 @@ def test_learn_rollback_already_oldest(monkeypatch, tmp_path):
     assert "already at oldest" in result.output
     data = json.loads((h / "learned_prompts.json").read_text())
     assert data["code"]["active"] == "v1"
+
+
+# ── Cycle 24 — kage learn --librarian + --status librarian display ──
+
+def test_learn_librarian_writes_pending(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    import kage.learn as learn_mod
+    monkeypatch.setattr(learn_mod, "run_librarian_learning_pass",
+                        lambda *a, **kw: ("- Never demote fresh content", "trace text", ["lib-id-1"]))
+    monkeypatch.setattr(learn_mod, "_count_corrections", lambda *a, **kw: 9)
+    result = CliRunner().invoke(cli.app, ["learn", "--librarian"])
+    assert result.exit_code == 0
+    assert "librarian rules (pending)" in result.output
+    assert "Never demote fresh content" in result.output
+    assert (h / "pending_learned.json").exists() is True
+    pending = json.loads((h / "pending_learned.json").read_text())
+    assert "librarian" in pending
+    assert pending["librarian"]["correction_count"] == 9
+
+
+def test_learn_status_shows_librarian_entry(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "learned_prompts.json").write_text(json.dumps({
+        "librarian": {
+            "active": "v1",
+            "versions": {
+                "v1": {
+                    "date": "2026-07-01",
+                    "correction_count": 7,
+                    "source_note_ids": [],
+                    "prompt": "- Never promote stale\n- Check source",
+                    "trace": "t",
+                }
+            },
+        }
+    }))
+    result = CliRunner().invoke(cli.app, ["learn", "--status"])
+    assert result.exit_code == 0
+    assert "librarian" in result.output
+    assert "7 corrections" in result.output
+    assert "2 rules" in result.output
+    assert "v1" in result.output

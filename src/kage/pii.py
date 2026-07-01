@@ -20,7 +20,7 @@ _PII_PATTERNS: list[dict] = [
     {"name": "IFSC code",        "pattern": r"\b[A-Z]{4}0[A-Z0-9]{6}\b"},
     {"name": "Vehicle reg (IN)", "pattern": r"\b[A-Z]{2}[\s-]?\d{2}[\s-]?[A-Z]{1,2}[\s-]?\d{4}\b"},
     # CONTACT INFORMATION
-    {"name": "Email",            "pattern": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"},
+    {"name": "Email",            "pattern": r"(?<!\[)[^\s@\[\]]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"},
     {"name": "Phone (IN)",       "pattern": r"\b(\+91[\s-]?)?[6-9]\d{9}\b"},
     {"name": "Phone (intl)",     "pattern": r"\+[1-9]\d{1,14}\b"},
     {"name": "Indian PIN code",  "pattern": r"(?i)\bpin\s*(?:code)?\s*[:=]?\s*[1-9][0-9]{5}\b"},
@@ -29,10 +29,10 @@ _PII_PATTERNS: list[dict] = [
     {"name": "UPI ID",           "pattern": r"\b[a-zA-Z0-9._-]{2,}@[a-zA-Z]{2,}\b(?!\.[a-zA-Z])"},
     {"name": "CVV",              "pattern": r"(?i)cvv\s*[:=]\s*\d{3,4}"},
     # CREDENTIALS AND KEYS
-    {"name": "Password field",   "pattern": r"(?i)(password|passwd|pwd|secret)\s*[:=]\s*\S+"},
+    {"name": "Password field",   "pattern": r"(?i)(password|passwd|pwd|secret|token)\s*[:=]\s*[^\s\[]+"},
     {"name": "OpenAI/Anthropic key", "pattern": r"\bsk-[A-Za-z0-9_-]{32,}"},
-    {"name": "API key in context",      "pattern": r"(?i)\w*api[\s_-]?key\s*[\"']?\s*[:=]\s*[\"']?\s*\S{8,}"},
-    {"name": "Secret/token in context", "pattern": r"(?i)\b(?:secret|access|auth)[\s_-]?(?:key|token)\s*[\"']?\s*[:=]\s*[\"']?\s*\S{8,}"},
+    {"name": "API key in context",      "pattern": r"(?i)\w*api[\s_-]?key\s*[\"']?\s*[:=]\s*[\"']?\s*[^\s\[]{8,}"},
+    {"name": "Secret/token in context", "pattern": r"(?i)\b(?:secret|access|auth)[\s_-]?(?:key|token)\s*[\"']?\s*[:=]\s*[\"']?\s*[^\s\[]{8,}"},
     {"name": "Google key",       "pattern": r"\bAIza[A-Za-z0-9_-]{35}\b"},
     {"name": "GitHub PAT",       "pattern": r"\bghp_[A-Za-z0-9]{36}\b"},
     {"name": "GitHub OAuth",     "pattern": r"\bgho_[A-Za-z0-9]{36}\b"},
@@ -40,7 +40,8 @@ _PII_PATTERNS: list[dict] = [
     {"name": "Bearer token",     "pattern": r"(?i)bearer\s+[A-Za-z0-9\-._~+/]+=*"},
     {"name": "JWT token",        "pattern": r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"},
     {"name": "SSH private key",  "pattern": r"-----BEGIN [A-Z ]+ PRIVATE KEY-----"},
-    {"name": ".env secret",      "pattern": r"(?i)\b(SECRET|TOKEN|KEY|PASS)\s*=\s*\S{8,}"},
+    {"name": ".env secret",      "pattern": r"(?i)\b(SECRET|TOKEN|KEY|PASS)\s*=\s*[^\s\[]{8,}"},
+    {"name": "DB connection string", "pattern": r"\w+://[^:\s\[]+:[^@\s\[]+@[^\s\[]+"},
     # NETWORK AND SYSTEM
     # IPv4 removed (audit WI-3): private IPs aren't sensitive and it false-matched
     # 4-part version strings like 1.2.3.4. IPv6/MAC kept (distinctive, low FP).

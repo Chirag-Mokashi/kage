@@ -3104,6 +3104,29 @@ def test_disclosure_gate_allows_clean_note(monkeypatch, tmp_path):
     assert withheld == []
 
 
+def test_disclosure_gate_withholds_always_local(monkeypatch, tmp_path):
+    """Gate must block a note in kage-corrections regardless of local_only flag or config."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    mem_id = cli._save("dev correction note", "kage-corrections")
+    cfg = cli._config()
+    allowed, withheld, _ = cli._disclosure_gate([_fake_row(mem_id, "kage-corrections")], cfg)
+    assert allowed == []
+    assert len(withheld) == 1
+    assert withheld[0]["reason"] == "local_only:always_local:kage-corrections"
+
+
+def test_disclosure_gate_allows_ordinary_project_not_blocked(monkeypatch, tmp_path):
+    """Ordinary project notes must NOT be blocked by the always-local set."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    mem_id = cli._save("regular work note", "my-project")
+    cfg = cli._config()
+    allowed, withheld, _ = cli._disclosure_gate([_fake_row(mem_id, "my-project")], cfg)
+    assert len(allowed) == 1
+    assert withheld == []
+
+
 def test_disclosure_gate_empty_rows():
     """Gate on empty input must return two empty lists without error."""
     allowed, withheld, _ = cli._disclosure_gate([], {})
@@ -3994,7 +4017,7 @@ class TestGateConversation:
             self._params = list(params)
             return self
         def fetchall(self):
-            return [(nid, 0) for nid in self._params]
+            return [(nid, 0, None) for nid in self._params]
         def close(self): pass
 
     def test_empty_turns_returns_empty(self):
@@ -4034,7 +4057,7 @@ class TestGateConversation:
     def test_provenance_local_only_withheld(self, monkeypatch):
         class LocalConn:
             def execute(self, sql, params): return self
-            def fetchall(self): return [("note-lo", 1)]
+            def fetchall(self): return [("note-lo", 1, None)]
             def close(self): pass
         turn = self.make_turn(0, "hello", note_ids=["note-lo"])
         monkeypatch.setattr(runtime.store, "allowed_note_ids", lambda *a: {"note-lo"})
@@ -4062,6 +4085,19 @@ class TestGateConversation:
         assert [t["idx"] for t in safe] == [1]
         assert withheld[0]["turn_idx"] == 0
         assert withheld[0]["reason"].startswith("provenance:identity_wall:")
+
+    def test_provenance_always_local_withheld(self, monkeypatch):
+        """A turn whose note comes from kage-corrections must be withheld by the gate."""
+        class AlwaysLocalConn:
+            def execute(self, sql, params): return self
+            def fetchall(self): return [("note-corr", 0, "kage-corrections")]
+            def close(self): pass
+        turn = self.make_turn(0, "hello", note_ids=["note-corr"])
+        monkeypatch.setattr(runtime.store, "allowed_note_ids", lambda *a: {"note-corr"})
+        monkeypatch.setattr(runtime.store, "connect", lambda: AlwaysLocalConn())
+        safe, withheld = cli._gate_conversation([turn], {}, "personal", None)
+        assert safe == []
+        assert withheld[0]["reason"] == "provenance:always_local:kage-corrections"
 
 
 class TestSessionSwitch:

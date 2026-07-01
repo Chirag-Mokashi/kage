@@ -9,6 +9,7 @@ from kage.pii import _pii_scan
 _ALWAYS_LOCAL_PROJECTS: frozenset[str] = frozenset({
     "kage-corrections",
     "kage-corrections-librarian",  # Cycle 24 EPM
+    "kage-ctm-librarian",          # Cycle 25 CTM
 })
 
 

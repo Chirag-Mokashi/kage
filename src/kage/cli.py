@@ -2104,6 +2104,12 @@ def learn(
                 typer.echo(f"  {key:<12} {active}  {entry['date']}  {entry['correction_count']} corrections  {rule_count} rules")
             else:
                 typer.echo(f"  {'librarian':<12} (no learned prompt)")
+        try:
+            from kage.learn import _count_corrections
+            ctm_count = _count_corrections("kage-ctm-librarian", home=KAGE_HOME)
+            typer.echo(f"  {'ctm':<12} {ctm_count} approved precedents")
+        except Exception:
+            pass
 
     elif rollback:
         if not learned_path.exists():

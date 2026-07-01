@@ -18,6 +18,13 @@ from kage import privacy as _privacy
 from kage import runtime
 
 ARM_KEYWORDS: dict[str, list[str]] = {}
+
+_SHELL_INTERPRETERS = frozenset({
+    "bash", "sh", "zsh", "ksh", "fish",
+    "python", "python3", "python2",
+    "ruby", "perl", "node", "nodejs", "php", "lua",
+    "pwsh", "powershell",
+})
 _arm_tool_cache: dict[str, list] = {}
 
 
@@ -94,6 +101,9 @@ async def _call_arm_shell(
         _privacy._write_audit({'type': 'arm_call', 'arm': arm_name, 'tool': 'shell', 'identity': identity, 'ts': ts, 'success': False})
         return None
     try:
+        if shlex.split(cmd)[0].rsplit("/", 1)[-1] in _SHELL_INTERPRETERS:
+            _privacy._write_audit({'type': 'arm_call', 'arm': arm_name, 'tool': 'shell', 'identity': identity, 'ts': ts, 'success': False, 'blocked': 'interpreter'})
+            return None
         proc = subprocess.run(shlex.split(cmd), capture_output=True, text=True, timeout=timeout)
         data = proc.stdout.strip() or None
         _privacy._write_audit({'type': 'arm_call', 'arm': arm_name, 'tool': 'shell', 'identity': identity, 'ts': ts, 'success': bool(data)})
@@ -258,6 +268,8 @@ async def _check_arm_health(arm_name: str) -> bool:
         if not cmd:
             return False
         try:
+            if shlex.split(cmd)[0].rsplit("/", 1)[-1] in _SHELL_INTERPRETERS:
+                return False
             proc = subprocess.run(shlex.split(cmd), capture_output=True, text=True, timeout=10.0)
             return proc.returncode == 0
         except Exception:

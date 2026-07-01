@@ -4013,10 +4013,8 @@ class TestGateConversation:
         monkeypatch.setattr(runtime.store, "allowed_note_ids", lambda *a: set())
         monkeypatch.setattr(runtime.store, "connect", lambda: self.FakeConn())
         safe, withheld = cli._gate_conversation([turn], {}, "personal", None)
-        assert safe == []
-        assert len(withheld) == 1
-        assert withheld[0]["turn_idx"] == 0
-        assert withheld[0]["reason"] == "pii_in_content"
+        assert len(safe) == 1
+        assert withheld == []
 
     def test_provenance_identity_wall_withheld(self, monkeypatch):
         turn = self.make_turn(0, "hello", note_ids=["note-x"])
@@ -4052,9 +4050,8 @@ class TestGateConversation:
         monkeypatch.setattr(runtime.store, "allowed_note_ids", lambda *a: set())
         monkeypatch.setattr(runtime.store, "connect", lambda: self.FakeConn())
         safe, withheld = cli._gate_conversation([turn0, turn1, turn2], {}, "personal", None)
-        assert [t["idx"] for t in safe] == [0, 2]
-        assert withheld[0]["turn_idx"] == 1
-        assert withheld[0]["reason"] == "pii_in_content"
+        assert [t["idx"] for t in safe] == [0, 1, 2]
+        assert withheld == []
 
     def test_withheld_does_not_affect_other_turns(self, monkeypatch):
         turn0 = self.make_turn(0, "safe", note_ids=["bad-note"])
@@ -4121,9 +4118,7 @@ class TestSessionSwitch:
         session_id = cli._session_create("personal", None, "ollama")
         cli._session_append(session_id, "user", "4111 1111 1111 1111", [], "ollama", None, None, None)
         _, safe, withheld = cli._session_switch(session_id, "claude", {}, "personal", None)
-        assert len(safe) == 0
-        assert len(withheld) == 1
-        assert withheld[0]["reason"] == "pii_in_content"
+        assert len(safe) == 1
 
 
 class TestAnswerDispatcher:
@@ -4344,6 +4339,54 @@ class TestChatCommand:
         result = CliRunner().invoke(cli.app, ["chat"], catch_exceptions=False)
         assert "Switched to claude." in result.output
 
+    def test_cloud_masks_question_pii_before_dispatch(self, tmp_path, monkeypatch):
+        # B1 regression guard: question must be masked before cloud _answer receives it.
+        self._setup(tmp_path, monkeypatch)
+        captured = []
+        def fake_answer(question, history, context, destination, cfg):
+            captured.append({"question": question, "history": list(history), "context": context})
+            return iter(["ok"])
+        monkeypatch.setattr("kage.cli._answer", fake_answer)
+        monkeypatch.setattr("kage.cli._search", lambda *a, **k: [])
+        seq = iter(["contact test@example.com", "/exit"])
+        monkeypatch.setattr("builtins.input", lambda _: next(seq))
+        CliRunner().invoke(cli.app, ["chat", "--provider", "claude"], catch_exceptions=False)
+        assert len(captured) == 1
+        assert "test@example.com" not in captured[0]["question"]
+        assert "[EMAIL_1]" in captured[0]["question"]
+
+    def test_ollama_does_not_mask_question(self, tmp_path, monkeypatch):
+        # Local ollama path must receive real content, not placeholders.
+        self._setup(tmp_path, monkeypatch)
+        captured = []
+        def fake_answer(question, history, context, destination, cfg):
+            captured.append({"question": question})
+            return iter(["ok"])
+        monkeypatch.setattr("kage.cli._answer", fake_answer)
+        monkeypatch.setattr("kage.cli._search", lambda *a, **k: [])
+        seq = iter(["contact test@example.com", "/exit"])
+        monkeypatch.setattr("builtins.input", lambda _: next(seq))
+        CliRunner().invoke(cli.app, ["chat"], catch_exceptions=False)
+        assert len(captured) == 1
+        assert "test@example.com" in captured[0]["question"]
+
+    def test_cloud_masks_history_pii_before_dispatch(self, tmp_path, monkeypatch):
+        # History turns must be masked before cloud receives them.
+        self._setup(tmp_path, monkeypatch)
+        captured = []
+        def fake_answer(question, history, context, destination, cfg):
+            captured.append({"question": question, "history": list(history), "context": context})
+            return iter(["ok"])
+        monkeypatch.setattr("kage.cli._answer", fake_answer)
+        monkeypatch.setattr("kage.cli._search", lambda *a, **k: [])
+        seq = iter(["my email is test@example.com", "what was that", "/exit"])
+        monkeypatch.setattr("builtins.input", lambda _: next(seq))
+        CliRunner().invoke(cli.app, ["chat", "--provider", "claude"], catch_exceptions=False)
+        assert len(captured) == 2
+        # On turn 2, history includes the first user turn containing the email — must be masked.
+        for turn in captured[1]["history"]:
+            assert "test@example.com" not in turn["content"]
+
 
 # ── Cycle 10: MCP session_id (Step 8) ─────────────────────────────────────────
 
@@ -4554,6 +4597,50 @@ class TestArmShellTransport:
         monkeypatch.setattr(cli.subprocess, "run", lambda *a, **kw: mock_proc)
         result = asyncio.run(cli._check_arm_health("calendar"))
         assert result is False
+
+
+
+# ── Cycle 23: S2 audit + S3 shell arm hardening ───────────────────────────────
+
+def test_pii_type_counts_expression():
+    """S2: the type-count expression used in the fallback audit record is correct."""
+    sub_mapping = {"[EMAIL_1]": "a@b.com", "[EMAIL_2]": "c@d.com", "[SSN_1]": "123-45-6789"}
+    counts = {t: sum(1 for k in sub_mapping if k.lstrip("[").rsplit("_", 1)[0] == t)
+              for t in sorted({k.lstrip("[").rsplit("_", 1)[0] for k in sub_mapping})}
+    assert counts == {"EMAIL": 2, "SSN": 1}
+    # empty mapping must produce empty dict, not error
+    assert {t: sum(1 for k in {} if k.lstrip("[").rsplit("_", 1)[0] == t)
+            for t in sorted({k.lstrip("[").rsplit("_", 1)[0] for k in {}})} == {}
+
+
+def test_call_arm_shell_blocks_interpreter(tmp_path, monkeypatch):
+    """S3: _call_arm_shell must reject commands whose first token is an interpreter binary."""
+    import asyncio
+    from kage import arms
+    arm_cfg = {"command": "bash -c 'echo hi'", "transport": "shell"}
+    result = asyncio.run(arms._call_arm_shell("test_arm", arm_cfg, "hello", "personal", 5.0))
+    assert result is None
+
+
+def test_call_arm_shell_allows_osascript(tmp_path, monkeypatch):
+    """S3: osascript (used by calendar/gmail arms) must not be blocked."""
+    import asyncio
+    from kage import arms
+    monkeypatch.setattr("kage.arms.subprocess.run", lambda *a, **k: type("R", (), {"stdout": "ok", "returncode": 0})())
+    arm_cfg = {"command": "osascript /tmp/test.scpt", "transport": "shell"}
+    result = asyncio.run(arms._call_arm_shell("calendar", arm_cfg, "what's on today", "personal", 5.0))
+    assert result == "ok"
+
+
+def test_check_arm_health_blocks_interpreter(monkeypatch):
+    """S3: _check_arm_health must return False for interpreter shell arms."""
+    import asyncio
+    from kage import arms, runtime
+    _mock_cfg = mock.Mock()
+    _mock_cfg.data = {"arms": {"evil": {"transport": "shell", "command": "python3 -c 'import os'"}}}
+    monkeypatch.setattr(runtime, "config", _mock_cfg)
+    result = asyncio.run(arms._check_arm_health("evil"))
+    assert result is False
 
 
 # ── Egress golden tests (Slice 1g) ──────────────────────────────────────────

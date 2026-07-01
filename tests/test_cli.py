@@ -4124,6 +4124,19 @@ class TestGateConversation:
         assert safe == []
         assert withheld[0]["reason"] == "provenance:always_local:kage-corrections-librarian"
 
+    def test_provenance_always_local_ctm_withheld(self, monkeypatch):
+        """A turn whose note comes from kage-ctm-librarian must be withheld by the gate."""
+        class AlwaysLocalCtmConn:
+            def execute(self, sql, params): return self
+            def fetchall(self): return [("note-ctm", 0, "kage-ctm-librarian")]
+            def close(self): pass
+        turn = self.make_turn(0, "hello", note_ids=["note-ctm"])
+        monkeypatch.setattr(runtime.store, "allowed_note_ids", lambda *a: {"note-ctm"})
+        monkeypatch.setattr(runtime.store, "connect", lambda: AlwaysLocalCtmConn())
+        safe, withheld = cli._gate_conversation([turn], {}, "personal", None)
+        assert safe == []
+        assert withheld[0]["reason"] == "provenance:always_local:kage-ctm-librarian"
+
 
 class TestSessionSwitch:
     @pytest.fixture(autouse=True)
@@ -5285,3 +5298,37 @@ def test_learn_status_shows_librarian_entry(monkeypatch, tmp_path):
     assert "7 corrections" in result.output
     assert "2 rules" in result.output
     assert "v1" in result.output
+
+
+def test_learn_status_shows_ctm_count(monkeypatch, tmp_path):
+    """kage learn --status must display the CTM approved precedents count."""
+    import uuid
+    from datetime import datetime
+    h = _save_home(monkeypatch, tmp_path)
+    note_id = str(uuid.uuid4())
+    ts = datetime.now().astimezone().isoformat(timespec="seconds")
+    conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
+    conn.execute(
+        "INSERT INTO memories (id, content_path, project, created_at, local_only, needs_embed, state)"
+        " VALUES (?, ?, 'kage-ctm-librarian', ?, 0, 0, 'baseline')",
+        (note_id, f"memory/{note_id}.md", ts),
+    )
+    conn.commit()
+    conn.close()
+    (h / "learned_prompts.json").write_text(json.dumps({}))
+    result = CliRunner().invoke(cli.app, ["learn", "--status"])
+    assert result.exit_code == 0
+    assert "ctm" in result.output
+    assert "1 approved precedents" in result.output
+
+
+def test_disclosure_gate_withholds_ctm_librarian(monkeypatch, tmp_path):
+    """Gate must block a note in kage-ctm-librarian (always-local set)."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    mem_id = cli._save("ctm precedent note", "kage-ctm-librarian")
+    cfg = cli._config()
+    allowed, withheld, _ = cli._disclosure_gate([_fake_row(mem_id, "kage-ctm-librarian")], cfg)
+    assert allowed == []
+    assert len(withheld) == 1
+    assert withheld[0]["reason"] == "local_only:always_local:kage-ctm-librarian"

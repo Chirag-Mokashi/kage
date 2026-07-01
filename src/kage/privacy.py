@@ -6,7 +6,10 @@ from kage import notes as _notes
 from kage import runtime
 from kage.pii import _pii_scan
 
-_ALWAYS_LOCAL_PROJECTS: frozenset[str] = frozenset({"kage-corrections"})
+_ALWAYS_LOCAL_PROJECTS: frozenset[str] = frozenset({
+    "kage-corrections",
+    "kage-corrections-librarian",  # Cycle 24 EPM
+})
 
 
 def _write_audit(record: dict) -> None:

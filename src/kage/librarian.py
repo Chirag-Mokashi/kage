@@ -385,10 +385,19 @@ def distill_and_judge(content: str, source: str) -> dict:
     user_msg = f"source: {source}{candidate_block}\n\ncontent:\n{sanitized}"
     messages = [{"role": "user", "content": user_msg}]
 
-    # Step D — cloud dispatch
+    # Step D — cloud dispatch (prepend EPM rules if enabled)
     provider = cfg.get("librarian", {}).get("cloud_provider", cfg.get("cloud_provider", "claude"))
+    system = _DISTILL_SYSTEM
+    if cfg.get("librarian", {}).get("learning", {}).get("epm_enabled", True):
+        try:
+            from kage.learn import load_learned_prompt
+            _learned = load_learned_prompt("librarian", home=pathlib.Path(runtime.config.home))
+            if _learned:
+                system = f"[kage learned librarian rules]\n{_learned}\n\n{_DISTILL_SYSTEM}"
+        except Exception:
+            pass
     try:
-        raw = runtime.cloud.complete(provider, _DISTILL_SYSTEM, messages, cfg)
+        raw = runtime.cloud.complete(provider, system, messages, cfg)
     except Exception as exc:
         return {
             "quality": "HOLD", "reason": f"cloud error: {exc}",
@@ -832,7 +841,70 @@ def reject_approval(approval_id: str, reason: str = "") -> bool:
                 "UPDATE staging_queue SET status='rejected', decision=?, reviewed_at=? WHERE id=?",
                 (reason or "rejected", ts, row[0]),
             )
+        try:
+            detail = conn.execute(
+                "SELECT aq.note_json, sq.source "
+                "FROM approval_queue aq "
+                "LEFT JOIN staging_queue sq ON sq.id = aq.staging_id "
+                "WHERE aq.id = ?",
+                (approval_id,),
+            ).fetchone()
+            note_meta = {}
+            if detail and detail[0]:
+                try:
+                    note_meta = json.loads(detail[0])
+                except json.JSONDecodeError:
+                    pass
+            title = note_meta.get("title", "") if note_meta else ""
+            source = detail[1] or "" if detail else ""
+            correction_body = (
+                f"Correction log — Librarian rejection: {title}. "
+                f"Source: {source}. Reason: {reason or 'no reason given'}."
+            )
+            note_id = str(uuid.uuid4())
+            rel_path = f"memory/{note_id}.md"
+            home_path = pathlib.Path(runtime.config.home)
+            full_path = home_path / rel_path
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            full_path.write_text(
+                f"---\n"
+                f"id: {note_id}\n"
+                f"project: kage-corrections-librarian\n"
+                f"created_at: {ts}\n"
+                f"source: librarian-reject\n"
+                f"identities:\n"
+                f"  - personal\n"
+                f"state: scoped\n"
+                f"---\n\n"
+                f"{correction_body}\n"
+            )
+            conn.execute(
+                "INSERT INTO memories (id, content_path, project, created_at, local_only, state)"
+                " VALUES (?, ?, ?, ?, 0, ?)",
+                (note_id, rel_path, "kage-corrections-librarian", ts, "scoped"),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_identities(mem_id, identity) VALUES (?, ?)",
+                (note_id, "personal"),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_projects(mem_id, project) VALUES (?, ?)",
+                (note_id, "kage-corrections-librarian"),
+            )
+            conn.execute(
+                "INSERT INTO memory_fts (id, body) VALUES (?, ?)",
+                (note_id, correction_body),
+            )
+        except Exception:
+            pass
         conn.commit()
+        try:
+            from kage.learn import _count_corrections
+            count = _count_corrections("kage-corrections-librarian", home=pathlib.Path(runtime.config.home))
+            if count >= 7:
+                print(f"[kage] {count} Librarian rejections logged — run `kage learn --librarian` to update rules.")
+        except Exception:
+            pass
         return True
     finally:
         conn.close()

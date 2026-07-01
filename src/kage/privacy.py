@@ -88,14 +88,13 @@ def _disclosure_gate(rows: list, cfg: dict, identity: str = "personal", project:
 
 def _gate_conversation(
     turns: list[dict],
-    cfg: dict,
+    cfg: dict,  # noqa: ARG001 — kept for call-site compatibility; pii_patterns removed in Cycle 23 S1
     identity: str,
     project: str | None,
 ) -> tuple[list[dict], list[dict]]:
     """Filter session turns before cloud dispatch."""
     if not turns:
         return [], []
-    extra_pii = cfg.get("pii_patterns", [])
     identity_allowed = runtime.store.allowed_note_ids(identity, project)
     all_note_ids = list({nid for t in turns for nid in t["note_ids"]})
     lo_map: dict[str, bool] = {}
@@ -115,10 +114,6 @@ def _gate_conversation(
     safe: list[dict] = []
     withheld: list[dict] = []
     for turn in turns:
-        pii_hits = _pii_scan(turn["content"], extra_pii)
-        if pii_hits:
-            withheld.append({"turn_idx": turn["idx"], "reason": "pii_in_content", "pii_patterns": pii_hits})
-            continue
         blocked = False
         for nid in turn["note_ids"]:
             if nid not in identity_allowed:

@@ -1134,7 +1134,7 @@ def ask(
                 try:
                     answer = _call_cloud(pname, system, user_msg, cfg)
                     if pname != candidates[0]:
-                        _write_audit({"ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"), "provider": pname, "project": project, "notes_retrieved": len(rows), "notes_withheld": 0, "withheld_reasons": [], "pii_detected": [], "user_approved": True, "outcome": "dispatched_fallback", "substitution_count": len(sub_mapping), "placeholder_labels": sorted(sub_mapping.keys())})
+                        _write_audit({"ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"), "provider": pname, "project": project, "notes_retrieved": len(rows), "notes_withheld": 0, "withheld_reasons": [], "pii_detected": [], "user_approved": True, "outcome": "dispatched_fallback", "substitution_count": len(sub_mapping), "pii_type_counts": {t: sum(1 for k in sub_mapping if k.lstrip("[").rsplit("_", 1)[0] == t) for t in sorted({k.lstrip("[").rsplit("_", 1)[0] for k in sub_mapping})}})
                     break
                 except CloudError:
                     if pname != candidates[-1]:
@@ -1578,7 +1578,6 @@ def chat(
     destination = provider or "ollama"
     session_id = _session_create(identity, project, destination)
     _last_sources: list = []
-    session_sub_mapping: dict[str, str] = {}
     typer.echo(f"kage chat  [{identity} · {project or 'all'} · {destination}]  /help for commands")
     typer.echo("-" * 60)
     while True:
@@ -1677,6 +1676,7 @@ def chat(
                 _last_sources.append((note_id, path, section_title))
                 note_ids_this_turn.append(note_id)
         context = "\n\n".join(context_parts)
+        _req_map: dict[str, str] = {}
         if destination != "ollama":
             from kage.redact import substitute as _sub, restore as _rst
             from kage.pii import _PII_PATTERNS
@@ -1686,8 +1686,17 @@ def chat(
                        for p in _lv2().get("patterns", [])]
             except Exception:
                 _vp = []
-            context, session_sub_mapping = _sub(context, _PII_PATTERNS + _vp,
-                                                existing_mapping=session_sub_mapping)
+            _all_pats = _PII_PATTERNS + _vp
+            # per-request mapping: mask condensed query + history + context through one shared
+            # map so the same real value gets one placeholder within this request; discarded
+            # after restore (never accumulated across turns).
+            condensed, _req_map = _sub(condensed, _all_pats, existing_mapping=_req_map)
+            masked_history: list[dict] = []
+            for _t in history_for_answer:
+                _mc, _req_map = _sub(_t["content"], _all_pats, existing_mapping=_req_map)
+                masked_history.append({**_t, "content": _mc})
+            history_for_answer = masked_history
+            context, _req_map = _sub(context, _all_pats, existing_mapping=_req_map)
         try:
             answer = next(iter(_answer(condensed, history_for_answer, context, destination, cfg)))
         except OllamaUnavailable as e:
@@ -1696,9 +1705,9 @@ def chat(
         except CloudError as e:
             typer.echo(f"[kage] Cloud error: {e}", err=True)
             continue
-        if destination != "ollama" and session_sub_mapping and answer:
+        if destination != "ollama" and _req_map and answer:
             from kage.redact import restore as _rst
-            answer = _rst(answer, session_sub_mapping)
+            answer = _rst(answer, _req_map)
         if destination == "ollama":
             model_name = cfg.get("ollama_model", "qwen3:14b")
         else:
@@ -1708,11 +1717,9 @@ def chat(
             model_name = pcfg.get("model", destination)
         est_tokens = len(answer) // 4
         _session_append(session_id, "user", raw, note_ids_this_turn, destination, model_name, None, None)
-        # ponytail: answer stored with real values restored (not placeholders). Consequence: if the
-        # cloud answer echoes a PII value, _gate_conversation blocks this turn from future history.
-        # Progressive context-blinding in long PII-heavy REPL sessions. Fix = store placeholder form,
-        # restore only at display (Cycle 22). session_sub_mapping also grows unboundedly; ceiling is
-        # memory (thousands of entries in a very long session); upgrade = cap and evict oldest.
+        # ponytail: real answer stored (not placeholder form). Cloud echoes of a [LABEL_N]
+        # placeholder appear verbatim to the user if the cloud doesn't reformat them (verbatim
+        # echo only; non-verbatim reformatting is a known ceiling, not a full round-trip guarantee).
         _session_append(session_id, "assistant", answer, [], destination, model_name, None, est_tokens)
         typer.echo(answer)
         typer.echo(f"\n[{model_name} · {destination} · ~{est_tokens}tok]")

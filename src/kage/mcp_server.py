@@ -114,7 +114,14 @@ async def kage_ask(question: str, provider: str | None = None, project: str | No
                        for p in _lv().get("patterns", [])]
             except Exception:
                 _vp = []
-            context, _mcp_sess_map = _sub(context, _PII_PATTERNS + _vp)
+            _all_pats = _PII_PATTERNS + _vp
+            condensed, _mcp_sess_map = _sub(condensed, _all_pats, existing_mapping=_mcp_sess_map)
+            _masked_hist: list[dict] = []
+            for _t in history_for_answer:
+                _mc, _mcp_sess_map = _sub(_t["content"], _all_pats, existing_mapping=_mcp_sess_map)
+                _masked_hist.append({**_t, "content": _mc})
+            history_for_answer = _masked_hist
+            context, _mcp_sess_map = _sub(context, _all_pats, existing_mapping=_mcp_sess_map)
         try:
             answer = next(iter(_cli._answer(condensed, history_for_answer, context, s_destination, cfg)))
         except (_cli.OllamaUnavailable, _cli.CloudError) as exc:
@@ -158,6 +165,7 @@ async def kage_ask(question: str, provider: str | None = None, project: str | No
         _cli._write_audit({
             "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
             "provider": provider, "project": project,
+            "identity_source": "mcp-client-asserted",
             "notes_retrieved": len(rows), "notes_withheld": withheld_count,
             "withheld_reasons": withheld_reasons, "pii_detected": pii_hits,
             "user_approved": None, "outcome": outcome,
@@ -205,6 +213,7 @@ async def kage_ask(question: str, provider: str | None = None, project: str | No
         context, _mcp_sub_map = _sub(context, _all_pats)
         if arm_context:
             arm_context, _mcp_sub_map = _sub(arm_context, _all_pats, existing_mapping=_mcp_sub_map)
+        question, _mcp_sub_map = _sub(question, _all_pats, existing_mapping=_mcp_sub_map)
 
     if arm_context:
         system = (

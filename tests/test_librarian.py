@@ -506,3 +506,34 @@ def test_distill_and_judge_no_learned_rules_unchanged(lib_env, monkeypatch):
     monkeypatch.setattr(runtime.cloud, "complete", fake_complete)
     distill_and_judge("content", "manual")
     assert captured["system"] == _DISTILL_SYSTEM
+
+
+def test_distill_and_judge_epm_disabled_skips_rules(lib_env, monkeypatch):
+    import json
+    (lib_env / "learned_prompts.json").write_text(json.dumps({
+        "librarian": {
+            "active": "v1",
+            "versions": {
+                "v1": {
+                    "prompt": "- Never skip review",
+                    "date": "2026-07-01",
+                    "correction_count": 3,
+                    "source_note_ids": [],
+                    "trace": "",
+                }
+            },
+        }
+    }))
+    (lib_env / "config.json").write_text(json.dumps({
+        "cloud_provider": "claude",
+        "librarian": {"learning": {"epm_enabled": False}},
+    }))
+    captured = {}
+
+    def fake_complete(provider, system, messages, cfg):
+        captured["system"] = system
+        return _VALID_JSON_EPM
+
+    monkeypatch.setattr(runtime.cloud, "complete", fake_complete)
+    distill_and_judge("some content", "manual")
+    assert captured["system"] == _DISTILL_SYSTEM

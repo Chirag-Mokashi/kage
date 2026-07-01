@@ -3116,6 +3116,18 @@ def test_disclosure_gate_withholds_always_local(monkeypatch, tmp_path):
     assert withheld[0]["reason"] == "local_only:always_local:kage-corrections"
 
 
+def test_disclosure_gate_withholds_librarian_corrections(monkeypatch, tmp_path):
+    """Gate must block a note in kage-corrections-librarian regardless of local_only flag or config."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    mem_id = cli._save("dev correction note", "kage-corrections-librarian")
+    cfg = cli._config()
+    allowed, withheld, _ = cli._disclosure_gate([_fake_row(mem_id, "kage-corrections-librarian")], cfg)
+    assert allowed == []
+    assert len(withheld) == 1
+    assert withheld[0]["reason"] == "local_only:always_local:kage-corrections-librarian"
+
+
 def test_disclosure_gate_allows_ordinary_project_not_blocked(monkeypatch, tmp_path):
     """Ordinary project notes must NOT be blocked by the always-local set."""
     h = _save_home(monkeypatch, tmp_path)
@@ -4098,6 +4110,19 @@ class TestGateConversation:
         safe, withheld = cli._gate_conversation([turn], {}, "personal", None)
         assert safe == []
         assert withheld[0]["reason"] == "provenance:always_local:kage-corrections"
+
+    def test_provenance_always_local_librarian_withheld(self, monkeypatch):
+        """A turn whose note comes from kage-corrections-librarian must be withheld by the gate."""
+        class AlwaysLocalLibConn:
+            def execute(self, sql, params): return self
+            def fetchall(self): return [("note-corr", 0, "kage-corrections-librarian")]
+            def close(self): pass
+        turn = self.make_turn(0, "hello", note_ids=["note-corr"])
+        monkeypatch.setattr(runtime.store, "allowed_note_ids", lambda *a: {"note-corr"})
+        monkeypatch.setattr(runtime.store, "connect", lambda: AlwaysLocalLibConn())
+        safe, withheld = cli._gate_conversation([turn], {}, "personal", None)
+        assert safe == []
+        assert withheld[0]["reason"] == "provenance:always_local:kage-corrections-librarian"
 
 
 class TestSessionSwitch:

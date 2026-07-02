@@ -17,22 +17,26 @@ from kage.config import Config
 from kage.embed import Embedder
 from kage.store import Store
 from kage.vector import VectorIndex
+from kage.calendar_write import EventKitBackend
+
 
 config: Config = None       # type: ignore[assignment]
 store: Store = None         # type: ignore[assignment]
 cloud: CloudClient = None   # type: ignore[assignment]  # set by reset() (called on import below)
 embed: Embedder = None      # type: ignore[assignment]
 vector: VectorIndex = None  # type: ignore[assignment]
+calendar: EventKitBackend = None  # type: ignore[assignment]
 
 
 def reset() -> None:
     """(Re)build all seams from current env. Idempotent; safe to call at startup."""
-    global config, store, cloud, embed, vector
+    global config, store, cloud, embed, vector, calendar
     config = Config.from_env()
     store = Store(config.db_path)
     cloud = CloudClient()
     embed = Embedder()
     vector = VectorIndex()
+    calendar = EventKitBackend()
 
 
 reset()

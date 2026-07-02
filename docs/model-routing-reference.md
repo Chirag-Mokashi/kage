@@ -56,6 +56,8 @@ Source key: ¹ Official · ² Estimated from prior version lineage · ³ Third-p
 
 ## Task Class → Model Routing (locked 2026-06-28)
 
+> **Note (2026-07-02):** The model keys below (`claude-opus`, `gemini-3-1-pro`, `gemini-3-5-flash`, `gemini-research`, `openrouter-general`, …) are **config.json provider aliases**, not shipped `DEFAULT_PROVIDERS` (which are only `claude`/`openai`/`gemini`/`groq`/`perplexity`). They must be defined in `~/.kage/config.json` to resolve. **`src/kage/router.py` (`_ROUTING_TABLE`) is the source of truth** — e.g. research routes to the `gemini-research` alias (this table describes the model behind it: gemini-2.5-flash + Search grounding).
+
 | Class | Dispatch | Primary | Fallback 1 | Fallback 2 |
 |---|---|---|---|---|
 | **code** | 7-step dev workflow: Plan→cloud, Write→local, Review→cloud, Run→local | Plan/Review → Claude Opus/Sonnet (CLI) | Plan → gemini-3-1-pro · Review → gemini-3-5-flash | — |

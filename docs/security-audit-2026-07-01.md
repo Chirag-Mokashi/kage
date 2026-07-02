@@ -1,5 +1,7 @@
 # kage — Security Audit & Hardening Reference
 
+> **RESOLUTION (2026-07-02):** Cycle 23 SHIPPED (v0.23.0, commit `80f3387`) — mask-at-dispatch closes F13 (condensed-query leak), the per-request placeholder map addresses F2/F5, and the audit log now emits `pii_type_counts` instead of placeholder labels (closes F1). **F1/F2/F5/F7/F13/N4 are RESOLVED in code.** The doc-debt items noted below (gap-tracker OPEN, CLAUDE.md stale header) are also fixed. Everything below is the pre-fix audit record as of 2026-07-01.
+
 *Created: 2026-07-01. Source: adversarial trust-boundary audit of the Layer 3e
 disclosure gate on main @ v0.22.0. Keep this open while Cycle 23 lands.*
 

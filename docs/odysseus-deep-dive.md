@@ -1,5 +1,7 @@
 # Odysseus — Deep-Dive (substrate analysis for kage)
 
+> **DIVERGENCE NOTE (2026-07-02):** The build did NOT follow this plan. kage shipped **standalone** — its own `cli.py`/`privacy.py`/`redact.py` 3e gate, own ChromaDB index, own dispatch (`cloud.py`) — and integrates Odysseus (if at all) only arm's-length via MCP. The "inherit / splice into llm_core.py / DONATED reuse" framing in this doc never materialized. Kept as historical decision-support, not an accurate description of the shipped architecture.
+
 > **Status:** Reference / decision-support doc. Odysseus is kage's chosen
 > substrate (decided 2026-06-03: *extend*, not fork OpenJarvis). This file is
 > the detailed reading of what we're building on.

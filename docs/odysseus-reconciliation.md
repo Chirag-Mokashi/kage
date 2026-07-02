@@ -1,5 +1,7 @@
 # Odysseus Reconciliation — every prior decision, mapped
 
+> **DIVERGENCE NOTE (2026-07-02):** The build did NOT follow this plan. kage shipped **standalone** — its own `cli.py`/`privacy.py`/`redact.py` 3e gate, own ChromaDB index, own dispatch (`cloud.py`) — and integrates Odysseus (if at all) only arm's-length via MCP. The "inherit / splice into llm_core.py / DONATED reuse" framing in this doc never materialized. Kept as historical decision-support, not an accurate description of the shipped architecture.
+
 > **Status:** Decision-support inventory. Purpose: make sure the substrate swap
 > (OpenJarvis → Odysseus) drops **nothing**. This walks all 80 locked decisions +
 > the 13 Locked Principles and tags each. *How* we implement each is deliberately

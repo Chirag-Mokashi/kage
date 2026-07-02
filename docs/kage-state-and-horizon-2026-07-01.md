@@ -1,5 +1,7 @@
 # kage — State of the System & Horizon
 
+> **UPDATE (2026-07-02):** Dated v0.22.0 snapshot. Since written: Cycles 23/24/25 shipped (repo now v0.25.0) and the doc-debt list flagged below is RESOLVED (gap-tracker corrected, CLAUDE.md/README synced, tags backfilled). The horizon analysis (auto-context 3a → push/interrupt → agent loop still unbuilt) remains accurate. Read as a historical map.
+
 *Created: 2026-07-01. A reading snapshot of where kage is on main @ v0.22.0, what
 "v1" means, and what kage can still become. Companion to the security track in
 [security-audit-2026-07-01.md](security-audit-2026-07-01.md) (that one is being

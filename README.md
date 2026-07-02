@@ -19,7 +19,7 @@ kage is defined at three nested levels, all simultaneously true:
 
 ---
 
-## Current state — v0.25.0
+## Current state — v0.26.0
 
 kage ships as a headless CLI and MCP server. The full UI layer (via Odysseus integration) is in progress.
 
@@ -377,6 +377,7 @@ kage today is a passive broker — it answers when called. The target is an acti
   Cycle 23   Gate hardening                     SHIPPED — mask-at-dispatch, per-request map, audit type-counts
   Cycle 24   Librarian EPM (learn rejections)   SHIPPED — distills rejection patterns into the distill prompt
   Cycle 25   Librarian CTM (learn approvals)    SHIPPED — approved precedents as few-shot examples (MemAPO loop)
+  Cycle 26   Calendar-write (first write arm)   SHIPPED — EventKit create-only, propose→approve→execute, HITL-gated
 ```
 
 Cycle 23 (gate hardening) closed the HIGH-severity findings from the 2026-07-01 security audit (`docs/security-audit-2026-07-01.md`). The marquee fix is **mask-at-dispatch**: the condensed retrieval query, conversation history, and retrieved context are all masked through one shared per-request placeholder map and restored in the response — closing the condensed-query cleartext leak (F13). The audit log now emits `pii_type_counts` (typed tallies) instead of numbered placeholder labels, so it no longer leaks the placeholder structure (F1). No new capability — defense-in-depth only. Build plan: `docs/cycle-23-gate-hardening.md`.
@@ -462,12 +463,13 @@ tests/
 ├── test_learn.py        24 tests — load/build/run/save, FTS filtering, bullet extraction, librarian pass
 ├── test_router.py       18 tests — task classification, routing table, config override
 ├── test_seams.py        13 tests — seam contracts + registry functions
+├── test_calendar_write.py  12 tests — propose/approve/reject, guards, fail-safe, injection, live EventKit smoke
 ├── test_redact.py        9 tests — substitute/restore round-trip, sequential safety, existing mapping
 ├── test_pii.py           8 tests — PII detection table + scanner
 ├── test_sensitive.py     8 tests — vault CRUD, pattern scan, integration with privacy gate
 ├── test_observe.py       2 tests — AX daemon event capture
 └── fakes.py         Test doubles: FakeEmbedder, FakeVectorIndex, RecordingCloud, FakeConfig
-                       (649 tests total across 11 test files)
+                       (661 tests total across 12 test files)
 
 docs/
 ├── blueprint.md             Long-term architecture and planning state

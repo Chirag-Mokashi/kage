@@ -1,6 +1,6 @@
 # kage — Blueprint
 
-> **Status:** strategic blueprint plus historical planning record. Implementation has begun: the repo now contains a working CLI that saves/imports notes, maintains markdown + SQLite + ChromaDB indexes, recalls context, answers through local Ollama, and supports named cloud providers. Some older sections still describe pre-build Stage 0 decisions; treat those as historical unless this top status or current code contradicts them.
+> **Status:** strategic blueprint plus historical planning record. **Implementation is now at v0.25.0 — Cycles 1–25 shipped.** Every layer (1–7) plus the three agents (Scout/Librarian/Monitor) is BUILT. **All the per-layer `Status:` lines in §5 below and the §8 pending checklist are STALE** — they describe the pre-build planning era and say "designed / proposed / not-yet-built" for things that shipped long ago; each is annotated inline but do not trust them wholesale. For current implementation truth read README.md + `src/kage/`. This doc remains authoritative for long-term vision, the 10 characteristics, and the decision log.
 >
 > **Purpose of this file:** Long-term product and architecture context for kage.
 > For current implementation truth, read `README.md`, `src/kage/cli.py`, and `tests/test_cli.py`.
@@ -8,8 +8,8 @@
 > *Last updated: 2026-06-08 (research session — TurboVec/TurboQuant/Permission Broker findings integrated; Cosmos QN results received). Session 14 decision log last changed: Layer 1 interface DESIGNED — #91–#98. Substrate = Odysseus (extend, not fork); see §4 + #81–#90.*
 >
 > *Companion docs:*
-> - [architecture.md](architecture.md) — visual system map
-> - [ROADMAP.md](ROADMAP.md) — cycle-by-cycle execution plan
+> - [architecture.md](architecture.md) — visual system map *(LEGACY — see banner in file)*
+> - [ROADMAP.md](ROADMAP.md) — cycle-by-cycle execution plan *(LEGACY — superseded by Shape Up cycles + git history)*
 > - [competitor-flowcharts.md](competitor-flowcharts.md) — engine comparisons
 > - [odysseus-deep-dive.md](odysseus-deep-dive.md) — substrate internals (Session 13)
 > - [odysseus-reconciliation.md](odysseus-reconciliation.md) — all 80 decisions × Odysseus (Session 13)
@@ -342,7 +342,7 @@ Note: this principle **supersedes** the earlier "Correction-Driven Personalizati
 
 ### Layer 1 — Trigger / Interface
 
-**Status:** DESIGNED (Session 14, 2026-06-04). Foundational decisions (#77-80) + interactive-session / milestone-0 design (#91-98) locked. Remaining: Chirag authors the `kage test` seed cases (chat + reasoning), then Layer 1 is fully locked.
+**Status:** SHIPPED — REPL (`kage chat`) + `init`/`status`/`doctor`/`use`/`where`/`arm` shipped in Cycle 10 (v0.10.0) and 10.5 (v0.10.1). The `kage test` local-vs-cloud benchmark remains deferred (Stage 1). (Historical: DESIGNED Session 14, #77-80 + #91-98.)
 
 **What Layer 1 is:** the human-and-tool-facing surface. Two inbound directions: human (CLI, later menu-bar/hotkey/voice) and tools (MCP server IN — external tools query kage's memory; distinct from Layer 7 MCP server OUT).
 
@@ -377,15 +377,15 @@ Note: this principle **supersedes** the earlier "Correction-Driven Personalizati
 
 ### Layer 2 — Internal Helper Agents
 
-**Status:** Architecture choice locked.
+**Status:** SHIPPED — three ADK agents live (Scout, Librarian, Monitor). Architecture choice locked.
 - **Decision:** Hybrid (Option C) — small internal helpers + external via MCP
-- **Internal agents:** Librarian (memory maintenance, hourly) + Monitor (optional, opt-in observation)
+- **Internal agents:** Scout (proactive research, Cycle 14) + Librarian (memory curation & sole writer, Cycle 15) + Monitor (macOS AX observation, Cycle 16) — all shipped as ADK agents
 - **External agents:** Claude Code, Cursor, etc. via MCP
 - **Rejected alternatives:** Option A (pure broker, no proactive behavior) · Option B (full OJ-style agent system, muddies engine focus)
 
 ### Layer 3a — Active Context Detection ★
 
-**Status:** FULLY LOCKED (Session 14 — editor signal dropped, per-invocation resolution clarified, #103). v1 scope clear.
+**Status:** SHIPPED — active-context detection (`kage use`/`where` + resolver + `{project}` session state) shipped in Cycle 10.5 (v0.10.1); `context.py`. (Historical: FULLY LOCKED Session 14, #103.)
 
 **v1 detection logic — priority cascade (5 levels; re-derived PER-INVOCATION each command, no watcher — #103):**
 For each query, kage resolves both `active_project` and `active_identity` by trying in order:
@@ -439,7 +439,7 @@ Note: Sticky last-active is **state**, not a signal — it's the previous cascad
 
 ### Layer 3b — Partition Filter ★ (THE WEDGE)
 
-**Status:** Designed and locked. v1 scope clear.
+**Status:** SHIPPED — partition filter (scoped/baseline/pending CHECK) + identity-wall JOIN shipped in Cycle 9 (v0.9); live in store.py. (Historical: designed and locked.)
 
 **Save philosophy — wall, not firehose:**
 - Default: nothing enters queryable memory unless user explicitly saves
@@ -540,7 +540,7 @@ kage's 2-D matrix + asymmetric walls + three-state schema + auto-suggested taggi
 
 ### Layer 3c — Hybrid Retrieval
 
-**Status:** Designed (PROPOSED, not yet locked). Awaiting Cosmos research validation and resolution of open sub-decisions.
+**Status:** SHIPPED — hybrid retrieval (recursive chunking + bge-reranker) shipped in Cycle 8; locked at #49-52. (Historical: PROPOSED, awaiting Cosmos validation.)
 
 **Role in pipeline:**
 After Layer 3a resolves `(active_project, active_identity)` and Layer 3b filters memory to "what this query may see," Layer 3c finds the most relevant N memories within the allowed pool. The search engine inside kage.
@@ -600,7 +600,7 @@ LightRAG query-side          │   (k=60, N retrievers)  re-ranker
 
 ### Cross-cutting — Ingest Pipeline Philosophy
 
-**Status:** PROPOSED (not yet locked). Direction agreed; sync/async split needs final tweaking.
+**Status:** IMPLEMENTED in the shipped write path (sync markdown+SQLite write, async embed/index — see store.py / embed.py). (Historical: PROPOSED, direction agreed.)
 
 **The question:** When a memory enters via Layer 3b's wall flow, what work is synchronous (blocks the save) vs. asynchronous (background queue)?
 
@@ -867,7 +867,7 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 
 ### Layer 4 — Multi-Vendor Router
 
-**Status:** Designed and locked (directional). Session 9. Validated against Cosmos Q L (vLLM-SR / Workload-Router-Pool, RouteLLM, Johnson & Lee taxonomy, Select-then-Route, AAP/OAP, Claude Code permission empirical brittleness, SPL-flow chain pattern).
+**Status:** SHIPPED — keyword task-class router (`kage ask --auto`, `router.py`) shipped in Cycle 18 (v0.18.0). NOTE: v1 is a keyword classifier, not the <15ms embedding classifier (#33/#62) this design describes — that divergence is intentional/deferred. (Historical: designed and locked, directional, Session 9.) Validated against Cosmos Q L (vLLM-SR / Workload-Router-Pool, RouteLLM, Johnson & Lee taxonomy, Select-then-Route, AAP/OAP, Claude Code permission empirical brittleness, SPL-flow chain pattern).
 
 **Role in pipeline:** After Layer 3e produces a privacy-cleared, minimized context slice, Layer 4 selects WHICH model handles the query and dispatches. Decision boundary: Layer 3e decides WHAT goes out; Layer 4 decides WHERE it goes. Both must agree per the Design B contract (#64).
 
@@ -1249,7 +1249,7 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 
 ### Layers 6, 7
 
-**Status:** Not yet designed. Layer 6 (Learning — owns reputation table #68) or Layer 7 (MCP Server Out, priority HIGH #41) next-up (Session 12+).
+**Status:** SHIPPED — Layer 7 (MCP server out) in Cycle 6 (v0.6, `kage mcp serve`, 4 tools); Layer 6 (Learning) in Cycle 22 (v0.22.0, `kage learn`, ProTeGi prompt learning). (Historical: "not yet designed" as of Session 12.)
 
 ---
 
@@ -1287,7 +1287,7 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 | # | Decision | Date |
 |---|---|---|
 | 1 | Local model: Qwen3 14B Q4_K_M via Ollama | pre-session |
-| 2 | Sandbox: Docker | pre-session |
+| 2 | Sandbox: Docker — **NOT BUILT (deferred).** No container isolation shipped. The risky surface (osascript/MCP arms) needs macOS host access and can't run in a Linux container; Docker would fragment the 3e trust boundary. Revisit when the code-executing agent loop lands — macOS-native (`sandbox-exec`/Seatbelt) is the likely fit over Docker. | pre-session |
 | 3 | Cloud fallback: Claude Sonnet 4.6 | pre-session |
 | 4 | OpenJarvis (Stanford SAIL) audited — verify Stanford provenance, Apache 2.0, 8 agents, highly active | Session 1 |
 | 5 | kage framing: **personal context broker** (NOT "yet another personal AI") | Session 1 |
@@ -1373,7 +1373,7 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 | 85 | **Retrieval/storage backend: FAISS → ChromaDB (Session 13).** Adopt **ChromaDB** as the derived vector index (Odysseus default + persistence + good-enough vector search; the 3b partition wall stays in **SQLite** per #99, NOT in Chroma) — **supersedes #72 (FAISS) and the 5C/FAISS portion of #49/#71.** **Granite Embedding 311M R2 (#50) stays the target** (swappable behind the derived index, benchmark-confirmed). kage's 3c smarts (RRF + bge-reranker-v2-m3 + LightRAG split, #49/#51) stay as a BUILD layer on top of Chroma. Adapt-later: swap the backend when something better appears; markdown truth survives. | Session 13 |
 | 86 | **Routing ACCOUNT dimension built in v1 (Session 13).** Extend Odysseus's (vendor, model) dispatch to kage's (VENDOR, ACCOUNT, MODEL) tuple (#61) in v1 — unlocks per-account cost ceilings (#66) + per-account failure cascade (#67). | Session 13 |
 | 87 | **Internal agents kept as kage's own (Session 13).** Librarian + opt-in Monitor remain kage's headless internal agents (tied to the partition/state machine Odysseus lacks); external/general agents (incl. Odysseus's workspace agent) via MCP (#14). Librarian's periodic run MAY be triggered by Odysseus's cron scheduler (reuse plumbing, keep logic). | Session 13 |
-| 88 | **Agent sandbox built in v1 (Session 13).** Build the Docker execution sandbox (#2) in v1 from the start — Odysseus ships an *unsandboxed* agent (its own admitted threat-model gap), so kage adds the containment it lacks; pairs with Safety Copilot (#65). (User chose security-first over phasing to v1.5.) | Session 13 |
+| 88 | **[NOT BUILT — deferred, see #2.]** ~~Agent sandbox built in v1 (Session 13).~~ (Original intent:) Build the Docker execution sandbox (#2) in v1 from the start — Odysseus ships an *unsandboxed* agent (its own admitted threat-model gap), so kage adds the containment it lacks; pairs with Safety Copilot (#65). (User chose security-first over phasing to v1.5.) | Session 13 |
 | 89 | **Local serving: Ollama-direct, Cookbook optional (Session 13).** kage talks to a local OpenAI-compatible endpoint (Ollama) directly for its own inference (Qwen3 14B Q4, #1) — independent of whether Odysseus runs. Odysseus's Cookbook is an OPTIONAL model-management convenience, not a dependency. | Session 13 |
 | 90 | **Portfolio + spec retarget (Session 13).** kage = its OWN repo (primary portfolio) + *opportunistic* upstream PRs to **Odysseus** for shared improvements (e.g. the sandbox, bug fixes) — never the moat (3a/3b/3e). **Supersedes #9** (PRs to OJ). **#26 SKILL.md/AGENTS.md loader DEFERRED** — use Odysseus's MCP + skills near-term; revisit only if cross-tool interop demands it. | Session 13 |
 | 91 | **Layer 1 architecture: one headless engine, multiple surfaces (Session 14).** A single core engine loop; one-shot CLI, the interactive REPL, and MCP-server in/out are all thin SURFACES over it (Claude Code `queryLoop()` / `QueryEngine` pattern, ArXiv 2604.14228). Milestone-0 ships one-shot `init/test/status/doctor` over the engine; the interactive REPL is the NEXT surface (not deferred to v1.5). Odysseus provides NO CLI (it's a web app) → kage's entire interactive surface is kage's own design. Validates #79/#82. | Session 14 |
@@ -1402,10 +1402,10 @@ GRAVITY benchmark evidence (Cosmos Q J): structured entity-event-topic anchors y
 3. ✓ **Layer 3e — Privacy / disclosure mechanics** — LOCKED Session 8 (#57-60)
 4. ✓ **Layer 4 — Multi-vendor router** — LOCKED Session 9 (#61-69)
 5. ✓ **Layer 5 — Memory storage** — LOCKED Session 11 (#70-76)
-6. **Layer 6 — Learning T1** (preferences + entities + implicit feedback) (owns reputation table #68)
-7. **Layer 7 — MCP server out** (endpoints, schema, auth)
+6. ✓ **Layer 6 — Learning** — SHIPPED Cycle 22 (v0.22.0, `kage learn`, ProTeGi); extended by Librarian EPM (Cycle 24) + CTM (Cycle 25)
+7. ✓ **Layer 7 — MCP server out** — SHIPPED Cycle 6 (v0.6, `kage mcp serve`, 4 tools)
 8. ✓ **Layer 1 — Trigger / Interface** — DESIGNED Session 14 (#77-80 + #91-98: engine-surfaces, REPL + slash, context bar, JSONL persistence, milestone-0 init/test/status/doctor, status/doctor shape, kage test harness). Supersedes the detailed Layer-1 open items below. Remaining: Chirag authors the kage test seed cases, then fully locked.
-9. **Layer 2 — Helper agents detail** (Librarian responsibilities, Monitor scope)
+9. ✓ **Layer 2 — Helper agents** — SHIPPED as three ADK agents: Scout (Cycle 14), Librarian (Cycle 15), Monitor (Cycle 16)
 
 ### Pending — cross-cutting
 
@@ -2006,7 +2006,9 @@ Items deliberately set aside — either deferred to a later cycle, conditional o
 - Layer 3c lock (RRF vs alternatives, re-ranker choice, re-ranker in v1.0 or v1.5, sync/async tweaks)
 - Cosmos research integration (when results arrive)
 
-**Next session resume point:**
+**Session log frozen at Session 14 (2026-06-04) — planning era.** Post-Session-14 work is tracked as Shape Up cycles in git history + the README changelog, not here. The resume points below are HISTORICAL and long since resolved (Layer 3c/3d shipped in Cycle 8, Layer 7 in Cycle 6).
+
+**Next session resume point (HISTORICAL — resolved):**
 - Brainstorm Tier 2 technical reframings in order: Antigravity-2.0-as-harness, then app-launch, then Google-tools observation, then Layer 7 priority
 - Lock Layer 3c (still PROPOSED — needs final discussion on the 4 open sub-decisions)
 - Then Layer 3d (Tiered Assembly)

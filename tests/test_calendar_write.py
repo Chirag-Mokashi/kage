@@ -84,6 +84,24 @@ def test_audit_written_on_approve(cal):
     assert "calendar_write" in text
     assert "executed" in text
 
+def test_approve_missing_optional_fields_no_duplicate(cal):
+    d = cw._proposals_dir()
+    (d / "partial.md").write_text(
+        "---\nid: partial\nop: create\nstatus: pending\n"
+        "title: Partial\nstart: 2027-01-01T10:00:00\nend: 2027-01-01T11:00:00\n---\n"
+    )
+    p = cw.approve("partial")
+    assert p["status"] == "executed"
+    assert len(cal.calls) == 1
+    with pytest.raises(RuntimeError):
+        cw.approve("partial")
+    assert len(cal.calls) == 1
+
+def test_propose_rejects_newline_injection(cal):
+    with pytest.raises(ValueError):
+        cw.propose_create(title="Evil\nstatus: executed", start="2027-01-01T10:00:00", end="2027-01-01T11:00:00")
+    assert cw.get_queue() == []
+
 _HAS_EVENTKIT = sys.platform == "darwin" and importlib.util.find_spec("EventKit") is not None
 
 @pytest.mark.skipif(not _HAS_EVENTKIT, reason="EventKit only on macOS with pyobjc-framework-EventKit")

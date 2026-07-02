@@ -71,7 +71,7 @@ Current implemented surface (through Cycle 25, v0.25.0):
 - `remember`, `import`, `recall`, `ask`, `list`, `forget`, `status`, `doctor`, `chat`, `use`, `where`, `arm`
 - local Ollama answering by default
 - cloud answering via named providers (`claude`, `openai`, `gemini`, `groq`, `perplexity`, plus user config)
-- **MCP client / arm routing (Cycle 11):** `_detect_arms` keyword routing, `_call_arm` graceful fallback, audit log. Three transports — `shell` (local command), `stdio` (local MCP process), `sse` (remote MCP). First live arm reads the local macOS Calendar via `icalbuddy` (`shell`, zero OAuth/cloud).
+- **MCP client / arm routing (Cycle 11):** `_detect_arms` keyword routing, `_call_arm` graceful fallback, audit log. Three transports — `shell` (local command), `stdio` (local MCP process), `sse` (remote MCP). First live arm reads the local macOS Calendar via `osascript`/Calendar.app (`shell`, zero OAuth/cloud; `icalbuddy` was the original transport, replaced after it broke on macOS 16).
 - MCP server (`kage mcp serve`) exposing `kage_recall`, `kage_remember`, `kage_ask`, `kage_status` (Cycle 6)
 - **Modularity (Cycle 12):** 25 modules, injectable runtime seams, ProviderRegistry + ArmRegistry, egress golden tests
 - **Arms expansion (Cycle 13):** gmail arm (osascript/Mail.app, zero OAuth) + browser arm (Playwright MCP, headless stealth)
@@ -86,7 +86,7 @@ Current implemented surface (through Cycle 25, v0.25.0):
 - **Librarian EPM (Cycle 24):** Librarian learns from its own *rejections* — distills rejection patterns into its distill prompt; `kage learn --librarian`
 - **Librarian CTM (Cycle 25):** Librarian learns from its own *approvals* — recent approved precedents injected as few-shot examples (MemAPO dual-memory loop)
 - **Gate hardening (Cycle 23, v0.23.0):** mask-at-dispatch — condensed query + history + retrieved context are masked through one shared per-request map and restored in the response (closes F13 condensed-query cleartext leak); audit log emits `pii_type_counts` instead of placeholder labels (closes F1). Audit + build plan: `docs/security-audit-2026-07-01.md`, `docs/cycle-23-gate-hardening.md`.
-- 649 tests across 13 test files
+- 649 tests across 11 test files
 
 The long-term blueprint still matters for direction, but docs that say "no code yet" or "Stage 1 has not started" are historical/stale unless explicitly marked current. For implementation truth, inspect `README.md`, `src/kage/cli.py`, and `tests/test_cli.py`.
 

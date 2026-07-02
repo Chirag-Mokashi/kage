@@ -60,7 +60,7 @@ kage ships as a headless CLI and MCP server. The full UI layer (via Odysseus int
   ┌───────────────────────▼─────────────────────────────────────┐
   │  LAYER 3e — PRIVACY GATE                                    │
   │  Stage 1: identity wall (independent re-check)             │
-  │  local_only flag · project rules · PII scan (29 patterns)  │
+  │  local_only flag · project rules · PII scan (31 patterns)  │
   │  approval prompt · session memory · audit log              │
   └───────────────────────┬─────────────────────────────────────┘
                           │
@@ -156,6 +156,7 @@ kage librarian queue                Show items awaiting your approval (--held fo
 kage librarian approve <id>         Write an approved note to permanent memory.
 kage librarian reject <id>          Reject an approval request (item stays in staging).
 kage librarian locate <query>       Search permanent memory (pre-check before depositing).
+kage librarian scan                 Scan the staging queue for sensitive patterns before approval.
 kage librarian status               Show catalog stats: note count, queue depth, last run.
 
 kage monitor observe                Run one observe pass (local Qwen3 only — no cloud).
@@ -186,14 +187,16 @@ Arms are configured under `arms` in `~/.kage/config.json`. Each arm declares a
 remote MCP server), an `identity`, and a `permission` (read-only enforced today). When a
 question matches an arm's keywords, kage calls it and injects the live result as context —
 falling back to memory-only if the arm is unavailable. Every arm call is recorded in the
-audit log. The first shipped arm reads the local macOS Calendar:
+audit log. The first shipped arm reads the local macOS Calendar (via `osascript`
+querying Calendar.app — `icalbuddy` was the original transport but broke on macOS
+16 / Darwin 25.x, so it was replaced with a bundled AppleScript):
 
 ```json
 "arms": {
   "calendar": {
     "enabled": true,
     "transport": "shell",
-    "command": "/opt/homebrew/bin/icalbuddy eventsFrom:today to:tomorrow",
+    "command": "osascript ~/.kage/calendar_arm.scpt",
     "identity": "personal",
     "permission": "read"
   }

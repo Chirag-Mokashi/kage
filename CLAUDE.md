@@ -2,7 +2,7 @@
 
 *Entry point for any Claude Code session in this repo. Lightweight orientation only — the canonical planning state lives in [docs/blueprint.md](docs/blueprint.md).*
 
-*Last updated: 2026-06-29 (Cycle 20 merged — v0.20.0)*
+*Last updated: 2026-07-02 (Cycles 24 + 25 merged — v0.25.0)*
 
 ---
 
@@ -58,16 +58,16 @@ Every design decision must be checked against this list. Operational definitions
 
 ## Current State
 
-**Working CLI exists.** The repository is no longer purely Stage 0 planning: `src/kage/cli.py` implements the headless local broker thin slice and all cycles through 20.
+**Working CLI exists.** The repository is no longer purely Stage 0 planning: `src/kage/cli.py` implements the headless local broker thin slice and all cycles through 25 (Cycle 23 pending — see below).
 
-Current implemented surface (through Cycle 20, v0.20.0):
+Current implemented surface (through Cycle 25, v0.25.0):
 - local markdown source of truth under `~/.kage/memory`
 - SQLite FTS5 index and project partition filter
 - ChromaDB chunk/vector index with `kage reindex`
 - recursive chunking + bge-reranker retrieval (Cycle 8)
 - identity × project wall (Cycle 9); active context via `kage use` / `where` (Cycle 10.5)
 - stateful sessions + `kage chat` REPL, safe model-switching (Cycle 10)
-- 3e disclosure gate — local-only notes + PII withheld from cloud dispatch (Cycle 7)
+- 3e disclosure gate — local-only notes hard-blocked; PII reversibly masked before cloud dispatch and restored in the response (Cycle 7 → Cycle 21)
 - `remember`, `import`, `recall`, `ask`, `list`, `forget`, `status`, `doctor`, `chat`, `use`, `where`, `arm`
 - local Ollama answering by default
 - cloud answering via named providers (`claude`, `openai`, `gemini`, `groq`, `perplexity`, plus user config)
@@ -81,7 +81,12 @@ Current implemented surface (through Cycle 20, v0.20.0):
 - **Gap fixes (Cycle 17):** 10 structural gaps across scout/librarian/monitor/observe
 - **Layer 4 router (Cycle 18):** keyword task-class classification (code/research/multimodal/reasoning/chat) → ordered provider candidate list; config-driven routing table override
 - **Sensitive vault (Cycle 19):** user-defined regex PII patterns in `~/.kage/sensitive.json`; `kage sensitive list/add/scan`
-- 554 tests across 8 test files
+- **Reversible PII masking (Cycle 21):** substitute-before-dispatch / restore-in-response; PII notes no longer withheld
+- **Layer 6 `kage learn` (Cycle 22):** ProTeGi prompt learning from the `kage-corrections` log; Monitor auto-triggers at 7+ new corrections
+- **Librarian EPM (Cycle 24):** Librarian learns from its own *rejections* — distills rejection patterns into its distill prompt; `kage learn --librarian`
+- **Librarian CTM (Cycle 25):** Librarian learns from its own *approvals* — recent approved precedents injected as few-shot examples (MemAPO dual-memory loop)
+- **PENDING — Cycle 23 (gate hardening):** HIGH security findings from the 2026-07-01 audit (F13 condensed-query cleartext PII leak, F2 chat-history context-blinding, F1 audit placeholder-structure leak) are documented in `docs/security-audit-2026-07-01.md` + build plan `docs/cycle-23-gate-hardening.md` but **not yet built/merged**. Sequenced ahead of further feature work.
+- 649 tests across 13 test files
 
 The long-term blueprint still matters for direction, but docs that say "no code yet" or "Stage 1 has not started" are historical/stale unless explicitly marked current. For implementation truth, inspect `README.md`, `src/kage/cli.py`, and `tests/test_cli.py`.
 

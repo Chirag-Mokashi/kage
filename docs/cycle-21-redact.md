@@ -1,6 +1,6 @@
 # Cycle 21 — Layer 3e value substitution: the moat's true form (v0.21.0)
 
-*Status: SHIPPED (v0.21.0, 3 cold reviews — branch cycle-19-sensitive-vault, not yet merged)*
+*Status: SHIPPED v0.21.0 (`cc8b3f0`, merged to main; 3 cold reviews)*
 *Date: 2026-06-30*
 
 > **v3 changelog (cold review #2):**

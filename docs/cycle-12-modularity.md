@@ -1,6 +1,6 @@
 # Cycle 12 — Modularity (injectable seams): full architecture (v3, two cold reviews)
 
-*Status: PLAN (cloud-authored, complete architecture before execution). Not started.*
+*Status: SHIPPED v0.12.0 (`3d6eb3d`) — plan (complete architecture authored before execution).*
 *Discipline: 7-step dev-workflow gate. Local writes code/tests; cloud reviews every slice.*
 *Date: 2026-06-18*
 

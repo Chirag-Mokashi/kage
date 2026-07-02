@@ -1,6 +1,6 @@
 # Cycle 16 — Monitor: kage's nervous system (ADK LlmAgent + observe.py, v0.17.0)
 
-*Status: PITCH v4 (2026-06-27). Four cold reviews complete — 2 BLOCKs + 5 WARNs resolved. Built per the 7-step dev workflow: plan cloud → write local (Qwen3) → review cloud → plan tests cloud → write tests local → review tests cloud → run tests local.*
+*Status: SHIPPED v0.17.0 (`460d60f`) — pitch v4 (2026-06-27). Four cold reviews — 2 BLOCKs + 5 WARNs resolved.*
 
 *Brainstorm source: session 2026-06-27. All decisions pre-locked in this pitch. ActivityWatch deferred to v2. Screenpipe: optional, not a dependency. observe.py: IN SCOPE for Kaggle.*
 

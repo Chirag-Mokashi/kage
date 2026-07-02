@@ -1,6 +1,6 @@
 # Cycle 24 — Librarian Learning: learn from rejections (EPM, v0.24.0)
 
-*Status: PITCH v3 — READY TO BUILD (2026-07-01). TWO cold reviews done (independent
+*Status: SHIPPED v0.24.0 (`f16e861`). Pitch v3 (2026-07-01). TWO cold reviews done (independent
 subagents vs. real repo). CR#1 forced the scope split (EPM-only; CTM → Cycle 25) and
 fixed 3 BLOCKERs. CR#2 returned ready-with-fixes (zero BLOCKERs) and confirmed the
 critical invariant: the always-local gate does NOT starve the learn pass (it reads via

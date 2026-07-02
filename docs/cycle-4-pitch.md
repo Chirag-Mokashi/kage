@@ -1,6 +1,6 @@
 # Cycle 4 Pitch — kage v0.4 (semantic chunking + grounded ask)
 
-> **Status:** REVIEWED × 2 — two independent cold-agent audits complete, all issues resolved. Ready to implement.
+> **Status:** SHIPPED v0.4 (`85e6eb2`). Reviewed ×2 — two independent cold-agent audits complete.
 > *Date: 2026-06-07.* Companion: [cycle-3-pitch.md](cycle-3-pitch.md) (shipped v0.3) · [blueprint.md](blueprint.md).
 
 ---

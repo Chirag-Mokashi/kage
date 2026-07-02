@@ -1,6 +1,6 @@
 # Cycle 13 — Arms Expansion: Native OS + Open Web (v0.13.0)
 
-*Status: PITCH (cloud-authored plan, Sonnet 4.6, 2026-06-21). Built per the 7-step dev workflow: plan cloud → write local → review cloud → plan tests cloud → write tests local → review tests cloud → run tests local.*
+*Status: SHIPPED v0.13.0 (`37e467d`) — pitch (cloud-authored, Sonnet 4.6, 2026-06-21).*
 
 ---
 

@@ -1,6 +1,6 @@
 # Cycle 22 — Layer 6: kage learn (v0.22.0)
 
-*Status: PITCH v3 (2 cold reviews)*
+*Status: SHIPPED v0.22.0 (`1f1606b`) — pitch v3 (2 cold reviews)*
 *Date: 2026-06-30*
 
 > **v3 changelog (cold review #2 — subagent):**

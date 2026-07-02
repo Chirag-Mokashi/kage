@@ -17,18 +17,20 @@
 
 ## Gap list
 
-| ID  | Agent     | Priority | Status | PR |
-|-----|-----------|----------|--------|----|
-| G01 | Scout     | HIGH     | OPEN   | —  |
-| G02 | Scout     | HIGH     | OPEN   | —  |
-| G03 | Scout→Lib | HIGH     | OPEN   | —  |
-| G04 | Librarian | MED      | OPEN   | —  |
-| G05 | Librarian | HIGH     | OPEN   | —  |
-| G06 | Librarian | LOW      | OPEN   | —  |
-| G07 | Monitor   | MED      | OPEN   | —  |
-| G08 | Monitor   | MED      | OPEN   | —  |
-| G09 | Observe   | MED      | OPEN   | —  |
-| G10 | Observe   | LOW      | OPEN   | —  |
+*All 10 gaps FIXED in Cycle 17 (PR #23, merged to main). Verified present in code as of v0.25.0 (2026-07-02). Section detail below is retained as the original review record.*
+
+| ID  | Agent     | Priority | Status | PR  |
+|-----|-----------|----------|--------|-----|
+| G01 | Scout     | HIGH     | FIXED  | #23 |
+| G02 | Scout     | HIGH     | FIXED  | #23 |
+| G03 | Scout→Lib | HIGH     | FIXED  | #23 |
+| G04 | Librarian | MED      | FIXED  | #23 |
+| G05 | Librarian | HIGH     | FIXED  | #23 |
+| G06 | Librarian | LOW      | FIXED  | #23 |
+| G07 | Monitor   | MED      | FIXED  | #23 |
+| G08 | Monitor   | MED      | FIXED  | #23 |
+| G09 | Observe   | MED      | FIXED  | #23 |
+| G10 | Observe   | LOW      | FIXED  | #23 |
 
 ---
 

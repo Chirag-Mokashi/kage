@@ -19,7 +19,7 @@ kage is defined at three nested levels, all simultaneously true:
 
 ---
 
-## Current state — v0.22.0
+## Current state — v0.25.0
 
 kage ships as a headless CLI and MCP server. The full UI layer (via Odysseus integration) is in progress.
 
@@ -371,7 +371,16 @@ kage today is a passive broker — it answers when called. The target is an acti
   Cycle 20   Monitor cadence + Scout deep fetch  SHIPPED — observe/digest cadence split, Scout two-stage fetch
   Cycle 21   Reversible PII masking             SHIPPED — substitute/restore gate, PII notes no longer withheld
   Cycle 22   kage learn (Layer 6)               SHIPPED — ProTeGi prompt learning, Monitor auto-trigger at N=7
+  Cycle 23   Gate hardening                     PENDING — HIGH audit findings (F13/F2/F1); build plan written, not built
+  Cycle 24   Librarian EPM (learn rejections)   SHIPPED — distills rejection patterns into the distill prompt
+  Cycle 25   Librarian CTM (learn approvals)    SHIPPED — approved precedents as few-shot examples (MemAPO loop)
 ```
+
+> **Cycle 23 note:** the 2026-07-01 security audit (`docs/security-audit-2026-07-01.md`) surfaced HIGH-severity gate findings — a condensed-query cleartext PII leak (F13), chat-history context-blinding (F2), and audit-log placeholder-structure leak (F1). The build plan (`docs/cycle-23-gate-hardening.md`) is written but not yet implemented; it is sequenced ahead of further feature work. Cycles 24/25 were built first and do not widen the egress surface (both are PII-gated and their projects are hard-blocked from cloud).
+
+Cycle 25 (CTM — Correct-Template Memory) closes the Librarian's dual-memory loop: after every approved `write_note`, `_emit_ctm_note` records the approved item as a precedent in `kage-ctm-librarian`. At distill time, `_retrieve_ctm` pulls the most recent approved precedents (recency-based, PII-gated) and injects them as few-shot examples above the rejection rules — so the Librarian's judgment is shaped by what you *accepted*, not only what you rejected.
+
+Cycle 24 (EPM — learn from rejections) gave the Librarian the same Layer 6 learning engine `kage ask` uses. Each `kage librarian reject` writes a correction note to `kage-corrections-librarian`; `kage learn --librarian` distills those rejections into rules that prepend the distill prompt, and Monitor auto-fires the pass at 7+ new librarian corrections. The project is hard-blocked from cloud egress.
 
 Cycle 22 added `kage learn` — a prompt-only learning layer. `learn.py` reads correction logs from the `kage-corrections` project via FTS, sends them to a cloud model using the ProTeGi meta-prompt pattern, and stores versioned rules in `~/.kage/learned_prompts.json`. At query time, `load_learned_prompt(task_class)` injects the active rules into local Qwen3's system prompt. Monitor now fires `kage learn --all` automatically when 7+ new corrections accumulate since the last run. Workflow: `kage learn` generates pending rules → `kage learn --status` to review → `kage learn --accept` to promote. `kage learn --rollback <class>` reverts to the previous version if a rule set degrades quality.
 
@@ -443,17 +452,19 @@ src/kage/
 └── mcp_server.py   MCP server (FastMCP, stdio transport)
 
 tests/
-├── test_cli.py         397 tests — CLI commands + all seam behaviors
+├── test_cli.py         418 tests — CLI commands + all seam behaviors
 ├── test_scout.py        64 tests — fetch layer, corpus, deep fetch, ADK pipeline, project injection
-├── test_monitor.py      47 tests — observe pass, digest pass, cadence split, launchd plists, learn trigger
-├── test_librarian.py    23 tests — schema migration, staging queue, distill_and_judge, HITL loop
-├── test_learn.py        18 tests — load/build/run/save, FTS filtering, bullet extraction, Blueprint #44
+├── test_monitor.py      48 tests — observe pass, digest pass, cadence split, launchd plists, learn trigger
+├── test_librarian.py    37 tests — schema migration, staging queue, distill_and_judge, HITL loop, EPM + CTM learning
+├── test_learn.py        24 tests — load/build/run/save, FTS filtering, bullet extraction, librarian pass
 ├── test_router.py       18 tests — task classification, routing table, config override
-├── test_redact.py       13 tests — substitute/restore round-trip, sequential safety, existing mapping
 ├── test_seams.py        13 tests — seam contracts + registry functions
+├── test_redact.py        9 tests — substitute/restore round-trip, sequential safety, existing mapping
+├── test_pii.py           8 tests — PII detection table + scanner
 ├── test_sensitive.py     8 tests — vault CRUD, pattern scan, integration with privacy gate
 ├── test_observe.py       2 tests — AX daemon event capture
 └── fakes.py         Test doubles: FakeEmbedder, FakeVectorIndex, RecordingCloud, FakeConfig
+                       (649 tests total across 11 test files)
 
 docs/
 ├── blueprint.md             Long-term architecture and planning state

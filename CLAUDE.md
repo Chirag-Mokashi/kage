@@ -58,7 +58,7 @@ Every design decision must be checked against this list. Operational definitions
 
 ## Current State
 
-**Working CLI exists.** The repository is no longer purely Stage 0 planning: `src/kage/cli.py` implements the headless local broker thin slice and all cycles through 25 (Cycle 23 pending — see below).
+**Working CLI exists.** The repository is no longer purely Stage 0 planning: `src/kage/cli.py` implements the headless local broker thin slice and all cycles through 25.
 
 Current implemented surface (through Cycle 25, v0.25.0):
 - local markdown source of truth under `~/.kage/memory`
@@ -85,7 +85,7 @@ Current implemented surface (through Cycle 25, v0.25.0):
 - **Layer 6 `kage learn` (Cycle 22):** ProTeGi prompt learning from the `kage-corrections` log; Monitor auto-triggers at 7+ new corrections
 - **Librarian EPM (Cycle 24):** Librarian learns from its own *rejections* — distills rejection patterns into its distill prompt; `kage learn --librarian`
 - **Librarian CTM (Cycle 25):** Librarian learns from its own *approvals* — recent approved precedents injected as few-shot examples (MemAPO dual-memory loop)
-- **PENDING — Cycle 23 (gate hardening):** HIGH security findings from the 2026-07-01 audit (F13 condensed-query cleartext PII leak, F2 chat-history context-blinding, F1 audit placeholder-structure leak) are documented in `docs/security-audit-2026-07-01.md` + build plan `docs/cycle-23-gate-hardening.md` but **not yet built/merged**. Sequenced ahead of further feature work.
+- **Gate hardening (Cycle 23, v0.23.0):** mask-at-dispatch — condensed query + history + retrieved context are masked through one shared per-request map and restored in the response (closes F13 condensed-query cleartext leak); audit log emits `pii_type_counts` instead of placeholder labels (closes F1). Audit + build plan: `docs/security-audit-2026-07-01.md`, `docs/cycle-23-gate-hardening.md`.
 - 649 tests across 13 test files
 
 The long-term blueprint still matters for direction, but docs that say "no code yet" or "Stage 1 has not started" are historical/stale unless explicitly marked current. For implementation truth, inspect `README.md`, `src/kage/cli.py`, and `tests/test_cli.py`.

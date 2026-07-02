@@ -371,12 +371,12 @@ kage today is a passive broker — it answers when called. The target is an acti
   Cycle 20   Monitor cadence + Scout deep fetch  SHIPPED — observe/digest cadence split, Scout two-stage fetch
   Cycle 21   Reversible PII masking             SHIPPED — substitute/restore gate, PII notes no longer withheld
   Cycle 22   kage learn (Layer 6)               SHIPPED — ProTeGi prompt learning, Monitor auto-trigger at N=7
-  Cycle 23   Gate hardening                     PENDING — HIGH audit findings (F13/F2/F1); build plan written, not built
+  Cycle 23   Gate hardening                     SHIPPED — mask-at-dispatch, per-request map, audit type-counts
   Cycle 24   Librarian EPM (learn rejections)   SHIPPED — distills rejection patterns into the distill prompt
   Cycle 25   Librarian CTM (learn approvals)    SHIPPED — approved precedents as few-shot examples (MemAPO loop)
 ```
 
-> **Cycle 23 note:** the 2026-07-01 security audit (`docs/security-audit-2026-07-01.md`) surfaced HIGH-severity gate findings — a condensed-query cleartext PII leak (F13), chat-history context-blinding (F2), and audit-log placeholder-structure leak (F1). The build plan (`docs/cycle-23-gate-hardening.md`) is written but not yet implemented; it is sequenced ahead of further feature work. Cycles 24/25 were built first and do not widen the egress surface (both are PII-gated and their projects are hard-blocked from cloud).
+Cycle 23 (gate hardening) closed the HIGH-severity findings from the 2026-07-01 security audit (`docs/security-audit-2026-07-01.md`). The marquee fix is **mask-at-dispatch**: the condensed retrieval query, conversation history, and retrieved context are all masked through one shared per-request placeholder map and restored in the response — closing the condensed-query cleartext leak (F13). The audit log now emits `pii_type_counts` (typed tallies) instead of numbered placeholder labels, so it no longer leaks the placeholder structure (F1). No new capability — defense-in-depth only. Build plan: `docs/cycle-23-gate-hardening.md`.
 
 Cycle 25 (CTM — Correct-Template Memory) closes the Librarian's dual-memory loop: after every approved `write_note`, `_emit_ctm_note` records the approved item as a precedent in `kage-ctm-librarian`. At distill time, `_retrieve_ctm` pulls the most recent approved precedents (recency-based, PII-gated) and injects them as few-shot examples above the rejection rules — so the Librarian's judgment is shaped by what you *accepted*, not only what you rejected.
 

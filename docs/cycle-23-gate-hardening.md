@@ -1,9 +1,9 @@
 # Cycle 23 — Layer 3e Gate Hardening (v0.23.0)
 
-*Status: PITCH v3 (2026-07-01). TWO cold reviews done (independent subagents vs.
-real repo). CR#1 forced the marquee redesign (store-masked → mask-at-dispatch);
-CR#2 caught a real leak (condensed query) + 3 claim inaccuracies. All resolved
-below. Ready to build.*
+*Status: SHIPPED 2026-07-01 — commit `80f3387`, tag `v0.23.0`, on main. TWO cold
+reviews done (independent subagents vs. real repo). CR#1 forced the marquee
+redesign (store-masked → mask-at-dispatch); CR#2 caught a real leak (condensed
+query) + 3 claim inaccuracies. All resolved and implemented below.*
 
 *Findings source & reading companion: [security-audit-2026-07-01.md](security-audit-2026-07-01.md).*
 

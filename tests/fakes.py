@@ -112,3 +112,12 @@ class RecordingCloud(CloudClient):
             for msg in call["messages"]:
                 parts.append(msg.get("content", ""))
         return "\n".join(parts)
+
+
+class FakeCalendarBackend:
+    def __init__(self):
+        self.calls = []
+
+    def create(self, *, title, start, end, calendar_name=None) -> str:
+        self.calls.append({"title": title, "start": start, "end": end, "calendar_name": calendar_name})
+        return f"fake-evt-{len(self.calls)}"

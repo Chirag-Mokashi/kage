@@ -2,7 +2,7 @@
 
 *Entry point for any Claude Code session in this repo. Lightweight orientation only — the canonical planning state lives in [docs/blueprint.md](docs/blueprint.md).*
 
-*Last updated: 2026-07-02 (Cycles 24 + 25 merged — v0.25.0)*
+*Last updated: 2026-07-02 (through Cycle 25 merged — v0.25.0; Cycle 26 calendar-write built on branch, targeting v0.26.0)*
 
 ---
 
@@ -60,7 +60,7 @@ Every design decision must be checked against this list. Operational definitions
 
 **Working CLI exists.** The repository is no longer purely Stage 0 planning: `src/kage/cli.py` implements the headless local broker thin slice and all cycles through 25.
 
-Current implemented surface (through Cycle 25, v0.25.0):
+Current implemented surface (through Cycle 25, v0.25.0; Cycle 26 calendar-write built on branch, v0.26.0):
 - local markdown source of truth under `~/.kage/memory`
 - SQLite FTS5 index and project partition filter
 - ChromaDB chunk/vector index with `kage reindex`
@@ -85,8 +85,9 @@ Current implemented surface (through Cycle 25, v0.25.0):
 - **Layer 6 `kage learn` (Cycle 22):** ProTeGi prompt learning from the `kage-corrections` log; Monitor auto-triggers at 7+ new corrections
 - **Librarian EPM (Cycle 24):** Librarian learns from its own *rejections* — distills rejection patterns into its distill prompt; `kage learn --librarian`
 - **Librarian CTM (Cycle 25):** Librarian learns from its own *approvals* — recent approved precedents injected as few-shot examples (MemAPO dual-memory loop)
+- **Calendar-write arm (Cycle 26, on branch):** kage's first WRITE arm — EventKit create-only (write-only access), `propose → approve → execute` over human-readable markdown proposals + `kage calendar` CLI; excluded from `_detect_arms`, HITL-gated, audited. The template for future write arms; delete/reschedule/undo deferred (need full-access via a signed-helper identity)
 - **Gate hardening (Cycle 23, v0.23.0):** mask-at-dispatch — condensed query + history + retrieved context are masked through one shared per-request map and restored in the response (closes F13 condensed-query cleartext leak); audit log emits `pii_type_counts` instead of placeholder labels (closes F1). Audit + build plan: `docs/security-audit-2026-07-01.md`, `docs/cycle-23-gate-hardening.md`.
-- 649 tests across 11 test files
+- 661 tests across 12 test files
 
 The long-term blueprint still matters for direction, but docs that say "no code yet" or "Stage 1 has not started" are historical/stale unless explicitly marked current. For implementation truth, inspect `README.md`, `src/kage/cli.py`, and `tests/test_cli.py`.
 

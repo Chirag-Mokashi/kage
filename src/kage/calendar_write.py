@@ -72,10 +72,10 @@ def _write_proposal(p: dict) -> Path:
     for key in ["id", "op", "status", "title", "start", "end", "calendar", "why", "created_at", "event_identifier"]:
         frontmatter += f"{key}: {p.get(key, '')}\n"
     frontmatter += "---\n\n"
-    frontmatter += "# kage would " + p["op"] + ": \"" + p["title"] + "\"\n"
-    frontmatter += p["start"] + " - " + p["end"] + " · calendar: " + (p["calendar"] if p["calendar"] else "(default)") + "\n"
-    frontmatter += "why: " + p["why"]
-    path.write_text(frontmatter)
+    frontmatter += "# kage would " + p.get("op", "") + ": \"" + p.get("title", "") + "\"\n"
+    frontmatter += p.get("start", "") + " - " + p.get("end", "") + " · calendar: " + (p.get("calendar") or "(default)") + "\n"
+    frontmatter += "why: " + p.get("why", "")
+    path.write_text(frontmatter, encoding="utf-8")
     return path
 
 def _read_proposal(path: Path) -> dict:
@@ -98,6 +98,9 @@ def _read_proposal(path: Path) -> dict:
     return proposal
 
 def propose_create(*, title: str, start: str, end: str, calendar: str | None = None, why: str = "") -> str:
+    for _v in (title, start, end, calendar or "", why):
+        if "\n" in _v:
+            raise ValueError("proposal fields must not contain newlines")
     p = {
         "id": _proposal_id(),
         "op": "create",

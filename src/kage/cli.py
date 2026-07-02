@@ -58,6 +58,8 @@ _monitor_app = typer.Typer(help="Monitor agent commands.")
 app.add_typer(_monitor_app, name="monitor")
 _sensitive_app = typer.Typer(help="Sensitive vault commands.")
 app.add_typer(_sensitive_app, name="sensitive")
+_calendar_app = typer.Typer(help="Calendar write commands.")
+app.add_typer(_calendar_app, name="calendar")
 
 # ── Layout ────────────────────────────────────────────────────────────────
 KAGE_HOME = Path(os.environ.get("KAGE_HOME") or Path.home() / ".kage")  # override for relocation/tests
@@ -2025,6 +2027,67 @@ def sensitive_scan() -> None:
             typer.echo(f"{item['path']}")
             for h in item["hits"]:
                 typer.echo(f"  · {h}")
+
+
+@_calendar_app.command("propose")
+def calendar_propose(
+    title: str = typer.Option(..., help="Event title"),
+    start: str = typer.Option(..., help="ISO start e.g. 2026-07-09T14:00:00"),
+    end: str = typer.Option(..., help="ISO end e.g. 2026-07-09T15:00:00"),
+    cal: str = typer.Option(None, help="Calendar name"),
+    why: str = typer.Option("", help="Reason for the event")
+) -> None:
+    """Stage a calendar-event create proposal (writes nothing until approved)."""
+    from kage import calendar_write
+    try:
+        pid = calendar_write.propose_create(title=title, start=start, end=end, calendar=cal, why=why)
+        typer.echo(f"Staged proposal {pid}. Review with: kage calendar queue")
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+
+@_calendar_app.command("queue")
+def calendar_queue() -> None:
+    """Show pending calendar-write proposals."""
+    from kage import calendar_write
+    q = calendar_write.get_queue()
+    if not q:
+        typer.echo("No pending proposals.")
+        return
+    for p in q:
+        typer.echo(f"[{p['id']}]  {p.get('title','')}")
+        typer.echo(f"    {p.get('start','')} - {p.get('end','')} · calendar: {p.get('calendar') or '(default)'}")
+        if p.get('why'):
+            typer.echo(f"    why: {p['why']}")
+
+
+@_calendar_app.command("approve")
+def calendar_approve(
+    proposal_id: str = typer.Argument(..., help="Proposal id from `kage calendar queue`")
+) -> None:
+    """Approve a proposal — creates the calendar event."""
+    from kage import calendar_write
+    try:
+        p = calendar_write.approve(proposal_id)
+        typer.echo(f"Created: {p.get('title','')} (event {p.get('event_identifier','')})")
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+
+@_calendar_app.command("reject")
+def calendar_reject(
+    proposal_id: str = typer.Argument(..., help="Proposal id from `kage calendar queue`")
+) -> None:
+    """Reject a pending proposal."""
+    from kage import calendar_write
+    try:
+        calendar_write.reject(proposal_id)
+        typer.echo(f"Rejected {proposal_id}.")
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1)
 
 
 @app.command()

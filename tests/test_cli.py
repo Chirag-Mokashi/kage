@@ -3104,6 +3104,41 @@ def test_disclosure_gate_allows_clean_note(monkeypatch, tmp_path):
     assert withheld == []
 
 
+def test_disclosure_gate_withholds_always_local(monkeypatch, tmp_path):
+    """Gate must block a note in kage-corrections regardless of local_only flag or config."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    mem_id = cli._save("dev correction note", "kage-corrections")
+    cfg = cli._config()
+    allowed, withheld, _ = cli._disclosure_gate([_fake_row(mem_id, "kage-corrections")], cfg)
+    assert allowed == []
+    assert len(withheld) == 1
+    assert withheld[0]["reason"] == "local_only:always_local:kage-corrections"
+
+
+def test_disclosure_gate_withholds_librarian_corrections(monkeypatch, tmp_path):
+    """Gate must block a note in kage-corrections-librarian regardless of local_only flag or config."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    mem_id = cli._save("dev correction note", "kage-corrections-librarian")
+    cfg = cli._config()
+    allowed, withheld, _ = cli._disclosure_gate([_fake_row(mem_id, "kage-corrections-librarian")], cfg)
+    assert allowed == []
+    assert len(withheld) == 1
+    assert withheld[0]["reason"] == "local_only:always_local:kage-corrections-librarian"
+
+
+def test_disclosure_gate_allows_ordinary_project_not_blocked(monkeypatch, tmp_path):
+    """Ordinary project notes must NOT be blocked by the always-local set."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    mem_id = cli._save("regular work note", "my-project")
+    cfg = cli._config()
+    allowed, withheld, _ = cli._disclosure_gate([_fake_row(mem_id, "my-project")], cfg)
+    assert len(allowed) == 1
+    assert withheld == []
+
+
 def test_disclosure_gate_empty_rows():
     """Gate on empty input must return two empty lists without error."""
     allowed, withheld, _ = cli._disclosure_gate([], {})
@@ -3994,7 +4029,7 @@ class TestGateConversation:
             self._params = list(params)
             return self
         def fetchall(self):
-            return [(nid, 0) for nid in self._params]
+            return [(nid, 0, None) for nid in self._params]
         def close(self): pass
 
     def test_empty_turns_returns_empty(self):
@@ -4034,7 +4069,7 @@ class TestGateConversation:
     def test_provenance_local_only_withheld(self, monkeypatch):
         class LocalConn:
             def execute(self, sql, params): return self
-            def fetchall(self): return [("note-lo", 1)]
+            def fetchall(self): return [("note-lo", 1, None)]
             def close(self): pass
         turn = self.make_turn(0, "hello", note_ids=["note-lo"])
         monkeypatch.setattr(runtime.store, "allowed_note_ids", lambda *a: {"note-lo"})
@@ -4062,6 +4097,45 @@ class TestGateConversation:
         assert [t["idx"] for t in safe] == [1]
         assert withheld[0]["turn_idx"] == 0
         assert withheld[0]["reason"].startswith("provenance:identity_wall:")
+
+    def test_provenance_always_local_withheld(self, monkeypatch):
+        """A turn whose note comes from kage-corrections must be withheld by the gate."""
+        class AlwaysLocalConn:
+            def execute(self, sql, params): return self
+            def fetchall(self): return [("note-corr", 0, "kage-corrections")]
+            def close(self): pass
+        turn = self.make_turn(0, "hello", note_ids=["note-corr"])
+        monkeypatch.setattr(runtime.store, "allowed_note_ids", lambda *a: {"note-corr"})
+        monkeypatch.setattr(runtime.store, "connect", lambda: AlwaysLocalConn())
+        safe, withheld = cli._gate_conversation([turn], {}, "personal", None)
+        assert safe == []
+        assert withheld[0]["reason"] == "provenance:always_local:kage-corrections"
+
+    def test_provenance_always_local_librarian_withheld(self, monkeypatch):
+        """A turn whose note comes from kage-corrections-librarian must be withheld by the gate."""
+        class AlwaysLocalLibConn:
+            def execute(self, sql, params): return self
+            def fetchall(self): return [("note-corr", 0, "kage-corrections-librarian")]
+            def close(self): pass
+        turn = self.make_turn(0, "hello", note_ids=["note-corr"])
+        monkeypatch.setattr(runtime.store, "allowed_note_ids", lambda *a: {"note-corr"})
+        monkeypatch.setattr(runtime.store, "connect", lambda: AlwaysLocalLibConn())
+        safe, withheld = cli._gate_conversation([turn], {}, "personal", None)
+        assert safe == []
+        assert withheld[0]["reason"] == "provenance:always_local:kage-corrections-librarian"
+
+    def test_provenance_always_local_ctm_withheld(self, monkeypatch):
+        """A turn whose note comes from kage-ctm-librarian must be withheld by the gate."""
+        class AlwaysLocalCtmConn:
+            def execute(self, sql, params): return self
+            def fetchall(self): return [("note-ctm", 0, "kage-ctm-librarian")]
+            def close(self): pass
+        turn = self.make_turn(0, "hello", note_ids=["note-ctm"])
+        monkeypatch.setattr(runtime.store, "allowed_note_ids", lambda *a: {"note-ctm"})
+        monkeypatch.setattr(runtime.store, "connect", lambda: AlwaysLocalCtmConn())
+        safe, withheld = cli._gate_conversation([turn], {}, "personal", None)
+        assert safe == []
+        assert withheld[0]["reason"] == "provenance:always_local:kage-ctm-librarian"
 
 
 class TestSessionSwitch:
@@ -4540,12 +4614,23 @@ class TestArmShellTransport:
         _mock_cfg.data = self._SHELL_CFG
         monkeypatch.setattr(runtime, "config", _mock_cfg)
         monkeypatch.setattr(kage_privacy, "_write_audit", lambda x: None)
-        mock_proc = mock.Mock()
-        mock_proc.stdout = "• Test event\n"
-        mock_proc.returncode = 0
-        monkeypatch.setattr(cli.subprocess, "run", lambda *a, **kw: mock_proc)
+        class _FakeProc:
+            def __init__(self, data: bytes):
+                self._chunks = [data, b""]
+                self._i = 0
+                self.stdout = self
+            async def read(self, _n: int) -> bytes:
+                chunk = self._chunks[self._i]
+                if self._i < len(self._chunks) - 1:
+                    self._i += 1
+                return chunk
+            async def wait(self): pass
+            def kill(self): pass
+        async def fake_exec(*args, **kw):
+            return _FakeProc("Test event\n".encode())
+        monkeypatch.setattr("kage.arms.asyncio.create_subprocess_exec", fake_exec)
         result = asyncio.run(cli._call_arm("calendar", "whats on my calendar", "personal"))
-        assert result == "• Test event"
+        assert result == "Test event"
 
     def test_call_arm_shell_empty_command_returns_none(self, monkeypatch):
         cfg = {"arms": {"calendar": {"enabled": True, "transport": "shell", "command": "", "identity": "personal", "permission": "read"}}}
@@ -4626,7 +4711,22 @@ def test_call_arm_shell_allows_osascript(tmp_path, monkeypatch):
     """S3: osascript (used by calendar/gmail arms) must not be blocked."""
     import asyncio
     from kage import arms
-    monkeypatch.setattr("kage.arms.subprocess.run", lambda *a, **k: type("R", (), {"stdout": "ok", "returncode": 0})())
+    monkeypatch.setattr("kage.arms._privacy._write_audit", lambda x: None)
+    class _FakeProc:
+        def __init__(self, data: bytes):
+            self._chunks = [data, b""]
+            self._i = 0
+            self.stdout = self
+        async def read(self, n: int) -> bytes:
+            chunk = self._chunks[self._i]
+            if self._i < len(self._chunks) - 1:
+                self._i += 1
+            return chunk
+        async def wait(self): pass
+        def kill(self): pass
+    async def fake_exec(*args, **kw):
+        return _FakeProc(b"ok")
+    monkeypatch.setattr("kage.arms.asyncio.create_subprocess_exec", fake_exec)
     arm_cfg = {"command": "osascript /tmp/test.scpt", "transport": "shell"}
     result = asyncio.run(arms._call_arm_shell("calendar", arm_cfg, "what's on today", "personal", 5.0))
     assert result == "ok"
@@ -4641,6 +4741,80 @@ def test_check_arm_health_blocks_interpreter(monkeypatch):
     monkeypatch.setattr(runtime, "config", _mock_cfg)
     result = asyncio.run(arms._check_arm_health("evil"))
     assert result is False
+
+
+def test_check_arm_health_prefers_health_command(monkeypatch):
+    _mock_cfg = mock.Mock()
+    _mock_cfg.data = {"arms": {"gmail": {
+        "transport": "shell",
+        "command": "osascript /tmp/mail.scpt",
+        "health_command": "pgrep -x Mail",
+    }}}
+    monkeypatch.setattr(runtime, "config", _mock_cfg)
+    captured = {}
+    def fake_run(args, **kw):
+        captured["args"] = args
+        m = mock.Mock()
+        m.returncode = 0
+        return m
+    monkeypatch.setattr("kage.arms.subprocess.run", fake_run)
+    result = asyncio.run(arms._check_arm_health("gmail"))
+    assert result is True
+    assert captured["args"] == ["pgrep", "-x", "Mail"]
+
+def test_check_arm_health_health_command_nonzero_returns_false(monkeypatch):
+    _mock_cfg = mock.Mock()
+    _mock_cfg.data = {"arms": {"gmail": {
+        "transport": "shell",
+        "command": "osascript /tmp/mail.scpt",
+        "health_command": "pgrep -x Mail",
+    }}}
+    monkeypatch.setattr(runtime, "config", _mock_cfg)
+    def fake_run(_args, **kw):
+        m = mock.Mock()
+        m.returncode = 1
+        return m
+    monkeypatch.setattr("kage.arms.subprocess.run", fake_run)
+    result = asyncio.run(arms._check_arm_health("gmail"))
+    assert result is False
+
+def test_check_arm_health_empty_health_command_falls_back_to_command(monkeypatch):
+    _mock_cfg = mock.Mock()
+    _mock_cfg.data = {"arms": {"calendar": {
+        "transport": "shell",
+        "command": "osascript /tmp/cal.scpt",
+        "health_command": "",
+    }}}
+    monkeypatch.setattr(runtime, "config", _mock_cfg)
+    captured = {}
+    def fake_run(args, **kw):
+        captured["args"] = args
+        m = mock.Mock()
+        m.returncode = 0
+        return m
+    monkeypatch.setattr("kage.arms.subprocess.run", fake_run)
+    result = asyncio.run(arms._check_arm_health("calendar"))
+    assert result is True
+    assert captured["args"] == ["osascript", "/tmp/cal.scpt"]
+
+def test_check_arm_health_health_command_interpreter_blocked(monkeypatch):
+    _mock_cfg = mock.Mock()
+    _mock_cfg.data = {"arms": {"bad": {
+        "transport": "shell",
+        "command": "osascript /tmp/safe.scpt",
+        "health_command": "python3 -c 'import os'",
+    }}}
+    monkeypatch.setattr(runtime, "config", _mock_cfg)
+    called = {"n": 0}
+    def fake_run(_args, **kw):
+        called["n"] += 1
+        m = mock.Mock()
+        m.returncode = 0
+        return m
+    monkeypatch.setattr("kage.arms.subprocess.run", fake_run)
+    result = asyncio.run(arms._check_arm_health("bad"))
+    assert result is False
+    assert called["n"] == 0
 
 
 # ── Egress golden tests (Slice 1g) ──────────────────────────────────────────
@@ -5182,3 +5356,79 @@ def test_learn_rollback_already_oldest(monkeypatch, tmp_path):
     assert "already at oldest" in result.output
     data = json.loads((h / "learned_prompts.json").read_text())
     assert data["code"]["active"] == "v1"
+
+
+# ── Cycle 24 — kage learn --librarian + --status librarian display ──
+
+def test_learn_librarian_writes_pending(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    import kage.learn as learn_mod
+    monkeypatch.setattr(learn_mod, "run_librarian_learning_pass",
+                        lambda *a, **kw: ("- Never demote fresh content", "trace text", ["lib-id-1"]))
+    monkeypatch.setattr(learn_mod, "_count_corrections", lambda *a, **kw: 9)
+    result = CliRunner().invoke(cli.app, ["learn", "--librarian"])
+    assert result.exit_code == 0
+    assert "librarian rules (pending)" in result.output
+    assert "Never demote fresh content" in result.output
+    assert (h / "pending_learned.json").exists() is True
+    pending = json.loads((h / "pending_learned.json").read_text())
+    assert "librarian" in pending
+    assert pending["librarian"]["correction_count"] == 9
+
+
+def test_learn_status_shows_librarian_entry(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "learned_prompts.json").write_text(json.dumps({
+        "librarian": {
+            "active": "v1",
+            "versions": {
+                "v1": {
+                    "date": "2026-07-01",
+                    "correction_count": 7,
+                    "source_note_ids": [],
+                    "prompt": "- Never promote stale\n- Check source",
+                    "trace": "t",
+                }
+            },
+        }
+    }))
+    result = CliRunner().invoke(cli.app, ["learn", "--status"])
+    assert result.exit_code == 0
+    assert "librarian" in result.output
+    assert "7 corrections" in result.output
+    assert "2 rules" in result.output
+    assert "v1" in result.output
+
+
+def test_learn_status_shows_ctm_count(monkeypatch, tmp_path):
+    """kage learn --status must display the CTM approved precedents count."""
+    import uuid
+    from datetime import datetime
+    h = _save_home(monkeypatch, tmp_path)
+    note_id = str(uuid.uuid4())
+    ts = datetime.now().astimezone().isoformat(timespec="seconds")
+    conn = sqlite3.connect(str(h / "indexes" / "kage.db"))
+    conn.execute(
+        "INSERT INTO memories (id, content_path, project, created_at, local_only, needs_embed, state)"
+        " VALUES (?, ?, 'kage-ctm-librarian', ?, 0, 0, 'baseline')",
+        (note_id, f"memory/{note_id}.md", ts),
+    )
+    conn.commit()
+    conn.close()
+    (h / "learned_prompts.json").write_text(json.dumps({}))
+    result = CliRunner().invoke(cli.app, ["learn", "--status"])
+    assert result.exit_code == 0
+    assert "ctm" in result.output
+    assert "1 approved precedents" in result.output
+
+
+def test_disclosure_gate_withholds_ctm_librarian(monkeypatch, tmp_path):
+    """Gate must block a note in kage-ctm-librarian (always-local set)."""
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("x")))
+    mem_id = cli._save("ctm precedent note", "kage-ctm-librarian")
+    cfg = cli._config()
+    allowed, withheld, _ = cli._disclosure_gate([_fake_row(mem_id, "kage-ctm-librarian")], cfg)
+    assert allowed == []
+    assert len(withheld) == 1
+    assert withheld[0]["reason"] == "local_only:always_local:kage-ctm-librarian"

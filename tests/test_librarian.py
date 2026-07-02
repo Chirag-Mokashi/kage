@@ -15,7 +15,8 @@ from kage.librarian import (
     _apply_migrations, _connect, _acquire_lockfile, _release_lockfile,
     _gate_text, distill_and_judge, ApprovalRequest,
     deposit_to_queue, request_approval, write_note, reject_approval,
-    get_catalog_stats, get_staging_queue, _LOCKFILE,
+    get_catalog_stats, get_staging_queue, _LOCKFILE, _DISTILL_SYSTEM,
+    _emit_ctm_note, _retrieve_ctm,
 )
 
 
@@ -240,7 +241,11 @@ def test_write_note_inherits_project_from_staging(lib_env, monkeypatch):
     assert ok is True
 
     conn = _connect()
-    row = conn.execute("SELECT project, id FROM memories ORDER BY rowid DESC LIMIT 1").fetchone()
+    row = conn.execute(
+        "SELECT project, id FROM memories"
+        " WHERE (project != 'kage-ctm-librarian' OR project IS NULL)"
+        " ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()
     conn.close()
     assert row[0] == "kage", f"project not inherited from staging: {row[0]}"
 
@@ -262,7 +267,10 @@ def test_write_note_idempotent(lib_env, monkeypatch):
     assert ok2 is True  # second call: idempotent, not crash
 
     conn = _connect()
-    count = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+    count = conn.execute(
+        "SELECT COUNT(*) FROM memories"
+        " WHERE (project != 'kage-ctm-librarian' OR project IS NULL)"
+    ).fetchone()[0]
     conn.close()
     assert count == 1, f"double-call created {count} notes instead of 1"
 
@@ -419,3 +427,328 @@ def test_librarian_gate_applies_vault_pattern(lib_env, monkeypatch):
     assert "[SENSITIVE:employer-name]" in result
     assert "Initech" not in result
     assert "[REDACTED_PII]" not in result
+
+
+# ── Cycle 24 — EPM: rejection correction notes + distill_and_judge prepend ──
+
+_VALID_JSON_EPM = (
+    '{"dedup":{"verdict":"DISTINCT"},"contradiction":{"found":false},'
+    '"quality":"HOLD","reason":"r","note":{"title":"T","body":"B","tags":[]},"staleness":[]}'
+)
+
+
+def test_reject_approval_emits_correction_note(lib_env):
+    import pathlib
+    staging_id = deposit_to_queue("rejected content", "user")
+    note_json = {"title": "Bad PROMOTE", "body": "B", "tags": [], "project": None,
+                 "identity": "personal", "source": "scout"}
+    approval_id = request_approval(staging_id, "promote", "test", note_json, "B")
+    ok = reject_approval(approval_id, "title was wrong")
+    assert ok is True
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT id, content_path FROM memories WHERE project=?",
+        ("kage-corrections-librarian",),
+    ).fetchall()
+    conn.close()
+    assert len(rows) == 1
+    content = (pathlib.Path(runtime.config.home) / rows[0][1]).read_text()
+    assert "Correction log — Librarian rejection:" in content
+    assert "Bad PROMOTE" in content
+    assert "title was wrong" in content
+
+
+def test_reject_approval_missing_id_no_note(lib_env):
+    ok = reject_approval("nonexistent-id", "reason")
+    assert ok is False
+    conn = _connect()
+    count = conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE project=?",
+        ("kage-corrections-librarian",),
+    ).fetchone()[0]
+    conn.close()
+    assert count == 0
+
+
+def test_distill_and_judge_prepends_learned_rules(lib_env, monkeypatch):
+    import json
+    import pathlib
+    learned = {
+        "librarian": {
+            "active": "v1",
+            "versions": {
+                "v1": {
+                    "prompt": "- Never promote stale content",
+                    "date": "2026-07-01",
+                    "correction_count": 3,
+                    "source_note_ids": [],
+                    "trace": "",
+                }
+            },
+        }
+    }
+    (lib_env / "learned_prompts.json").write_text(json.dumps(learned))
+    (lib_env / "config.json").write_text(json.dumps({"cloud_provider": "claude"}))
+    captured = {}
+
+    def fake_complete(provider, system, messages, cfg):
+        captured["system"] = system
+        return _VALID_JSON_EPM
+
+    monkeypatch.setattr(runtime.cloud, "complete", fake_complete)
+    distill_and_judge("some content", "manual")
+    assert "[kage learned librarian rules]" in captured["system"]
+    assert "Never promote stale content" in captured["system"]
+    assert _DISTILL_SYSTEM in captured["system"]
+
+
+def test_distill_and_judge_no_learned_rules_unchanged(lib_env, monkeypatch):
+    import json
+    (lib_env / "config.json").write_text(json.dumps({"cloud_provider": "claude"}))
+    captured = {}
+
+    def fake_complete(provider, system, messages, cfg):
+        captured["system"] = system
+        return _VALID_JSON_EPM
+
+    monkeypatch.setattr(runtime.cloud, "complete", fake_complete)
+    distill_and_judge("content", "manual")
+    assert captured["system"] == _DISTILL_SYSTEM
+
+
+def test_distill_and_judge_epm_disabled_skips_rules(lib_env, monkeypatch):
+    import json
+    (lib_env / "learned_prompts.json").write_text(json.dumps({
+        "librarian": {
+            "active": "v1",
+            "versions": {
+                "v1": {
+                    "prompt": "- Never skip review",
+                    "date": "2026-07-01",
+                    "correction_count": 3,
+                    "source_note_ids": [],
+                    "trace": "",
+                }
+            },
+        }
+    }))
+    (lib_env / "config.json").write_text(json.dumps({
+        "cloud_provider": "claude",
+        "librarian": {"learning": {"epm_enabled": False}},
+    }))
+    captured = {}
+
+    def fake_complete(provider, system, messages, cfg):
+        captured["system"] = system
+        return _VALID_JSON_EPM
+
+    monkeypatch.setattr(runtime.cloud, "complete", fake_complete)
+    distill_and_judge("some content", "manual")
+    assert captured["system"] == _DISTILL_SYSTEM
+
+
+# ── Cycle 25 CTM tests ────────────────────────────────────────────────────────
+
+def test_write_note_emits_ctm_note(lib_env, monkeypatch):
+    """write_note must emit exactly 1 CTM precedent row in memories after approval."""
+    monkeypatch.setattr(runtime, "embed", type("E", (), {"embed": lambda self, *a, **kw: [0.1]*384})())
+    monkeypatch.setattr(runtime, "vector", type("V", (), {"collection": lambda self, *a, **kw: MagicMock()})())
+    staging_id = deposit_to_queue("a notable insight", "scout")
+    note_json = {"title": "Notable Insight", "body": "Something useful.", "tags": []}
+    approval_id = request_approval(staging_id, "promote", "good note", note_json, "Something useful.")
+    ok = write_note(approval_id)
+    assert ok is True
+    conn = _connect()
+    rows = conn.execute("SELECT id, content_path FROM memories WHERE project='kage-ctm-librarian'").fetchall()
+    conn.close()
+    assert len(rows) == 1
+    content = (lib_env / rows[0][1]).read_text()
+    assert "CTM log — Librarian approval:" in content
+
+
+def test_write_note_double_approve_no_duplicate_ctm(lib_env, monkeypatch):
+    """Calling write_note twice must produce only 1 CTM note (idempotency)."""
+    monkeypatch.setattr(runtime, "embed", type("E", (), {"embed": lambda self, *a, **kw: [0.1]*384})())
+    monkeypatch.setattr(runtime, "vector", type("V", (), {"collection": lambda self, *a, **kw: MagicMock()})())
+    staging_id = deposit_to_queue("double test", "scout")
+    note_json = {"title": "Double Test", "body": "body", "tags": []}
+    approval_id = request_approval(staging_id, "promote", "r", note_json, "body")
+    write_note(approval_id)
+    write_note(approval_id)
+    conn = _connect()
+    count = conn.execute("SELECT COUNT(*) FROM memories WHERE project='kage-ctm-librarian'").fetchone()[0]
+    conn.close()
+    assert count == 1
+
+
+def test_write_note_emit_failure_does_not_abort(lib_env, monkeypatch):
+    """If _emit_ctm_note raises, write_note must still return True and write the main note."""
+    monkeypatch.setattr(runtime, "embed", type("E", (), {"embed": lambda self, *a, **kw: [0.1]*384})())
+    monkeypatch.setattr(runtime, "vector", type("V", (), {"collection": lambda self, *a, **kw: MagicMock()})())
+    monkeypatch.setattr("kage.librarian._emit_ctm_note", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("ctm boom")))
+    staging_id = deposit_to_queue("resilience test", "scout")
+    note_json = {"title": "Resilience Test", "body": "body", "tags": []}
+    approval_id = request_approval(staging_id, "promote", "r", note_json, "body")
+    ok = write_note(approval_id)
+    assert ok is True
+    conn = _connect()
+    count = conn.execute("SELECT COUNT(*) FROM memories WHERE (project != 'kage-ctm-librarian' OR project IS NULL)").fetchone()[0]
+    conn.close()
+    assert count == 1
+
+
+def test_retrieve_ctm_empty_db_returns_empty(lib_env):
+    """_retrieve_ctm must return [] when no CTM notes exist."""
+    result = _retrieve_ctm("some content", {}, lib_env)
+    assert result == []
+
+
+def test_retrieve_ctm_skips_missing_file(lib_env):
+    """_retrieve_ctm must return [] without raising when DB row exists but file is absent."""
+    import uuid
+    from datetime import datetime
+    note_id = str(uuid.uuid4())
+    rel_path = f"memory/{note_id}.md"  # intentionally not written to disk
+    ts = datetime.now().astimezone().isoformat(timespec="seconds")
+    conn = _connect()
+    conn.execute(
+        "INSERT INTO memories (id, content_path, project, created_at, local_only, needs_embed, state)"
+        " VALUES (?, ?, 'kage-ctm-librarian', ?, 0, 0, 'baseline')",
+        (note_id, rel_path, ts),
+    )
+    conn.execute("INSERT INTO memory_fts (id, body) VALUES (?, ?)", (note_id, "CTM log"))
+    conn.commit()
+    conn.close()
+    result = _retrieve_ctm("content", {}, lib_env)
+    assert result == []
+
+
+def test_retrieve_ctm_returns_recent_notes(lib_env):
+    """_retrieve_ctm must return up to max_examples most recent CTM notes."""
+    import uuid
+    from datetime import datetime
+    conn = _connect()
+    for i in range(4):
+        note_id = str(uuid.uuid4())
+        rel_path = f"memory/{note_id}.md"
+        ts = datetime.now().astimezone().isoformat(timespec="seconds")
+        body = f"CTM log — Librarian approval: Note {i}. Source: scout. Action: PROMOTE. Reason: good."
+        conn.execute(
+            "INSERT INTO memories (id, content_path, project, created_at, local_only, needs_embed, state)"
+            " VALUES (?, ?, 'kage-ctm-librarian', ?, 0, 0, 'baseline')",
+            (note_id, rel_path, ts),
+        )
+        conn.execute("INSERT INTO memory_fts (id, body) VALUES (?, ?)", (note_id, body))
+        conn.commit()
+        fp = lib_env / rel_path
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        fp.write_text(f"---\nid: {note_id}\n---\n\n{body}\n")
+    conn.close()
+    result = _retrieve_ctm("content", {}, lib_env, max_examples=3)
+    assert len(result) == 3
+    for r in result:
+        assert "CTM log" in r
+
+
+def test_retrieve_ctm_gates_pii_before_returning(lib_env):
+    """_retrieve_ctm must strip email addresses from CTM note content before returning."""
+    import uuid
+    from datetime import datetime
+    note_id = str(uuid.uuid4())
+    rel_path = f"memory/{note_id}.md"
+    ts = datetime.now().astimezone().isoformat(timespec="seconds")
+    body = (
+        "CTM log — Librarian approval: contact note. Source: user. Action: PROMOTE. "
+        "Reason: promoted for user@test.com."
+    )
+    conn = _connect()
+    conn.execute(
+        "INSERT INTO memories (id, content_path, project, created_at, local_only, needs_embed, state)"
+        " VALUES (?, ?, 'kage-ctm-librarian', ?, 0, 0, 'baseline')",
+        (note_id, rel_path, ts),
+    )
+    conn.execute("INSERT INTO memory_fts (id, body) VALUES (?, ?)", (note_id, body))
+    conn.commit()
+    conn.close()
+    fp = lib_env / rel_path
+    fp.parent.mkdir(parents=True, exist_ok=True)
+    fp.write_text(f"---\nid: {note_id}\n---\n\n{body}\n")
+    result = _retrieve_ctm("content", {}, lib_env)
+    assert len(result) == 1
+    assert "user@test.com" not in result[0]
+    assert "[REDACTED_PII]" in result[0]
+
+
+def test_distill_and_judge_injects_ctm_when_present(lib_env, monkeypatch):
+    """distill_and_judge must prepend CTM precedents AND EPM rules; CTM index < EPM index."""
+    import json, uuid
+    from datetime import datetime
+    note_id = str(uuid.uuid4())
+    rel_path = f"memory/{note_id}.md"
+    ts = datetime.now().astimezone().isoformat(timespec="seconds")
+    body = "CTM log — Librarian approval: Good example. Source: scout. Action: PROMOTE. Reason: clear."
+    conn = _connect()
+    conn.execute(
+        "INSERT INTO memories (id, content_path, project, created_at, local_only, needs_embed, state)"
+        " VALUES (?, ?, 'kage-ctm-librarian', ?, 0, 0, 'baseline')",
+        (note_id, rel_path, ts),
+    )
+    conn.execute("INSERT INTO memory_fts (id, body) VALUES (?, ?)", (note_id, body))
+    conn.commit()
+    conn.close()
+    fp = lib_env / rel_path
+    fp.parent.mkdir(parents=True, exist_ok=True)
+    fp.write_text(f"---\nid: {note_id}\n---\n\n{body}\n")
+    (lib_env / "learned_prompts.json").write_text(json.dumps({
+        "librarian": {"active": "v1", "versions": {"v1": {
+            "prompt": "- Always check sources", "date": "2026-07-01",
+            "correction_count": 5, "source_note_ids": [], "trace": "",
+        }}}
+    }))
+    (lib_env / "config.json").write_text(json.dumps({"cloud_provider": "claude"}))
+    captured = {}
+
+    def fake_complete(provider, system, messages, cfg):
+        captured["system"] = system
+        return _VALID_JSON_EPM
+
+    monkeypatch.setattr(runtime.cloud, "complete", fake_complete)
+    distill_and_judge("test content", "manual")
+    assert "[kage CTM precedents]" in captured["system"]
+    assert "[kage learned librarian rules]" in captured["system"]
+    assert captured["system"].index("[kage CTM precedents]") < captured["system"].index("[kage learned librarian rules]")
+
+
+def test_distill_and_judge_ctm_disabled_skips_retrieval(lib_env, monkeypatch):
+    """When ctm_enabled=False, CTM precedents must NOT appear in the system prompt."""
+    import json, uuid
+    from datetime import datetime
+    note_id = str(uuid.uuid4())
+    rel_path = f"memory/{note_id}.md"
+    ts = datetime.now().astimezone().isoformat(timespec="seconds")
+    body = "CTM log — Librarian approval: Should not appear. Source: scout. Action: PROMOTE. Reason: test."
+    conn = _connect()
+    conn.execute(
+        "INSERT INTO memories (id, content_path, project, created_at, local_only, needs_embed, state)"
+        " VALUES (?, ?, 'kage-ctm-librarian', ?, 0, 0, 'baseline')",
+        (note_id, rel_path, ts),
+    )
+    conn.execute("INSERT INTO memory_fts (id, body) VALUES (?, ?)", (note_id, body))
+    conn.commit()
+    conn.close()
+    fp = lib_env / rel_path
+    fp.parent.mkdir(parents=True, exist_ok=True)
+    fp.write_text(f"---\nid: {note_id}\n---\n\n{body}\n")
+    (lib_env / "config.json").write_text(json.dumps({
+        "cloud_provider": "claude",
+        "librarian": {"learning": {"ctm_enabled": False}},
+    }))
+    captured = {}
+
+    def fake_complete(provider, system, messages, cfg):
+        captured["system"] = system
+        return _VALID_JSON_EPM
+
+    monkeypatch.setattr(runtime.cloud, "complete", fake_complete)
+    distill_and_judge("test content", "manual")
+    assert "[kage CTM precedents]" not in captured["system"]

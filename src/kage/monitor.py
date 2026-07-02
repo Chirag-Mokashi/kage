@@ -637,14 +637,19 @@ def _observe_impl(cfg: dict) -> None:
 
 
 def _maybe_trigger_learn(home: Path) -> None:
-    """Fire `kage learn --all` when 7+ new corrections have accumulated since the last run."""
+    """Fire `kage learn --all` / `--librarian` when 7+ new corrections accumulated since last run."""
     import subprocess
-    from kage.learn import _count_total_corrections, _read_learn_state, _write_learn_state
-    total = _count_total_corrections(home=home)
+    from kage.learn import _count_total_corrections, _count_corrections, _read_learn_state, _write_learn_state
     state = _read_learn_state(home=home)
+    total = _count_total_corrections(home=home)
     if total - state.get("last_learn_correction_count", 0) >= 7:
         subprocess.run(["kage", "learn", "--all"], check=False)
-        _write_learn_state({**state, "last_learn_correction_count": total}, home=home)
+        state = {**state, "last_learn_correction_count": total}
+    lib_total = _count_corrections("kage-corrections-librarian", home=home)
+    if lib_total - state.get("last_librarian_learn_count", 0) >= 7:
+        subprocess.run(["kage", "learn", "--librarian"], check=False)
+        state = {**state, "last_librarian_learn_count": lib_total}
+    _write_learn_state(state, home=home)
 
 
 def _digest_impl(cfg: dict) -> None:

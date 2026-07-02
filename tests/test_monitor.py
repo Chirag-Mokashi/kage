@@ -710,3 +710,18 @@ def test_digest_updates_learn_state_after_trigger(monkeypatch, tmp_path):
     state = _read_learn_state(home=tmp_path)
     assert state["last_learn_correction_count"] == 81
     assert state["other_key"] == "preserved"
+
+
+def test_maybe_trigger_learn_librarian_fires_at_threshold(monkeypatch, tmp_path):
+    import subprocess
+    import kage.learn as learn_mod
+    from kage.learn import _write_learn_state, _read_learn_state
+    from kage.monitor import _maybe_trigger_learn
+    _write_learn_state({"last_learn_correction_count": 81, "last_librarian_learn_count": 0}, home=tmp_path)
+    monkeypatch.setattr(learn_mod, "_count_total_corrections", lambda home=None: 81)
+    monkeypatch.setattr(learn_mod, "_count_corrections", lambda name, home=None: 9)
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+    _maybe_trigger_learn(tmp_path)
+    assert calls == [["kage", "learn", "--librarian"]]
+    assert _read_learn_state(home=tmp_path)["last_librarian_learn_count"] == 9

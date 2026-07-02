@@ -127,26 +127,44 @@ def get_queue() -> list[dict]:
 
 def approve(proposal_id: str) -> dict:
     from kage import runtime
+    from kage import privacy as _privacy
     path = _proposals_dir() / (proposal_id + ".md")
     if not path.exists():
         raise ValueError(f"no such proposal: {proposal_id}")
     p = _read_proposal(path)
     if p.get("status") != "pending":
         raise RuntimeError(f"proposal {proposal_id} is {p.get('status')}, not pending")
+    for field in ("title", "start", "end"):
+        if not p.get(field):
+            raise ValueError(f"proposal {proposal_id} missing required field: {field}")
     if p.get("op") == "create":
-        ident = runtime.calendar.create(title=p["title"], start=p["start"], end=p["end"], calendar_name=(p.get("calendar") or None))
+        start_dt = _dt.datetime.fromisoformat(p["start"])
+        now = _dt.datetime.now().astimezone()
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.astimezone()
+        if start_dt < now:
+            raise ValueError(f"proposal {proposal_id} start is in the past: {p['start']}")
+        ts = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        try:
+            ident = runtime.calendar.create(title=p["title"], start=p["start"], end=p["end"], calendar_name=(p.get("calendar") or None))
+        except Exception:
+            _privacy._write_audit({"type": "calendar_write", "op": "create", "proposal_id": proposal_id, "status": "failed", "event_identifier": "", "success": False, "ts": ts})
+            raise
+        p["status"] = "executed"
+        p["event_identifier"] = ident
+        _write_proposal(p)
+        _privacy._write_audit({"type": "calendar_write", "op": "create", "proposal_id": proposal_id, "status": "executed", "event_identifier": ident, "success": True, "ts": ts})
     else:
         raise RuntimeError(f"unsupported op: {p.get('op')}")
-    p["status"] = "executed"
-    p["event_identifier"] = ident
-    _write_proposal(p)
     return p
 
 def reject(proposal_id: str) -> dict:
+    from kage import privacy as _privacy
     path = _proposals_dir() / (proposal_id + ".md")
     if not path.exists():
         raise ValueError(f"no such proposal: {proposal_id}")
     p = _read_proposal(path)
     p["status"] = "rejected"
     _write_proposal(p)
+    _privacy._write_audit({"type": "calendar_write", "op": p.get("op", "create"), "proposal_id": proposal_id, "status": "rejected", "event_identifier": "", "success": True, "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds")})
     return p

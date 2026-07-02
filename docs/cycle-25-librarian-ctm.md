@@ -1,6 +1,6 @@
 # Cycle 25 — Librarian Learning: learn from approvals (CTM, v0.25.0)
 
-*Status: PITCH v3 — CR#1 + CR#2 done (2026-07-01); all BLOCKERs resolved; 4 required
+*Status: SHIPPED v0.25.0 (`315500d`). Pitch v3, CR#1 + CR#2 done (2026-07-01); all BLOCKERs resolved; 4 required
 fixes from CR#2 folded in (marked ✎CR2). READY TO BUILD.*
 
 *Depends on: Cycle 24 (EPM, branch cycle-24-librarian-learning). Branches off post-Cycle-24

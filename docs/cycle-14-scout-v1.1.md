@@ -1,6 +1,6 @@
 # Scout v1.1 — project-aware analysis + Tier 1/2 depth
 
-*Status: PITCH v3 (cloud-authored, Sonnet 4.6; v1 2026-06-25, v2–v3 cold reviews same day). 7-step dev workflow applies.*
+*Status: SHIPPED v0.15.0 (`483d878`) — pitch v3 (cloud-authored, Sonnet 4.6; 2026-06-25).*
 *Branch: cycle-14-scout-v1.1 (not yet created). Base: main (v0.14.0).*
 
 > **v2 changelog (cold review #1, independent subagent, 2026-06-25):**

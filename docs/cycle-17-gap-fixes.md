@@ -1,6 +1,6 @@
 # Cycle 17 — Agent Gap Fixes (v0.18.0)
 
-*Status: PITCH v3 (2026-06-28). Gaps identified via post-Cycle-16 code review. v3 = 2 cold reviews complete (4 BLOCKERs + 10 WARNs resolved total).*
+*Status: SHIPPED (`0bb7849`, PR #23) — pitch v3 (2026-06-28). 2 cold reviews (4 BLOCKERs + 10 WARNs resolved).*
 *Detailed gap definitions live in [docs/gaps/gap-tracker.md](gaps/gap-tracker.md).*
 *Built per the 7-step dev workflow: plan cloud → write local (Qwen3) → review cloud → plan tests cloud → write tests local → review tests cloud → run tests local.*
 

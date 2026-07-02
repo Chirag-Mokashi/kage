@@ -1,6 +1,6 @@
 # Cycle 10 — Stateful Session Engine + Safe Model-Switching (v0.10)
 
-*Status: PITCH v3 (cloud-authored plan, Opus, 2026-06-13). Revised after two fresh-eyes reviews + design sessions with Chirag. To be built per the locked 7-step dev workflow: plan cloud → write local → review cloud → plan tests cloud → write tests local → review tests cloud → run tests local.*
+*Status: SHIPPED v0.10.0 (`8071e3e`) — pitch v3 (cloud-authored, Opus, 2026-06-13). Two fresh-eyes reviews + design sessions.*
 
 > **Roadmap position:** Cycle 8 (retrieval) and Cycle 9 (identity axis — the moat) are SHIPPED. Cycle 10 gives kage a **stateful session engine** — the step that turns it from a stateless forwarder into the "brain" — and lays the privacy foundation that reversible-redaction (Layer 3e v2) and auto-routing (Cycle 12+) both stand on. See [[project-mediator-vision]].
 

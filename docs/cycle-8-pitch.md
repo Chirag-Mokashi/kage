@@ -1,6 +1,6 @@
 # Cycle 8 — Retrieval Quality (v0.8)
 
-*Status: PITCH (cloud-authored plan). To be built next session per dev workflow (plan → write local → review cloud → test). Created 2026-06-10.*
+*Status: SHIPPED v0.8 (`37fd875`) — pitch (cloud-authored plan). Created 2026-06-10.*
 
 > **Resequencing (confirmed 2026-06-10):** retrieval quality = Cycle 8. The mediator roadmap in [[project-mediator-vision]] shifts down one → Cycle 9 chat+streaming · 10 MCP client · 11 auto-routing · 12 agent loop.
 

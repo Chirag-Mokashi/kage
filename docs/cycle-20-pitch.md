@@ -1,6 +1,6 @@
 # Cycle 20 — Monitor Cadence Split + Scout Deep Fetch (v0.21.0)
 
-*Status: PITCH v3 (2026-06-29, cloud-authored). Cold reviews: 2. Not yet ready to build.*
+*Status: SHIPPED v0.20.0 (`c1d7644`) — pitch v3 (2026-06-29). Cold reviews: 2.*
 *Built per the 7-step dev workflow: plan cloud → write local (Qwen3) → review cloud → plan tests cloud → write tests local → review tests cloud → run tests local.*
 
 > **v2 changelog (cold review #1):**

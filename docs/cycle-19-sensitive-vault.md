@@ -1,7 +1,7 @@
 # Cycle 19 — Sensitive Vault (P01)
 
 *v3 — 2026-06-29 (post cold review #2 — 2 new BLOCKERs fixed)*
-*Status: PITCH — 2 cold reviews complete, ready to build*
+*Status: SHIPPED v0.19.0 (`f52e2e9`) — 2 cold reviews complete*
 
 ---
 

@@ -1,6 +1,6 @@
 # Cycle 18 — Multi-Vendor Router (v0.19.0)
 
-*Status: PITCH v3 (2026-06-28, cloud-authored). 2 cold reviews complete (5+3 BLOCKERs + 4+4 WARNs resolved across both passes). BUILD READY.*
+*Status: SHIPPED v0.18.0 (`47bd2ba`) — pitch v3 (2026-06-28). 2 cold reviews (5+3 BLOCKERs + 4+4 WARNs resolved).*
 *Built per the 7-step dev workflow: plan cloud → write local (Qwen3) → review cloud → plan tests cloud → write tests local → review tests cloud → run tests local.*
 
 ---

@@ -1,6 +1,6 @@
 # Cycle 14 — Scout: kage's first proactive agent (ADK, v0.14.0)
 
-*Status: PITCH v4 (cloud-authored plan, Opus 4.8; v1–v3 2026-06-21, v4 Workflow-migration 2026-06-24). Built per the 7-step dev workflow: plan cloud → write local (Qwen3) → review cloud → plan tests cloud → write tests local → review tests cloud → run tests local.*
+*Status: SHIPPED v0.14.0 (`55150e7`) — pitch v4 (cloud-authored, Opus 4.8; 2026-06-21..24).*
 
 *Supersedes the prior `_call_cloud`-loop framing in `Context/kage-scout-brainstorm-2026-06-16.md`. The 20 brainstorm sections still hold; this pitch re-expresses them in ADK and locks two scope changes (see §Decisions changed at the Opus gate).*
 

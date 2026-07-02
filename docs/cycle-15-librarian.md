@@ -1,6 +1,6 @@
 # Cycle 15 — Librarian: kage's sole memory writer (ADK LlmAgent, v0.16.0)
 
-*Status: PITCH v4 (v3 + Step 0 fix 2026-06-26: `google.adk.sessions.types` → `google.genai.types`; verified against google-adk 2.3.0 on dev machine). Built per the 7-step dev workflow: plan cloud → write local (Qwen3) → review cloud → plan tests cloud → write tests local → review tests cloud → run tests local.*
+*Status: SHIPPED v0.16.0 (`c4aeca4`) — pitch v4 (v3 + Step 0 ADK import fix, verified vs google-adk 2.3.0).*
 
 *Brainstorm source: 25-section brainstorm in memory (`project_librarian_brainstorm.md`). All decisions pre-locked; this pitch expresses them as an executable build plan.*
 

@@ -1,6 +1,6 @@
 # Cycle 2 Pitch — kage v0.2 (the brain + real data)
 
-> **Status:** PITCH — gate to building. **Appetite: ~1 cycle.** Fixed time; scope flexes.
+> **Status:** SHIPPED v0.2 (`1f35365`). Original pitch — appetite ~1 cycle.
 > *Date: 2026-06-05.* Companion: [cycle-1-pitch.md](cycle-1-pitch.md) (shipped v0.1) · [blueprint.md](blueprint.md).
 
 ---

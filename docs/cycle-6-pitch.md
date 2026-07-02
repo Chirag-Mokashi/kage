@@ -1,7 +1,7 @@
 # Cycle 6 Pitch — MCP Server Out (v0.6)
 
 *Written: 2026-06-09*
-*Status: DRAFT — pending Chirag approval.*
+*Status: SHIPPED v0.6 (`acf2e48`) — (was draft pending approval).*
 
 ---
 

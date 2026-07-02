@@ -1,6 +1,6 @@
 # Cycle 10.5 — Active Context
 
-*Status: PITCH (cloud-authored plan, Opus). Cold-reviewed once by an independent no-context agent; the three critical correctness findings are folded in. To be built per the locked 7-step dev workflow: plan cloud → write local (Qwen3) → review cloud → plan tests cloud → write tests local → review tests cloud → run tests local. Created 2026-06-15.*
+*Status: SHIPPED v0.10.1 (`0c6895f`) — pitch (cloud-authored, Opus). Cold-reviewed once; three critical findings folded in. Created 2026-06-15.*
 
 *Scope was deliberately cut: this cycle implements **active context only**. The Layer 3a signal-chain abstraction (pluggable `Signal` interface, calendar/cwd stubs) is explicitly NOT built here — pre-building it changes the objective. The resolver is a plain function; a future signal is just another branch in it.*
 

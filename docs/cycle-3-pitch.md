@@ -1,6 +1,6 @@
 # Cycle 3 Pitch — kage v0.3 (hybrid retrieval)
 
-> **Status:** LOCKED PLAN — reviewed twice by independent agents. Ready to implement.
+> **Status:** SHIPPED v0.3 (`0981114`). Locked plan — reviewed twice by independent agents.
 > *Date: 2026-06-06.* Companion: [cycle-2-pitch.md](cycle-2-pitch.md) (shipped v0.2) · [blueprint.md](blueprint.md).
 
 ---

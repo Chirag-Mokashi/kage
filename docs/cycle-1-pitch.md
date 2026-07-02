@@ -1,6 +1,6 @@
 # Cycle 1 Pitch — kage v0.1 (the thin slice)
 
-> **Status:** PITCH — the gate to Stage 1. Approve → start building.
+> **Status:** SHIPPED v0.1 (`901f4dd`). Original pitch — the gate to Stage 1.
 > *Date: 2026-06-04 (Session 14).* **Appetite: ~1 cycle (≈1 month).** Fixed time; scope flexes.
 > Companion: [blueprint.md](blueprint.md) (the full roadmap this grows into).
 

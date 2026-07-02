@@ -352,6 +352,43 @@ def _gate_text(content: str, cfg: dict) -> str:
     return sanitized
 
 
+def _retrieve_ctm(
+    _content_preview: str,
+    cfg: dict,
+    home: pathlib.Path,
+    max_examples: int = 3,
+) -> list[str]:
+    """Return up to max_examples recent CTM precedent strings, PII-gated for cloud.
+    ponytail: recency-based retrieval — O(1) DB query, no Ollama calls.
+    Ceiling: accuracy degrades when CTM store grows large and recency != relevance.
+    Upgrade path v2: FTS5 BM25 ranking by content_preview words.
+    Upgrade path v3: Qwen3 LLM-check gate capped at 5s wall-clock."""
+    try:
+        db_path = home / "indexes" / "kage.db"
+        conn = sqlite3.connect(str(db_path))
+        try:
+            rows = conn.execute(
+                "SELECT id, content_path FROM memories"
+                " WHERE project = 'kage-ctm-librarian'"
+                " ORDER BY created_at DESC LIMIT ?",
+                (max_examples,),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        results: list[str] = []
+        for _note_id, rel_path in rows:
+            try:
+                ctm_text = (home / rel_path).read_text()
+                ctm_text = _gate_text(ctm_text, cfg)  # PII pass before cloud
+                results.append(ctm_text.strip())
+            except OSError:
+                continue
+        return results
+    except Exception:
+        return []
+
+
 def distill_and_judge(content: str, source: str) -> dict:
     """3e-gate content, retrieve dedup candidates, call cloud, return structured judgment.
     Returns a dict with keys: dedup, contradiction, quality, reason, note, staleness.
@@ -385,10 +422,35 @@ def distill_and_judge(content: str, source: str) -> dict:
     user_msg = f"source: {source}{candidate_block}\n\ncontent:\n{sanitized}"
     messages = [{"role": "user", "content": user_msg}]
 
-    # Step D — cloud dispatch
+    # Step C2 — CTM precedent injection (recency-based, before EPM prepend)
+    ctm_examples: list[str] = []
+    if cfg.get("librarian", {}).get("learning", {}).get("ctm_enabled", True):
+        try:
+            ctm_examples = _retrieve_ctm(
+                content[:400],
+                cfg,
+                pathlib.Path(runtime.config.home),
+                max_examples=cfg.get("librarian", {}).get("learning", {}).get("ctm_max_examples", 3),
+            )
+        except Exception:
+            pass
+
+    # Step D — cloud dispatch (EPM then CTM prepend; CTM ends up topmost)
     provider = cfg.get("librarian", {}).get("cloud_provider", cfg.get("cloud_provider", "claude"))
+    system = _DISTILL_SYSTEM
+    if cfg.get("librarian", {}).get("learning", {}).get("epm_enabled", True):
+        try:
+            from kage.learn import load_learned_prompt
+            _learned = load_learned_prompt("librarian", home=pathlib.Path(runtime.config.home))
+            if _learned:
+                system = f"[kage learned librarian rules]\n{_learned}\n\n{_DISTILL_SYSTEM}"
+        except Exception:
+            pass
+    if ctm_examples:
+        formatted = "\n".join(f"- {ex}" for ex in ctm_examples)
+        system = f"[kage CTM precedents]\n{formatted}\n\n{system}"
     try:
-        raw = runtime.cloud.complete(provider, _DISTILL_SYSTEM, messages, cfg)
+        raw = runtime.cloud.complete(provider, system, messages, cfg)
     except Exception as exc:
         return {
             "quality": "HOLD", "reason": f"cloud error: {exc}",
@@ -471,6 +533,70 @@ def request_approval(staging_id: str | None, action: str, reason: str,
     finally:
         conn.close()
     return approval_id
+
+
+def _emit_ctm_note(approval_id: str, home: pathlib.Path) -> None:
+    """Write a CTM precedent note for a successful Librarian approval.
+    Self-contained: single connection, all SELECTs in one JOIN."""
+    # Single connection — aq.reason is in the original CREATE TABLE, not a migration.
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT aq.action, aq.note_json, aq.reason, sq.source "
+            "FROM approval_queue aq "
+            "LEFT JOIN staging_queue sq ON sq.id = aq.staging_id "
+            "WHERE aq.id = ?",
+            (approval_id,),
+        ).fetchone()
+        if not row:
+            return
+        action = row[0] or "promote"
+        try:
+            note_meta = json.loads(row[1]) if row[1] else {}
+        except json.JSONDecodeError:
+            note_meta = {}
+        title = note_meta.get("title", "")
+        reason = row[2] or ""
+        source = row[3] or ""
+
+        ctm_body = (
+            f"CTM log — Librarian approval: {title}. "
+            f"Source: {source}. Action: {action}. Reason: {reason or 'approved'}."
+        )
+        note_id = str(uuid.uuid4())
+        rel_path = f"memory/{note_id}.md"
+        ts = datetime.now().astimezone().isoformat(timespec="seconds")
+
+        conn.execute(
+            "INSERT INTO memories"
+            " (id, content_path, project, created_at, local_only, needs_embed, state)"
+            " VALUES (?, ?, ?, ?, 0, 0, ?)",
+            # needs_embed=0 — CTM notes are short metadata, not for ChromaDB.
+            (note_id, rel_path, "kage-ctm-librarian", ts, "baseline"),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO memory_identities(mem_id, identity) VALUES (?, ?)",
+            (note_id, "personal"),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO memory_projects(mem_id, project) VALUES (?, ?)",
+            (note_id, "kage-ctm-librarian"),
+        )
+        conn.execute(
+            "INSERT INTO memory_fts (id, body) VALUES (?, ?)",
+            (note_id, ctm_body),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    full_path = home / rel_path
+    full_path.parent.mkdir(parents=True, exist_ok=True)
+    full_path.write_text(
+        f"---\nid: {note_id}\nproject: kage-ctm-librarian\n"
+        f"created_at: {ts}\nsource: librarian-approve\nidentities:\n"
+        f"  - personal\nstate: baseline\n---\n\n{ctm_body}\n"
+    )
 
 
 def write_note(approval_id: str) -> bool:
@@ -618,6 +744,12 @@ def write_note(approval_id: str) -> bool:
         conn.commit()
     finally:
         conn.close()
+
+    # CTM emit — best-effort; main write already succeeded
+    try:
+        _emit_ctm_note(approval_id, home=runtime.config.home)
+    except Exception:
+        pass
 
     # Step 8 — audit log
     _write_audit({"event": "librarian_write", "note_id": mem_id, "source": source, "ts": ts})
@@ -832,7 +964,70 @@ def reject_approval(approval_id: str, reason: str = "") -> bool:
                 "UPDATE staging_queue SET status='rejected', decision=?, reviewed_at=? WHERE id=?",
                 (reason or "rejected", ts, row[0]),
             )
+        try:
+            detail = conn.execute(
+                "SELECT aq.note_json, sq.source "
+                "FROM approval_queue aq "
+                "LEFT JOIN staging_queue sq ON sq.id = aq.staging_id "
+                "WHERE aq.id = ?",
+                (approval_id,),
+            ).fetchone()
+            note_meta = {}
+            if detail and detail[0]:
+                try:
+                    note_meta = json.loads(detail[0])
+                except json.JSONDecodeError:
+                    pass
+            title = note_meta.get("title", "") if note_meta else ""
+            source = detail[1] or "" if detail else ""
+            correction_body = (
+                f"Correction log — Librarian rejection: {title}. "
+                f"Source: {source}. Reason: {reason or 'no reason given'}."
+            )
+            note_id = str(uuid.uuid4())
+            rel_path = f"memory/{note_id}.md"
+            home_path = pathlib.Path(runtime.config.home)
+            full_path = home_path / rel_path
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            full_path.write_text(
+                f"---\n"
+                f"id: {note_id}\n"
+                f"project: kage-corrections-librarian\n"
+                f"created_at: {ts}\n"
+                f"source: librarian-reject\n"
+                f"identities:\n"
+                f"  - personal\n"
+                f"state: scoped\n"
+                f"---\n\n"
+                f"{correction_body}\n"
+            )
+            conn.execute(
+                "INSERT INTO memories (id, content_path, project, created_at, local_only, state)"
+                " VALUES (?, ?, ?, ?, 0, ?)",
+                (note_id, rel_path, "kage-corrections-librarian", ts, "scoped"),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_identities(mem_id, identity) VALUES (?, ?)",
+                (note_id, "personal"),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_projects(mem_id, project) VALUES (?, ?)",
+                (note_id, "kage-corrections-librarian"),
+            )
+            conn.execute(
+                "INSERT INTO memory_fts (id, body) VALUES (?, ?)",
+                (note_id, correction_body),
+            )
+        except Exception:
+            pass
         conn.commit()
+        try:
+            from kage.learn import _count_corrections
+            count = _count_corrections("kage-corrections-librarian", home=pathlib.Path(runtime.config.home))
+            if count >= 7:
+                print(f"[kage] {count} Librarian rejections logged — run `kage learn --librarian` to update rules.")
+        except Exception:
+            pass
         return True
     finally:
         conn.close()

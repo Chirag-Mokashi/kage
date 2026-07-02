@@ -9,6 +9,9 @@ from kage.learn import (
     _write_learn_state,
     run_learning_pass,
     save_learned_prompt,
+    _count_corrections,
+    _build_librarian_meta_prompt,
+    run_librarian_learning_pass,
 )
 
 
@@ -233,3 +236,60 @@ def test_save_learned_prompt_has_trace(tmp_path):
     save_learned_prompt("reasoning", "- Check logic", "long reasoning trace text", ["id1"], 3, home=tmp_path)
     data = json.loads((tmp_path / "learned_prompts.json").read_text())
     assert data["reasoning"]["versions"]["v1"]["trace"] == "long reasoning trace text"
+
+
+# ── Cycle 24 — _count_corrections / _build_librarian_meta_prompt / run_librarian_learning_pass ──
+
+def test_count_corrections_parameterized(tmp_path):
+    _make_db(tmp_path, [
+        ("lib-1", "kage-corrections-librarian", "Correction log — Librarian rejection: Bad PROMOTE. Source: scout. Reason: stale."),
+        ("lib-2", "kage-corrections-librarian", "Correction log — Librarian rejection: Wrong HOLD. Source: scout. Reason: new content."),
+        ("code-1", "other-project", "Correction log — Step 1: Wrong import."),
+    ])
+    assert _count_corrections("kage-corrections-librarian", home=tmp_path) == 2
+    assert _count_corrections("other-project", home=tmp_path) == 1
+
+
+def test_build_librarian_meta_prompt_structure():
+    corrections = ["Rejected PROMOTE for stale source", "Wrong HOLD on new content"]
+    result = _build_librarian_meta_prompt(corrections)
+    assert "--- CORRECTIONS ---" in result
+    assert "[1]" in result and "[2]" in result
+    assert "task_class" not in result
+    assert "PROMOTE" in result or "verdict" in result
+
+
+def test_run_librarian_learning_pass_no_db(tmp_path):
+    fake_cloud = lambda *a, **kw: "- rule one"
+    result = run_librarian_learning_pass("kage-corrections-librarian", fake_cloud, {}, home=tmp_path)
+    assert result == ("", "", [])
+
+
+def test_run_librarian_learning_pass_reads_correct_project(tmp_path):
+    _make_db(tmp_path, [
+        ("lib-1", "kage-corrections-librarian", "Correction log — Librarian rejection: Bad PROMOTE. Source: scout. Reason: stale."),
+        ("code-1", "kage-corrections", "Correction log — Step 1: Wrong import."),
+    ])
+    fake_cloud = lambda *a, **kw: "- rule from librarian corrections"
+    prompt, trace, ids = run_librarian_learning_pass("kage-corrections-librarian", fake_cloud, {}, home=tmp_path)
+    assert prompt.startswith("- rule from librarian corrections")
+    assert "lib-1" in ids
+    assert "code-1" not in ids
+
+
+def test_run_librarian_learning_pass_fts_wording_matches(tmp_path):
+    _make_db(tmp_path, [
+        ("lib-1", "kage-corrections-librarian", "Correction log — Librarian rejection: Bad dedup. Source: manual. Reason: already exists."),
+    ])
+    fake_cloud = lambda *a, **kw: "- no duplicates"
+    prompt, trace, ids = run_librarian_learning_pass("kage-corrections-librarian", fake_cloud, {}, home=tmp_path)
+    assert len(ids) == 1
+
+
+def test_run_librarian_learning_pass_empty_when_no_fts_match(tmp_path):
+    _make_db(tmp_path, [
+        ("lib-1", "kage-corrections-librarian", "this note has no matching tokens"),
+    ])
+    fake_cloud = lambda *a, **kw: "- rule"
+    result = run_librarian_learning_pass("kage-corrections-librarian", fake_cloud, {}, home=tmp_path)
+    assert result == ("", "", [])

@@ -4614,12 +4614,23 @@ class TestArmShellTransport:
         _mock_cfg.data = self._SHELL_CFG
         monkeypatch.setattr(runtime, "config", _mock_cfg)
         monkeypatch.setattr(kage_privacy, "_write_audit", lambda x: None)
-        mock_proc = mock.Mock()
-        mock_proc.stdout = "• Test event\n"
-        mock_proc.returncode = 0
-        monkeypatch.setattr(cli.subprocess, "run", lambda *a, **kw: mock_proc)
+        class _FakeProc:
+            def __init__(self, data: bytes):
+                self._chunks = [data, b""]
+                self._i = 0
+                self.stdout = self
+            async def read(self, _n: int) -> bytes:
+                chunk = self._chunks[self._i]
+                if self._i < len(self._chunks) - 1:
+                    self._i += 1
+                return chunk
+            async def wait(self): pass
+            def kill(self): pass
+        async def fake_exec(*args, **kw):
+            return _FakeProc("Test event\n".encode())
+        monkeypatch.setattr("kage.arms.asyncio.create_subprocess_exec", fake_exec)
         result = asyncio.run(cli._call_arm("calendar", "whats on my calendar", "personal"))
-        assert result == "• Test event"
+        assert result == "Test event"
 
     def test_call_arm_shell_empty_command_returns_none(self, monkeypatch):
         cfg = {"arms": {"calendar": {"enabled": True, "transport": "shell", "command": "", "identity": "personal", "permission": "read"}}}
@@ -4700,7 +4711,22 @@ def test_call_arm_shell_allows_osascript(tmp_path, monkeypatch):
     """S3: osascript (used by calendar/gmail arms) must not be blocked."""
     import asyncio
     from kage import arms
-    monkeypatch.setattr("kage.arms.subprocess.run", lambda *a, **k: type("R", (), {"stdout": "ok", "returncode": 0})())
+    monkeypatch.setattr("kage.arms._privacy._write_audit", lambda x: None)
+    class _FakeProc:
+        def __init__(self, data: bytes):
+            self._chunks = [data, b""]
+            self._i = 0
+            self.stdout = self
+        async def read(self, n: int) -> bytes:
+            chunk = self._chunks[self._i]
+            if self._i < len(self._chunks) - 1:
+                self._i += 1
+            return chunk
+        async def wait(self): pass
+        def kill(self): pass
+    async def fake_exec(*args, **kw):
+        return _FakeProc(b"ok")
+    monkeypatch.setattr("kage.arms.asyncio.create_subprocess_exec", fake_exec)
     arm_cfg = {"command": "osascript /tmp/test.scpt", "transport": "shell"}
     result = asyncio.run(arms._call_arm_shell("calendar", arm_cfg, "what's on today", "personal", 5.0))
     assert result == "ok"
@@ -4715,6 +4741,80 @@ def test_check_arm_health_blocks_interpreter(monkeypatch):
     monkeypatch.setattr(runtime, "config", _mock_cfg)
     result = asyncio.run(arms._check_arm_health("evil"))
     assert result is False
+
+
+def test_check_arm_health_prefers_health_command(monkeypatch):
+    _mock_cfg = mock.Mock()
+    _mock_cfg.data = {"arms": {"gmail": {
+        "transport": "shell",
+        "command": "osascript /tmp/mail.scpt",
+        "health_command": "pgrep -x Mail",
+    }}}
+    monkeypatch.setattr(runtime, "config", _mock_cfg)
+    captured = {}
+    def fake_run(args, **kw):
+        captured["args"] = args
+        m = mock.Mock()
+        m.returncode = 0
+        return m
+    monkeypatch.setattr("kage.arms.subprocess.run", fake_run)
+    result = asyncio.run(arms._check_arm_health("gmail"))
+    assert result is True
+    assert captured["args"] == ["pgrep", "-x", "Mail"]
+
+def test_check_arm_health_health_command_nonzero_returns_false(monkeypatch):
+    _mock_cfg = mock.Mock()
+    _mock_cfg.data = {"arms": {"gmail": {
+        "transport": "shell",
+        "command": "osascript /tmp/mail.scpt",
+        "health_command": "pgrep -x Mail",
+    }}}
+    monkeypatch.setattr(runtime, "config", _mock_cfg)
+    def fake_run(_args, **kw):
+        m = mock.Mock()
+        m.returncode = 1
+        return m
+    monkeypatch.setattr("kage.arms.subprocess.run", fake_run)
+    result = asyncio.run(arms._check_arm_health("gmail"))
+    assert result is False
+
+def test_check_arm_health_empty_health_command_falls_back_to_command(monkeypatch):
+    _mock_cfg = mock.Mock()
+    _mock_cfg.data = {"arms": {"calendar": {
+        "transport": "shell",
+        "command": "osascript /tmp/cal.scpt",
+        "health_command": "",
+    }}}
+    monkeypatch.setattr(runtime, "config", _mock_cfg)
+    captured = {}
+    def fake_run(args, **kw):
+        captured["args"] = args
+        m = mock.Mock()
+        m.returncode = 0
+        return m
+    monkeypatch.setattr("kage.arms.subprocess.run", fake_run)
+    result = asyncio.run(arms._check_arm_health("calendar"))
+    assert result is True
+    assert captured["args"] == ["osascript", "/tmp/cal.scpt"]
+
+def test_check_arm_health_health_command_interpreter_blocked(monkeypatch):
+    _mock_cfg = mock.Mock()
+    _mock_cfg.data = {"arms": {"bad": {
+        "transport": "shell",
+        "command": "osascript /tmp/safe.scpt",
+        "health_command": "python3 -c 'import os'",
+    }}}
+    monkeypatch.setattr(runtime, "config", _mock_cfg)
+    called = {"n": 0}
+    def fake_run(_args, **kw):
+        called["n"] += 1
+        m = mock.Mock()
+        m.returncode = 0
+        return m
+    monkeypatch.setattr("kage.arms.subprocess.run", fake_run)
+    result = asyncio.run(arms._check_arm_health("bad"))
+    assert result is False
+    assert called["n"] == 0
 
 
 # ── Egress golden tests (Slice 1g) ──────────────────────────────────────────

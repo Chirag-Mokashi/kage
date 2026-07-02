@@ -104,8 +104,28 @@ async def _call_arm_shell(
         if shlex.split(cmd)[0].rsplit("/", 1)[-1] in _SHELL_INTERPRETERS:
             _privacy._write_audit({'type': 'arm_call', 'arm': arm_name, 'tool': 'shell', 'identity': identity, 'ts': ts, 'success': False, 'blocked': 'interpreter'})
             return None
-        proc = subprocess.run(shlex.split(cmd), capture_output=True, text=True, timeout=timeout)
-        data = proc.stdout.strip() or None
+        proc = await asyncio.create_subprocess_exec(
+            *shlex.split(cmd),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        chunks: list[bytes] = []
+        assert proc.stdout is not None
+        try:
+            # ponytail: chunk-read so output already received survives a hang timeout.
+            # Ceiling: output must be fully written before timeout fires.
+            async with asyncio.timeout(timeout):
+                while True:
+                    chunk = await proc.stdout.read(4096)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+            await proc.wait()
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+        stdout = b"".join(chunks)
+        data = stdout.decode().strip() if stdout else None
         _privacy._write_audit({'type': 'arm_call', 'arm': arm_name, 'tool': 'shell', 'identity': identity, 'ts': ts, 'success': bool(data)})
         return data
     except Exception:
@@ -264,7 +284,7 @@ async def _call_internal_arm(
 async def _check_arm_health(arm_name: str) -> bool:
     arm = runtime.config.data.get('arms', {}).get(arm_name, {})
     if arm.get('transport') == 'shell':
-        cmd = arm.get('command', '')
+        cmd = arm.get('health_command') or arm.get('command', '')
         if not cmd:
             return False
         try:

@@ -14,7 +14,6 @@ import os
 
 from kage.redact import substitute
 from kage.pii import _PII_PATTERNS
-from datetime import datetime
 
 # redact._label() outputs for high-value secrets that must NEVER be allowlisted
 # (footgun guard). Enforced at `kage allow add`; the gate also uses it to never-queue these.
@@ -44,6 +43,12 @@ def save_allowlist(data: dict) -> None:
         json.dump(data, f, indent=2)
 
 def add_allow(label: str, value: str) -> None:
+    # guard: reject values whose detected PII type must never reach cloud
+    _, _test_map = substitute(value, _PII_PATTERNS)
+    for _ph in _test_map:
+        _prefix = _ph[1:-1].rsplit("_", 1)[0]
+        if _prefix in _UN_ALLOWLISTABLE:
+            raise ValueError(f"Cannot allowlist {_prefix} values — these are never safe to send to cloud.")
     data = load_allowlist()
     entry = {
         "id": uuid4().hex[:8],
@@ -97,6 +102,7 @@ def save_queue(entries: list[dict]) -> None:
         for entry in entries:
             f.write(json.dumps(entry) + "\n")
 
+# ponytail: O(n) queue scan per gate call; upgrade path: in-memory indexed set if queue grows past ~1000 entries
 def queue_values() -> set[str]:
     queue = load_queue()
     return {_normalize(entry.get("value", "")) for entry in queue}
@@ -132,11 +138,11 @@ def two_pass_gate(text: str, *, interactive: bool = False, source: str = "", exi
         value = mapping[ph]
         prefix = ph[1:-1].rsplit("_", 1)[0]
         norm = _normalize(value)
-        if norm in allow:
+        if prefix in _UN_ALLOWLISTABLE:
+            continue
+        elif norm in allow:
             text = text.replace(ph, value)
             del mapping[ph]
-        elif prefix in _UN_ALLOWLISTABLE:
-            continue
         elif norm in queued:
             continue
         else:

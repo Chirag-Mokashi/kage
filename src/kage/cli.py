@@ -2035,7 +2035,11 @@ def allow_add(
 ) -> None:
     """Add a value to the allowlist (never redacted by the gate)."""
     from kage import gate
-    gate.add_allow(label, value)
+    try:
+        gate.add_allow(label, value)
+    except ValueError as e:
+        typer.echo(f"[kage] error: {e}", err=True)
+        raise typer.Exit(1)
     typer.echo(f"Allowlisted: {label}  →  {value}")
 
 

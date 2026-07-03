@@ -5522,6 +5522,30 @@ def test_allow_remove_missing(monkeypatch, tmp_path):
     assert r.exit_code == 1
 
 
+def test_allow_add_rejects_unallowlistable(monkeypatch, tmp_path):
+    # guard: kage allow add must reject _UN_ALLOWLISTABLE types (e.g. AWS key)
+    _save_home(monkeypatch, tmp_path)
+    r = CliRunner().invoke(cli.app, ["allow", "add", "my-aws", "AKIAIOSFODNN7EXAMPLE"])
+    assert r.exit_code == 1
+    assert "AWS_ACCESS_KEY" in (r.output + (r.stderr or ""))
+
+
+def test_two_pass_gate_coherence_same_value(monkeypatch, tmp_path):
+    # same email in two gate calls with shared existing_mapping must get the same placeholder
+    from kage import gate, runtime
+    from kage.config import Config
+    monkeypatch.setattr(runtime, "config", Config(tmp_path))
+    text_a = "contact me at foo@synthetic.test please"
+    text_b = "also reach foo@synthetic.test via email"
+    masked_a, mapping = gate.two_pass_gate(text_a, source="test")
+    masked_b, mapping = gate.two_pass_gate(text_b, source="test", existing_mapping=mapping)
+    import re as _re
+    ph_a = _re.findall(r"\[EMAIL_\d+\]", masked_a)
+    ph_b = _re.findall(r"\[EMAIL_\d+\]", masked_b)
+    assert ph_a and ph_b, "email not masked in one of the texts"
+    assert ph_a[0] == ph_b[0], f"coherence broken: same email got {ph_a[0]} vs {ph_b[0]}"
+
+
 def test_privacy_review_empty_queue(monkeypatch, tmp_path):
     _save_home(monkeypatch, tmp_path)
     r = CliRunner().invoke(cli.app, ["privacy", "review"])

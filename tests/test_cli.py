@@ -5222,6 +5222,22 @@ def test_gate_text_delegates_to_substitute():
     assert "unique-pii-test@example.com" not in result
 
 
+def test_librarian_gate_text_no_vault_label_leak(tmp_path, monkeypatch):
+    # B3 regression: librarian._gate_text must not emit [SENSITIVE:<label>] to cloud.
+    from kage import runtime
+    from kage.config import Config
+    import json
+    monkeypatch.setattr(runtime, "config", Config(tmp_path))
+    (tmp_path / "sensitive.json").write_text(json.dumps({
+        "patterns": [{"id": "aa1bb2cc", "label": "home-addr", "pattern": r"Koramangala", "added_at": "2026-06-29"}]
+    }))
+    from kage.librarian import _gate_text
+    result = _gate_text("I live in Koramangala", cfg={})
+    assert "Koramangala" not in result
+    assert "[REDACTED_1]" in result
+    assert "home-addr" not in result and "SENSITIVE" not in result
+
+
 # ── Cycle 22 — kage learn command + _classify unconditional + injection ───────
 
 def test_ask_classifies_without_auto(monkeypatch, tmp_path):

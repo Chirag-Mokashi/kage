@@ -330,25 +330,13 @@ Respond with raw JSON only. No prose, no code fences."""
 
 def _gate_text(content: str, cfg: dict) -> str:
     """Strip PII from raw content before cloud dispatch. Unconditional — no bypass."""
-    from kage.pii import _PII_PATTERNS  # inline to avoid circular import
-    extra = cfg.get("pii_patterns", [])
-    all_patterns = _PII_PATTERNS + extra
-    sanitized = content
-    for entry in all_patterns:
+    from kage import gate
+    sanitized, _ = gate.two_pass_gate(content, source="librarian")
+    for entry in cfg.get("pii_patterns", []):
         try:
             sanitized = re.sub(entry["pattern"], "[REDACTED_PII]", sanitized)
         except re.error:
-            pass  # skip malformed user-configured patterns
-    # vault patterns: separate pass so they emit [SENSITIVE:<label>], not [REDACTED_PII]
-    try:
-        from kage.sensitive import load_vault
-        for p in load_vault().get("patterns", []):
-            try:
-                sanitized = re.sub(p["pattern"], f"[SENSITIVE:{p['label']}]", sanitized, flags=re.IGNORECASE)
-            except re.error:
-                pass
-    except Exception:
-        pass
+            pass
     return sanitized
 
 

@@ -1674,25 +1674,16 @@ def chat(
         context = "\n\n".join(context_parts)
         _req_map: dict[str, str] = {}
         if destination != "ollama":
-            from kage.redact import substitute as _sub, restore as _rst
-            from kage.pii import _PII_PATTERNS
-            try:
-                from kage.sensitive import load_vault as _lv2
-                _vp = [{"name": f"SENSITIVE_{p['label']}", "pattern": p["pattern"]}
-                       for p in _lv2().get("patterns", [])]
-            except Exception:
-                _vp = []
-            _all_pats = _PII_PATTERNS + _vp
-            # per-request mapping: mask condensed query + history + context through one shared
-            # map so the same real value gets one placeholder within this request; discarded
-            # after restore (never accumulated across turns).
-            condensed, _req_map = _sub(condensed, _all_pats, existing_mapping=_req_map)
+            from kage import gate
+            # per-request mapping: one shared map so the same real value gets one placeholder;
+            # discarded after restore (never accumulated across turns).
+            condensed, _req_map = gate.two_pass_gate(condensed, source="chat", existing_mapping=_req_map)
             masked_history: list[dict] = []
             for _t in history_for_answer:
-                _mc, _req_map = _sub(_t["content"], _all_pats, existing_mapping=_req_map)
+                _mc, _req_map = gate.two_pass_gate(_t["content"], source="chat", existing_mapping=_req_map)
                 masked_history.append({**_t, "content": _mc})
             history_for_answer = masked_history
-            context, _req_map = _sub(context, _all_pats, existing_mapping=_req_map)
+            context, _req_map = gate.two_pass_gate(context, source="chat", existing_mapping=_req_map)
         try:
             answer = next(iter(_answer(condensed, history_for_answer, context, destination, cfg)))
         except OllamaUnavailable as e:

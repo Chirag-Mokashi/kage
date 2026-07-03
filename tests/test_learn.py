@@ -293,3 +293,18 @@ def test_run_librarian_learning_pass_empty_when_no_fts_match(tmp_path):
     fake_cloud = lambda *a, **kw: "- rule"
     result = run_librarian_learning_pass("kage-corrections-librarian", fake_cloud, {}, home=tmp_path)
     assert result == ("", "", [])
+
+
+def test_run_learning_pass_gates_pii_before_cloud(tmp_path, monkeypatch):
+    from kage import runtime
+    from kage.config import Config
+    monkeypatch.setattr(runtime, "config", Config(tmp_path))
+    _make_db(tmp_path, [("n1", "kage-corrections", "correction log step 1: wrong def signature; leaked secret@synthetic.test in the note")])
+    cfg = {"providers": {"p": {}}}
+    captured = {}
+    def fake_cloud(provider, system, user_msg, cfg_arg):
+        captured["user_msg"] = user_msg
+        return "- rule"
+    run_learning_pass("code", fake_cloud, cfg, home=tmp_path)
+    assert "secret@synthetic.test" not in captured["user_msg"]   # B4: PII gated before cloud
+    assert "[EMAIL_1]" in captured["user_msg"]                    # redacted to anonymous placeholder

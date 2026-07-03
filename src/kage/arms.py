@@ -215,6 +215,9 @@ async def _call_arm(arm_name: str, question: str, identity: str, timeout: float 
     handler = _TRANSPORT_HANDLERS.get(transport)
     if handler is None:
         return None
+    if transport == 'sse':
+        from kage import gate  # B2: sse sends query off-machine; mask before dispatch
+        question = gate.two_pass_gate(question, source='sse-arm')[0]
     return await handler(arm_name, arm, question, identity, timeout)
 
 

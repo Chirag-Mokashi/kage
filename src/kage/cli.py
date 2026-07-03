@@ -60,6 +60,10 @@ _sensitive_app = typer.Typer(help="Sensitive vault commands.")
 app.add_typer(_sensitive_app, name="sensitive")
 _calendar_app = typer.Typer(help="Calendar write commands.")
 app.add_typer(_calendar_app, name="calendar")
+_allow_app = typer.Typer(help="Allowlist commands.")
+app.add_typer(_allow_app, name="allow")
+_privacy_app = typer.Typer(help="Privacy gate commands.")
+app.add_typer(_privacy_app, name="privacy")
 
 # ── Layout ────────────────────────────────────────────────────────────────
 KAGE_HOME = Path(os.environ.get("KAGE_HOME") or Path.home() / ".kage")  # override for relocation/tests
@@ -1083,19 +1087,13 @@ def ask(
     arm_context = "\n\n".join(arm_results) if arm_results else ""
 
     sub_mapping: dict[str, str] = {}
+    masked_question = question
     if cloud:
-        from kage.redact import substitute as _substitute
-        from kage.pii import _PII_PATTERNS
-        try:
-            from kage.sensitive import load_vault as _lv
-            _vault_pats = [{"name": f"SENSITIVE_{p['label']}", "pattern": p["pattern"]}
-                           for p in _lv().get("patterns", [])]
-        except Exception:
-            _vault_pats = []
-        _all_pats = _PII_PATTERNS + _vault_pats
-        context, sub_mapping = _substitute(context, _all_pats)
+        from kage import gate
+        context, sub_mapping = gate.two_pass_gate(context, source="ask", existing_mapping=sub_mapping)
         if arm_context:
-            arm_context, sub_mapping = _substitute(arm_context, _all_pats, existing_mapping=sub_mapping)
+            arm_context, sub_mapping = gate.two_pass_gate(arm_context, source="ask", existing_mapping=sub_mapping)
+        masked_question, sub_mapping = gate.two_pass_gate(question, source="ask", existing_mapping=sub_mapping)
         if sub_mapping:
             _sub_types = sorted(set(k.rsplit("_", 1)[0].lstrip("[") for k in sub_mapping))
             typer.echo(f"[kage] {len(sub_mapping)} PII span(s) substituted before dispatch "
@@ -1125,7 +1123,7 @@ def ask(
 
     answer = ""
     if cloud:
-        user_msg = question if arm_context else f"CONTEXT:\n{effective_context}\n\nQUESTION: {question}"
+        user_msg = masked_question if arm_context else f"CONTEXT:\n{effective_context}\n\nQUESTION: {masked_question}"
         if auto and candidates:
             for pname in candidates:
                 _pcfg = {**DEFAULT_PROVIDERS.get(pname, {}), **cfg.get("providers", {}).get(pname, {})}
@@ -1680,25 +1678,16 @@ def chat(
         context = "\n\n".join(context_parts)
         _req_map: dict[str, str] = {}
         if destination != "ollama":
-            from kage.redact import substitute as _sub, restore as _rst
-            from kage.pii import _PII_PATTERNS
-            try:
-                from kage.sensitive import load_vault as _lv2
-                _vp = [{"name": f"SENSITIVE_{p['label']}", "pattern": p["pattern"]}
-                       for p in _lv2().get("patterns", [])]
-            except Exception:
-                _vp = []
-            _all_pats = _PII_PATTERNS + _vp
-            # per-request mapping: mask condensed query + history + context through one shared
-            # map so the same real value gets one placeholder within this request; discarded
-            # after restore (never accumulated across turns).
-            condensed, _req_map = _sub(condensed, _all_pats, existing_mapping=_req_map)
+            from kage import gate
+            # per-request mapping: one shared map so the same real value gets one placeholder;
+            # discarded after restore (never accumulated across turns).
+            condensed, _req_map = gate.two_pass_gate(condensed, source="chat", existing_mapping=_req_map)
             masked_history: list[dict] = []
             for _t in history_for_answer:
-                _mc, _req_map = _sub(_t["content"], _all_pats, existing_mapping=_req_map)
+                _mc, _req_map = gate.two_pass_gate(_t["content"], source="chat", existing_mapping=_req_map)
                 masked_history.append({**_t, "content": _mc})
             history_for_answer = masked_history
-            context, _req_map = _sub(context, _all_pats, existing_mapping=_req_map)
+            context, _req_map = gate.two_pass_gate(context, source="chat", existing_mapping=_req_map)
         try:
             answer = next(iter(_answer(condensed, history_for_answer, context, destination, cfg)))
         except OllamaUnavailable as e:
@@ -1995,10 +1984,6 @@ def sensitive_list() -> None:
     else:
         for p in patterns:
             typer.echo(f"[{p['id']}]  {p['label']}  →  {p['pattern']}")
-    typer.echo(
-        "\nNote: vault patterns are enforced in scout and librarian paths only."
-        " `kage ask` and `kage chat` do not apply vault patterns in this release."
-    )
 
 
 @_sensitive_app.command("add")
@@ -2027,6 +2012,87 @@ def sensitive_scan() -> None:
             typer.echo(f"{item['path']}")
             for h in item["hits"]:
                 typer.echo(f"  · {h}")
+
+
+# ── Cycle 27 — allowlist + privacy review commands ─────────────────────────
+
+@_allow_app.command("list")
+def allow_list() -> None:
+    """List allowlisted values (never redacted by the privacy gate)."""
+    from kage import gate
+    entries = gate.load_allowlist().get("values", [])
+    if not entries:
+        typer.echo("Allowlist is empty. Use: kage allow add <label> <value>")
+    else:
+        for e in entries:
+            typer.echo(f"[{e['id']}]  {e['label']}  →  {e['value']}  (added {e['added_at']})")
+
+
+@_allow_app.command("add")
+def allow_add(
+    label: str = typer.Argument(..., help="Short label for this value"),
+    value: str = typer.Argument(..., help="Exact value to allowlist (never redacted)"),
+) -> None:
+    """Add a value to the allowlist (never redacted by the gate)."""
+    from kage import gate
+    try:
+        gate.add_allow(label, value)
+    except ValueError as e:
+        typer.echo(f"[kage] error: {e}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"Allowlisted: {label}  →  {value}")
+
+
+@_allow_app.command("remove")
+def allow_remove(
+    entry_id: str = typer.Argument(..., help="ID shown by 'kage allow list'"),
+) -> None:
+    """Remove an entry from the allowlist by ID."""
+    from kage import gate
+    if gate.remove_allow(entry_id):
+        typer.echo(f"Removed entry {entry_id}.")
+    else:
+        typer.echo(f"No entry with ID {entry_id} found.", err=True)
+        raise typer.Exit(code=1)
+
+
+@_privacy_app.command("review")
+def privacy_review() -> None:
+    """Review pending privacy queue items: [v]ault / [a]llow / [s]kip."""
+    import re as _re
+    from kage import gate
+    from kage.sensitive import add_pattern
+    entries = gate.load_queue()
+    pending = [e for e in entries if e.get("status") == "pending"]
+    if not pending:
+        typer.echo("No pending items in the privacy queue.")
+        return
+    typer.echo(f"{len(pending)} item(s) pending review.\n")
+    changed = False
+    for entry in entries:
+        if entry.get("status") != "pending":
+            continue
+        typer.echo(f"  Value  : {entry['value']}")
+        typer.echo(f"  Type   : {entry['type']}")
+        typer.echo(f"  Source : {entry.get('source', '?')}")
+        typer.echo(f"  Seen   : {entry.get('ts', '?')}")
+        choice = typer.prompt("[v]ault / [a]llow / [s]kip", default="s").strip().lower()
+        if choice == "v":
+            lbl = f"review-{entry['type'].lower()}"
+            add_pattern(lbl, _re.escape(entry["value"]))
+            entry["status"] = "vaulted"
+            changed = True
+            typer.echo(f"  → Added to vault as '{lbl}'\n")
+        elif choice == "a":
+            gate.add_allow(f"review-{entry['type'].lower()}", entry["value"])
+            entry["status"] = "allowed"
+            changed = True
+            typer.echo(f"  → Added to allowlist\n")
+        else:
+            typer.echo(f"  → Skipped\n")
+    if changed:
+        gate.save_queue(entries)
+        typer.echo("Queue updated.")
 
 
 @_calendar_app.command("propose")

@@ -47,9 +47,13 @@ def substitute(
         lbl = _label(entry["name"])
 
         def _replacer(m: re.Match, _lbl: str = lbl) -> str:
+            value = m.group(0)
+            for ph, mapped_value in mapping.items():
+                if mapped_value == value:
+                    return ph
             counters[_lbl] = counters.get(_lbl, 0) + 1
             placeholder = f"[{_lbl}_{counters[_lbl]}]"
-            mapping[placeholder] = m.group(0)
+            mapping[placeholder] = value
             return placeholder
 
         text = compiled.sub(_replacer, text)

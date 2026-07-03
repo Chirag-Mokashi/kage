@@ -2019,6 +2019,20 @@ def test_ask_cloud_error_exits_nonzero(monkeypatch, tmp_path):
     assert r.exit_code == 1
 
 
+def test_ask_cloud_masks_question_pii_before_dispatch(monkeypatch, tmp_path):
+    # B1 regression: question text must be masked before it reaches cloud.
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    captured = {}
+    def fake_cloud(_name, _system, user_msg, _cfg):
+        captured["user_msg"] = user_msg
+        return "ok"
+    monkeypatch.setattr(cli, "_call_cloud", fake_cloud)
+    CliRunner().invoke(cli.app, ["ask", "contact secret@synthetic.test", "--cloud"])
+    assert "secret@synthetic.test" not in captured.get("user_msg", "")
+    assert "[EMAIL_1]" in captured.get("user_msg", "")
+
+
 def test_ask_cloud_status_line_shows_model_and_provider(monkeypatch, tmp_path):
     _save_home(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
@@ -5058,6 +5072,25 @@ def test_browser_arm_snapshot_error_returns_none(monkeypatch):
     assert calls[1][0] == 'browser_snapshot'
 
 
+def test_call_arm_sse_masks_question_before_dispatch(tmp_path, monkeypatch):
+    # B2 regression: sse transport sends query off-machine; must be gated first.
+    import json as _json
+    from kage import runtime, arms
+    from kage.config import Config
+    monkeypatch.setattr(runtime, 'config', Config(tmp_path))
+    (tmp_path / "config.json").write_text(_json.dumps({
+        'arms': {'remote-arm': {'transport': 'sse'}}
+    }))
+    captured = {}
+    async def fake_handler(_arm_name, _arm_cfg, question, _identity, _timeout):
+        captured['question'] = question
+        return 'ok'
+    monkeypatch.setattr(arms, '_TRANSPORT_HANDLERS', {'sse': fake_handler})
+    asyncio.run(arms._call_arm('remote-arm', 'contact leakme@synthetic.test please', 'personal'))
+    assert 'leakme@synthetic.test' not in captured.get('question', '')
+    assert '[EMAIL_1]' in captured.get('question', '')
+
+
 # ── --auto flag (Cycle 18) ────────────────────────────────────────────────────
 
 def test_ask_auto_routes_code_to_claude_opus(monkeypatch, tmp_path):
@@ -5206,6 +5239,22 @@ def test_gate_text_delegates_to_substitute():
     result = _gate_text("my email is unique-pii-test@example.com")
     assert "[EMAIL_1]" in result
     assert "unique-pii-test@example.com" not in result
+
+
+def test_librarian_gate_text_no_vault_label_leak(tmp_path, monkeypatch):
+    # B3 regression: librarian._gate_text must not emit [SENSITIVE:<label>] to cloud.
+    from kage import runtime
+    from kage.config import Config
+    import json
+    monkeypatch.setattr(runtime, "config", Config(tmp_path))
+    (tmp_path / "sensitive.json").write_text(json.dumps({
+        "patterns": [{"id": "aa1bb2cc", "label": "home-addr", "pattern": r"Koramangala", "added_at": "2026-06-29"}]
+    }))
+    from kage.librarian import _gate_text
+    result = _gate_text("I live in Koramangala", cfg={})
+    assert "Koramangala" not in result
+    assert "[REDACTED_1]" in result
+    assert "home-addr" not in result and "SENSITIVE" not in result
 
 
 # ── Cycle 22 — kage learn command + _classify unconditional + injection ───────
@@ -5432,3 +5481,119 @@ def test_disclosure_gate_withholds_ctm_librarian(monkeypatch, tmp_path):
     assert allowed == []
     assert len(withheld) == 1
     assert withheld[0]["reason"] == "local_only:always_local:kage-ctm-librarian"
+
+
+# ── Cycle 27 — allow + privacy review CLI ────────────────────────────────────
+
+def test_allow_list_empty(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    r = CliRunner().invoke(cli.app, ["allow", "list"])
+    assert r.exit_code == 0
+    assert "empty" in r.output.lower()
+
+
+def test_allow_add_and_list(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    r = CliRunner().invoke(cli.app, ["allow", "add", "my-email", "hello@example.com"])
+    assert r.exit_code == 0
+    assert "Allowlisted" in r.output
+    r2 = CliRunner().invoke(cli.app, ["allow", "list"])
+    assert "hello@example.com" in r2.output
+    assert "my-email" in r2.output
+
+
+def test_allow_remove_existing(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    from kage import gate, runtime
+    from kage.config import Config
+    monkeypatch.setattr(runtime, "config", Config(h))
+    gate.add_allow("my-label", "remove-me@example.com")
+    data = gate.load_allowlist()
+    entry_id = data["values"][0]["id"]
+    r = CliRunner().invoke(cli.app, ["allow", "remove", entry_id])
+    assert r.exit_code == 0
+    assert "Removed" in r.output
+    assert gate.load_allowlist()["values"] == []
+
+
+def test_allow_remove_missing(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    r = CliRunner().invoke(cli.app, ["allow", "remove", "notexist"])
+    assert r.exit_code == 1
+
+
+def test_allow_add_rejects_unallowlistable(monkeypatch, tmp_path):
+    # guard: kage allow add must reject _UN_ALLOWLISTABLE types (e.g. AWS key)
+    _save_home(monkeypatch, tmp_path)
+    r = CliRunner().invoke(cli.app, ["allow", "add", "my-aws", "AKIAIOSFODNN7EXAMPLE"])
+    assert r.exit_code == 1
+    assert "AWS_ACCESS_KEY" in (r.output + (r.stderr or ""))
+
+
+def test_two_pass_gate_coherence_same_value(monkeypatch, tmp_path):
+    # same email in two gate calls with shared existing_mapping must get the same placeholder
+    from kage import gate, runtime
+    from kage.config import Config
+    monkeypatch.setattr(runtime, "config", Config(tmp_path))
+    text_a = "contact me at foo@synthetic.test please"
+    text_b = "also reach foo@synthetic.test via email"
+    masked_a, mapping = gate.two_pass_gate(text_a, source="test")
+    masked_b, mapping = gate.two_pass_gate(text_b, source="test", existing_mapping=mapping)
+    import re as _re
+    ph_a = _re.findall(r"\[EMAIL_\d+\]", masked_a)
+    ph_b = _re.findall(r"\[EMAIL_\d+\]", masked_b)
+    assert ph_a and ph_b, "email not masked in one of the texts"
+    assert ph_a[0] == ph_b[0], f"coherence broken: same email got {ph_a[0]} vs {ph_b[0]}"
+
+
+def test_privacy_review_empty_queue(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    r = CliRunner().invoke(cli.app, ["privacy", "review"])
+    assert r.exit_code == 0
+    assert "No pending" in r.output
+
+
+def test_privacy_review_skip(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    from kage import gate, runtime
+    from kage.config import Config
+    monkeypatch.setattr(runtime, "config", Config(h))
+    gate.append_queue({"value": "skip@test.com", "type": "EMAIL", "placeholder": "[EMAIL_1]",
+                       "source": "ask", "ts": "2026-07-03T00:00:00+00:00", "status": "pending"})
+    r = CliRunner().invoke(cli.app, ["privacy", "review"], input="s\n")
+    assert r.exit_code == 0
+    assert "Skipped" in r.output
+    remaining = [e for e in gate.load_queue() if e.get("status") == "pending"]
+    assert len(remaining) == 1
+
+
+def test_privacy_review_allow(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    from kage import gate, runtime
+    from kage.config import Config
+    monkeypatch.setattr(runtime, "config", Config(h))
+    gate.append_queue({"value": "public@example.com", "type": "EMAIL", "placeholder": "[EMAIL_1]",
+                       "source": "ask", "ts": "2026-07-03T00:00:00+00:00", "status": "pending"})
+    r = CliRunner().invoke(cli.app, ["privacy", "review"], input="a\n")
+    assert r.exit_code == 0
+    assert "allowlist" in r.output.lower()
+    allowed = gate.load_allowlist().get("values", [])
+    assert any("public@example.com" in e["value"] for e in allowed)
+    processed = [e for e in gate.load_queue() if e.get("status") == "allowed"]
+    assert len(processed) == 1
+
+
+def test_privacy_review_vault(monkeypatch, tmp_path):
+    import pathlib
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(pathlib.Path, "home", lambda: h.parent)
+    from kage import gate, runtime
+    from kage.config import Config
+    monkeypatch.setattr(runtime, "config", Config(h))
+    gate.append_queue({"value": "12345 Main St", "type": "LOCATION", "placeholder": "[LOCATION_1]",
+                       "source": "chat", "ts": "2026-07-03T00:00:00+00:00", "status": "pending"})
+    r = CliRunner().invoke(cli.app, ["privacy", "review"], input="v\n")
+    assert r.exit_code == 0
+    assert "vault" in r.output.lower()
+    processed = [e for e in gate.load_queue() if e.get("status") == "vaulted"]
+    assert len(processed) == 1

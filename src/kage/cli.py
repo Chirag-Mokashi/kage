@@ -1083,19 +1083,13 @@ def ask(
     arm_context = "\n\n".join(arm_results) if arm_results else ""
 
     sub_mapping: dict[str, str] = {}
+    masked_question = question
     if cloud:
-        from kage.redact import substitute as _substitute
-        from kage.pii import _PII_PATTERNS
-        try:
-            from kage.sensitive import load_vault as _lv
-            _vault_pats = [{"name": f"SENSITIVE_{p['label']}", "pattern": p["pattern"]}
-                           for p in _lv().get("patterns", [])]
-        except Exception:
-            _vault_pats = []
-        _all_pats = _PII_PATTERNS + _vault_pats
-        context, sub_mapping = _substitute(context, _all_pats)
+        from kage import gate
+        context, sub_mapping = gate.two_pass_gate(context, source="ask", existing_mapping=sub_mapping)
         if arm_context:
-            arm_context, sub_mapping = _substitute(arm_context, _all_pats, existing_mapping=sub_mapping)
+            arm_context, sub_mapping = gate.two_pass_gate(arm_context, source="ask", existing_mapping=sub_mapping)
+        masked_question, sub_mapping = gate.two_pass_gate(question, source="ask", existing_mapping=sub_mapping)
         if sub_mapping:
             _sub_types = sorted(set(k.rsplit("_", 1)[0].lstrip("[") for k in sub_mapping))
             typer.echo(f"[kage] {len(sub_mapping)} PII span(s) substituted before dispatch "
@@ -1125,7 +1119,7 @@ def ask(
 
     answer = ""
     if cloud:
-        user_msg = question if arm_context else f"CONTEXT:\n{effective_context}\n\nQUESTION: {question}"
+        user_msg = masked_question if arm_context else f"CONTEXT:\n{effective_context}\n\nQUESTION: {masked_question}"
         if auto and candidates:
             for pname in candidates:
                 _pcfg = {**DEFAULT_PROVIDERS.get(pname, {}), **cfg.get("providers", {}).get(pname, {})}

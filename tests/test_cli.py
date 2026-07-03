@@ -2019,6 +2019,20 @@ def test_ask_cloud_error_exits_nonzero(monkeypatch, tmp_path):
     assert r.exit_code == 1
 
 
+def test_ask_cloud_masks_question_pii_before_dispatch(monkeypatch, tmp_path):
+    # B1 regression: question text must be masked before it reaches cloud.
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    captured = {}
+    def fake_cloud(_name, _system, user_msg, _cfg):
+        captured["user_msg"] = user_msg
+        return "ok"
+    monkeypatch.setattr(cli, "_call_cloud", fake_cloud)
+    CliRunner().invoke(cli.app, ["ask", "contact secret@synthetic.test", "--cloud"])
+    assert "secret@synthetic.test" not in captured.get("user_msg", "")
+    assert "[EMAIL_1]" in captured.get("user_msg", "")
+
+
 def test_ask_cloud_status_line_shows_model_and_provider(monkeypatch, tmp_path):
     _save_home(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])

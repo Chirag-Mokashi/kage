@@ -70,3 +70,10 @@ def add_account(label: str, account: str) -> None:
                 save_identities(data)
             return
     raise ValueError(f"Identity '{label}' not found in registry.")
+
+
+def active_group(label: str) -> str:
+    entry = get_identity(label)
+    if entry is None:
+        return label
+    return entry.get("group", label)

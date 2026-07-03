@@ -27,6 +27,7 @@ from contextlib import asynccontextmanager
 from kage import cli, cloud, runtime
 from kage import privacy as kage_privacy
 from kage import embed as _embed_module
+from kage import identity as kage_identity
 from kage.config import Config
 from kage.store import Store
 from fakes import RecordingCloud, FakeEmbedder, FakeVectorIndex, _FakeChromaCollection  # noqa: F401
@@ -5878,3 +5879,76 @@ def test_identity_set_class_invalid_cli(monkeypatch, tmp_path):
     result = CliRunner().invoke(cli.app, ["identity", "set-class", "personal", "quarantine"])
     assert result.exit_code == 1
     assert "quarantine" in result.output or "Invalid" in result.output
+
+
+# Bug 1 fix — per-arm timeout override
+def test_call_arm_uses_per_arm_timeout(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({
+        "identities": [{"label": "personal", "class": "normal", "accounts": [], "arm_overrides": {}}]
+    }))
+    (h / "config.json").write_text(json.dumps({
+        "arms": {"test_arm": {"enabled": True, "identity": "personal", "permission": "read",
+                              "transport": "shell", "command": "echo ok", "timeout": 45}}
+    }))
+    monkeypatch.setattr(kage_privacy, "_write_audit", lambda x: None)
+    captured = {}
+    async def fake_handler(_arm_name, _arm_cfg, _question, _identity, _timeout):
+        captured['timeout'] = _timeout
+        return "ok"
+    monkeypatch.setitem(arms._TRANSPORT_HANDLERS, 'shell', fake_handler)
+    asyncio.run(arms._call_arm("test_arm", "q", "personal", timeout=30.0))
+    assert captured['timeout'] == 45
+
+
+# Identity group — active_group()
+def test_active_group_returns_label_when_no_group(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({
+        "identities": [{"label": "personal", "class": "normal", "accounts": [], "arm_overrides": {}}]
+    }))
+    assert kage_identity.active_group("personal") == "personal"
+
+
+def test_active_group_returns_group_when_set(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({
+        "identities": [{"label": "personal-us", "class": "normal", "group": "personal",
+                        "accounts": [], "arm_overrides": {}}]
+    }))
+    assert kage_identity.active_group("personal-us") == "personal"
+
+
+def test_active_group_returns_label_for_unknown(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    # no identities.json — FileNotFoundError path returns default
+    assert kage_identity.active_group("nonexistent") == "nonexistent"
+
+
+# Bug 2 fix — read-only identity gate on remember and import
+def test_remember_blocks_read_only_identity(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({
+        "identities": [
+            {"label": "personal", "class": "normal", "accounts": [], "arm_overrides": {}},
+            {"label": "family", "class": "read-only", "accounts": [], "arm_overrides": {}}
+        ]
+    }))
+    result = CliRunner().invoke(cli.app, ["remember", "--identity", "family", "test note"])
+    assert result.exit_code == 1
+    assert "read-only" in result.output
+
+
+def test_import_blocks_read_only_identity(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({
+        "identities": [
+            {"label": "personal", "class": "normal", "accounts": [], "arm_overrides": {}},
+            {"label": "family", "class": "read-only", "accounts": [], "arm_overrides": {}}
+        ]
+    }))
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    result = CliRunner().invoke(cli.app, ["import", "--identity", "family", str(folder)])
+    assert result.exit_code == 1
+    assert "read-only" in result.output

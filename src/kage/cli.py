@@ -294,7 +294,8 @@ def _save(
 
 
 def _allowed_note_ids(identity: str, project: str | None) -> set[str]:
-    return runtime.store.allowed_note_ids(identity, project)
+    from kage import identity as _id
+    return runtime.store.allowed_note_ids(_id.active_group(identity), project)
 
 
 def _search_fts(query: str, project: str | None, limit: int, any_terms: bool = False, identity: str = "personal"):
@@ -593,6 +594,10 @@ def remember(
     """Save a note to memory (markdown + index). Confirms before writing (the wall, #16)."""
     _require_init()
     identity, project, source = _resolve_context(identity, project)
+    from kage import identity as _id
+    if _id.active_class(identity) == 'read-only':
+        typer.echo("[kage] read-only identity cannot write to memory.", err=True)
+        raise typer.Exit(code=1)
 
     # The wall (#16): show it and confirm BEFORE anything is written.
     typer.echo(f'\n  "{text}"')
@@ -604,7 +609,7 @@ def remember(
         typer.echo("Discarded — nothing saved.")
         raise typer.Exit()
 
-    mem_id = _save(text, project, local_only=local, identities=[identity], state=state)
+    mem_id = _save(text, project, local_only=local, identities=[_id.active_group(identity)], state=state)
     suffix = "  [local-only]" if local else ""
     typer.echo(f"  ✓ saved   {_disp(KAGE_HOME / f'memory/{mem_id}.md')}   [{mem_id}]   (local){suffix}")
 
@@ -619,6 +624,11 @@ def import_(
     """Bulk-add the .md/.txt files in a folder (curated by which folder you point at)."""
     _require_init()
     identity, project, source = _resolve_context(identity, project)
+    from kage import identity as _id
+    if _id.active_class(identity) == 'read-only':
+        typer.echo("[kage] read-only identity cannot write to memory.", err=True)
+        raise typer.Exit(code=1)
+    group = _id.active_group(identity)
 
     folder = folder.expanduser()
     if not folder.is_dir():
@@ -646,7 +656,7 @@ def import_(
         body = p.read_text(errors="replace").strip()
         if not body:
             continue
-        _save(body, proj, source=str(p), embed=False, identities=[identity])
+        _save(body, proj, source=str(p), embed=False, identities=[group])
         imported += 1
 
     typer.echo(f"  ✓ imported {imported} note(s) into project '{proj}'   (local)")

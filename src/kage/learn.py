@@ -129,7 +129,8 @@ def run_librarian_learning_pass(
         return ("", "", [])
 
     source_note_ids = [nid for nid, _ in raw_corrections]
-    correction_texts = [txt for _, txt in raw_corrections]
+    from kage import gate  # gate corrections before cloud (B4: kage-corrections is always-local)
+    correction_texts = [gate.two_pass_gate(txt, source="learn")[0] for _, txt in raw_corrections]
     provider_name = cfg.get("provider") or next(iter(cfg.get("providers", {"claude-sonnet": {}})))
     meta_prompt = _build_librarian_meta_prompt(correction_texts)
     full_trace = call_cloud_fn(provider_name, "", meta_prompt, cfg)
@@ -210,7 +211,8 @@ def run_learning_pass(
         return ("", "", [])
 
     source_note_ids = [nid for nid, _ in matched]
-    correction_texts = [txt for _, txt in matched]
+    from kage import gate  # gate corrections before cloud (B4: kage-corrections is always-local)
+    correction_texts = [gate.two_pass_gate(txt, source="learn")[0] for _, txt in matched]
     provider_name = cfg.get("provider") or next(iter(cfg.get("providers", {"claude-sonnet": {}})))
     meta_prompt = _build_meta_prompt(correction_texts, task_class)
     full_trace = call_cloud_fn(provider_name, "", meta_prompt, cfg)

@@ -5597,3 +5597,284 @@ def test_privacy_review_vault(monkeypatch, tmp_path):
     assert "vault" in r.output.lower()
     processed = [e for e in gate.load_queue() if e.get("status") == "vaulted"]
     assert len(processed) == 1
+
+
+# ── Cycle 28: identity registry ──────────────────────────────────────────────
+
+
+def test_identity_registry_load_missing_file(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    from kage import identity
+    result = identity.load_identities()
+    assert result == {"identities": []}
+
+
+def test_identity_registry_load_valid(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({"identities": [{"label": "personal", "class": "normal", "accounts": ["a@synthetic.test"], "arm_overrides": {}}]}))
+    from kage import identity
+    result = identity.load_identities()
+    assert len(result["identities"]) == 1
+    assert result["identities"][0]["label"] == "personal"
+
+
+def test_identity_class_normal(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({"identities": [{"label": "personal", "class": "normal", "accounts": [], "arm_overrides": {}}]}))
+    from kage import identity
+    assert identity.active_class("personal") == "normal"
+
+
+def test_identity_class_read_only(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({"identities": [{"label": "family", "class": "read-only", "accounts": [], "arm_overrides": {}}]}))
+    from kage import identity
+    assert identity.active_class("family") == "read-only"
+
+
+def test_identity_class_unknown_defaults_normal(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    from kage import identity
+    assert identity.active_class("ghost") == "normal"
+
+
+def test_identity_arm_overrides_present(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    # note: three closing }} before ] — gmail value, arm_overrides, identity entry
+    (h / "identities.json").write_text(json.dumps({"identities": [{"label": "family", "class": "read-only", "accounts": ["fam@synthetic.test"], "arm_overrides": {"gmail": {"account": "fam@synthetic.test"}}}]}))
+    from kage import identity
+    result = identity.identity_arm_overrides("family", "gmail")
+    assert result == {"account": "fam@synthetic.test"}
+
+
+def test_identity_arm_overrides_missing_arm(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({"identities": [{"label": "personal", "class": "normal", "accounts": [], "arm_overrides": {}}]}))
+    from kage import identity
+    assert identity.identity_arm_overrides("personal", "browser") == {}
+
+
+def test_identity_arm_overrides_missing_identity(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    from kage import identity
+    assert identity.identity_arm_overrides("ghost", "gmail") == {}
+
+
+def test_identity_set_class_invalid_raises(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    from kage import identity
+    with pytest.raises(ValueError, match="Invalid class"):
+        identity.set_class("personal", "quarantine")
+
+
+def test_identity_set_class_persists(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({"identities": [{"label": "family", "class": "read-only", "accounts": [], "arm_overrides": {}}]}))
+    from kage import identity
+    identity.set_class("family", "normal")
+    assert identity.active_class("family") == "normal"
+
+
+def test_identity_set_class_label_not_found(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    from kage import identity
+    with pytest.raises(ValueError, match="not found"):
+        identity.set_class("ghost", "normal")
+
+
+def test_identity_add_account_persists(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({"identities": [{"label": "personal", "class": "normal", "accounts": ["a@synthetic.test"], "arm_overrides": {}}]}))
+    from kage import identity
+    identity.add_account("personal", "b@synthetic.test")
+    entry = identity.get_identity("personal")
+    assert entry is not None
+    assert "b@synthetic.test" in entry["accounts"]
+
+
+def test_identity_add_account_no_duplicate(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({"identities": [{"label": "personal", "class": "normal", "accounts": ["a@synthetic.test"], "arm_overrides": {}}]}))
+    from kage import identity
+    identity.add_account("personal", "a@synthetic.test")
+    entry = identity.get_identity("personal")
+    assert entry is not None
+    assert entry["accounts"].count("a@synthetic.test") == 1
+
+
+def test_identity_add_account_label_not_found(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    from kage import identity
+    with pytest.raises(ValueError, match="not found"):
+        identity.add_account("ghost", "x@synthetic.test")
+
+
+def test_identity_list_cli(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({
+        "identities": [{"label": "personal", "class": "normal",
+                        "accounts": ["a@synthetic.test"], "arm_overrides": {}}]
+    }))
+    result = CliRunner().invoke(cli.app, ["identity", "list"])
+    assert result.exit_code == 0
+    assert "personal" in result.output
+    assert "normal" in result.output
+
+
+def test_identity_list_cli_empty(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    result = CliRunner().invoke(cli.app, ["identity", "list"])
+    assert result.exit_code == 0
+    assert "no identities" in result.output
+
+
+def test_identity_show_cli(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({
+        "identities": [{"label": "personal", "class": "normal",
+                        "accounts": ["a@synthetic.test"],
+                        "arm_overrides": {"gmail": {"account": "a@synthetic.test"}}}]
+    }))
+    result = CliRunner().invoke(cli.app, ["identity", "show", "personal"])
+    assert result.exit_code == 0
+    assert "personal" in result.output
+    assert "normal" in result.output
+    assert "a@synthetic.test" in result.output
+
+
+def test_identity_show_cli_not_found(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    result = CliRunner().invoke(cli.app, ["identity", "show", "ghost"])
+    assert result.exit_code == 1
+
+
+def test_identity_bootstrap_cli(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    result = CliRunner().invoke(cli.app, ["identity", "bootstrap"])
+    assert result.exit_code == 0
+    assert "bootstrapped" in result.output
+    assert "personal" in result.output
+    assert "family" in result.output
+    result2 = CliRunner().invoke(cli.app, ["identity", "bootstrap"])
+    assert "already present" in result2.output
+
+
+# Cycle 28 Slice 3 — read-only enforcement in _detect_arms + _call_arm
+# ---------------------------------------------------------------------------
+
+def test_detect_arms_read_only_blocks_write(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({"identities": [{"label": "family", "class": "read-only", "accounts": [], "arm_overrides": {}}]}))
+    (h / "config.json").write_text(json.dumps({"arms": {"test_write": {"enabled": True, "identity": "family", "permission": "write", "transport": "shell", "command": "echo ok"}}}))
+    monkeypatch.setattr(kage_privacy, "_write_audit", lambda x: None)
+    monkeypatch.setitem(arms.ARM_KEYWORDS, "test_write", ["testkw"])
+    result = arms._detect_arms("testkw question", "family")
+    assert "test_write" not in result
+
+
+def test_detect_arms_read_only_allows_read(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({"identities": [{"label": "family", "class": "read-only", "accounts": [], "arm_overrides": {}}]}))
+    (h / "config.json").write_text(json.dumps({"arms": {"test_read": {"enabled": True, "identity": "family", "permission": "read", "transport": "shell", "command": "echo ok"}}}))
+    monkeypatch.setattr(kage_privacy, "_write_audit", lambda x: None)
+    monkeypatch.setitem(arms.ARM_KEYWORDS, "test_read", ["readkw"])
+    result = arms._detect_arms("readkw question", "family")
+    assert "test_read" in result
+
+
+def test_call_arm_read_only_blocks_write(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({"identities": [{"label": "family", "class": "read-only", "accounts": [], "arm_overrides": {}}]}))
+    (h / "config.json").write_text(json.dumps({"arms": {"test_write": {"enabled": True, "identity": "family", "permission": "write", "transport": "shell", "command": "echo ok"}}}))
+    monkeypatch.setattr(kage_privacy, "_write_audit", lambda x: None)
+    result = asyncio.run(arms._call_arm("test_write", "some question", "family"))
+    assert result is None
+
+
+# Cycle 28 Slice 4 — account-scoped dispatch + override merge
+# ---------------------------------------------------------------------------
+
+def test_call_arm_merges_overrides(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({
+        "identities": [{"label": "family", "class": "read-only", "accounts": [],
+                        "arm_overrides": {"test_arm": {"account": "family@synthetic.test"}}}]
+    }))
+    (h / "config.json").write_text(json.dumps({
+        "arms": {"test_arm": {"enabled": True, "identity": "personal", "permission": "read",
+                              "transport": "shell", "command": "echo ok"}}
+    }))
+    monkeypatch.setattr(kage_privacy, "_write_audit", lambda x: None)
+
+    captured = {}
+    async def fake_handler(_arm_name, arm_cfg, _question, _identity, _timeout):
+        captured['arm_cfg'] = arm_cfg
+        return "ok"
+    monkeypatch.setitem(arms._TRANSPORT_HANDLERS, 'shell', fake_handler)
+
+    asyncio.run(arms._call_arm("test_arm", "q", "family"))
+    assert captured['arm_cfg'].get('account') == "family@synthetic.test"
+
+
+def test_detect_arms_override_identity(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({
+        "identities": [{"label": "family", "class": "read-only", "accounts": [],
+                        "arm_overrides": {"test_arm": {"account": "family@synthetic.test"}}}]
+    }))
+    (h / "config.json").write_text(json.dumps({
+        "arms": {"test_arm": {"enabled": True, "identity": "personal", "permission": "read",
+                              "transport": "shell", "command": "echo ok"}}
+    }))
+    monkeypatch.setattr(kage_privacy, "_write_audit", lambda x: None)
+    monkeypatch.setitem(arms.ARM_KEYWORDS, "test_arm", ["testkw"])
+
+    result = arms._detect_arms("testkw question", "family")
+    assert "test_arm" in result
+
+
+# Cycle 28 cold-review W5 — CLI-layer tests for set-class / add-account / invalid class
+# ---------------------------------------------------------------------------
+
+def test_identity_set_class_cli(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({
+        "identities": [
+            {"label": "personal", "class": "normal", "accounts": [], "arm_overrides": {}},
+            {"label": "family", "class": "read-only", "accounts": [], "arm_overrides": {}}
+        ]
+    }))
+    result = CliRunner().invoke(cli.app, ["identity", "set-class", "family", "normal"])
+    assert result.exit_code == 0
+    assert "family" in result.output
+    assert "normal" in result.output
+    data = json.loads((h / "identities.json").read_text())
+    family = next(e for e in data["identities"] if e["label"] == "family")
+    assert family["class"] == "normal"
+
+
+def test_identity_add_account_cli(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({
+        "identities": [
+            {"label": "personal", "class": "normal", "accounts": [], "arm_overrides": {}}
+        ]
+    }))
+    result = CliRunner().invoke(cli.app, ["identity", "add-account", "personal", "new@synthetic.test"])
+    assert result.exit_code == 0
+    assert "new@synthetic.test" in result.output
+    data = json.loads((h / "identities.json").read_text())
+    personal = next(e for e in data["identities"] if e["label"] == "personal")
+    assert "new@synthetic.test" in personal["accounts"]
+
+
+def test_identity_set_class_invalid_cli(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({
+        "identities": [
+            {"label": "personal", "class": "normal", "accounts": [], "arm_overrides": {}}
+        ]
+    }))
+    result = CliRunner().invoke(cli.app, ["identity", "set-class", "personal", "quarantine"])
+    assert result.exit_code == 1
+    assert "quarantine" in result.output or "Invalid" in result.output

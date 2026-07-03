@@ -14,6 +14,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
 
+from kage import identity as _identity
 from kage import privacy as _privacy
 from kage import runtime
 
@@ -104,8 +105,9 @@ async def _call_arm_shell(
         if shlex.split(cmd)[0].rsplit("/", 1)[-1] in _SHELL_INTERPRETERS:
             _privacy._write_audit({'type': 'arm_call', 'arm': arm_name, 'tool': 'shell', 'identity': identity, 'ts': ts, 'success': False, 'blocked': 'interpreter'})
             return None
+        extra = [arm_cfg['account']] if arm_cfg.get('account') else []
         proc = await asyncio.create_subprocess_exec(
-            *shlex.split(cmd),
+            *shlex.split(cmd), *extra,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -211,14 +213,24 @@ register_arm(
 
 async def _call_arm(arm_name: str, question: str, identity: str, timeout: float = 30.0) -> str | None:
     arm = runtime.config.data.get('arms', {}).get(arm_name, {})
-    transport = arm.get('transport', 'stdio')
+    # pre-merge: guard reads base arm config so arm_overrides cannot escalate permission
+    if _identity.active_class(identity) == 'read-only' and arm.get('permission') != 'read':
+        _privacy._write_audit({'type': 'arm_blocked', 'arm': arm_name,
+                               'reason': 'read-only identity', 'identity': identity,
+                               'ts': _dt.datetime.now().astimezone().isoformat(timespec='seconds')})
+        return None
+    overrides = _identity.identity_arm_overrides(identity, arm_name)
+    # ponytail: merged['identity'] retains the base arm's label (e.g. 'personal'). Use the
+    # `identity` param — not merged['identity'] — for any identity-sensitive logic in handlers.
+    merged = {**arm, **overrides}
+    transport = merged.get('transport', 'stdio')
     handler = _TRANSPORT_HANDLERS.get(transport)
     if handler is None:
         return None
     if transport == 'sse':
         from kage import gate  # B2: sse sends query off-machine; mask before dispatch
         question = gate.two_pass_gate(question, source='sse-arm')[0]
-    return await handler(arm_name, arm, question, identity, timeout)
+    return await handler(arm_name, merged, question, identity, timeout)
 
 
 def _detect_arms(question: str, identity: str) -> list[str]:
@@ -228,8 +240,8 @@ def _detect_arms(question: str, identity: str) -> list[str]:
         name for name, arm in arms.items()
         if arm.get('enabled')
         and isinstance(arm.get('identity'), str)
-        and arm['identity'] == identity
-        and arm.get('permission') == 'read'
+        and (arm['identity'] == identity or _identity.identity_arm_overrides(identity, name) != {})
+        and not (_identity.active_class(identity) == 'read-only' and arm.get('permission') != 'read')
         and any(kw in q for kw in ARM_KEYWORDS.get(name, []))
     ]
 

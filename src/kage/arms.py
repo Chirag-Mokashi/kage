@@ -230,7 +230,8 @@ async def _call_arm(arm_name: str, question: str, identity: str, timeout: float 
     if transport == 'sse':
         from kage import gate  # B2: sse sends query off-machine; mask before dispatch
         question = gate.two_pass_gate(question, source='sse-arm')[0]
-    return await handler(arm_name, merged, question, identity, timeout)
+    effective_timeout = merged.get('timeout', timeout)
+    return await handler(arm_name, merged, question, identity, effective_timeout)
 
 
 def _detect_arms(question: str, identity: str) -> list[str]:

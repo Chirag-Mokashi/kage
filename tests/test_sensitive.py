@@ -69,16 +69,17 @@ def test_bootstrap_clean(tmp_path, monkeypatch):
 
 
 def test_gate_text_applies_vault_pattern(tmp_path, monkeypatch):
-    monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-    kage_home = tmp_path / ".kage"
-    kage_home.mkdir()
-    (kage_home / "sensitive.json").write_text(json.dumps({
+    from kage import runtime
+    from kage.config import Config
+    monkeypatch.setattr(runtime, "config", Config(tmp_path))
+    (tmp_path / "sensitive.json").write_text(json.dumps({
         "patterns": [{"id": "aa1bb2cc", "label": "home-addr", "pattern": r"Koramangala", "added_at": "2026-06-29"}]
     }))
     from kage.pii import _gate_text
     result = _gate_text("I live in Koramangala")
-    assert "[SENSITIVE_HOME_ADDR_1]" in result
-    assert "Koramangala" not in result
+    assert "Koramangala" not in result           # vault value redacted
+    assert "[REDACTED_1]" in result              # anonymized placeholder
+    assert "HOME_ADDR" not in result and "home-addr" not in result  # label never leaks (B3)
 
 
 def test_scan_sensitive_patterns_flags_pii(tmp_path, monkeypatch):

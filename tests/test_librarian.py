@@ -105,7 +105,7 @@ def test_gate_text_strips_email():
     This is the first line of 3e privacy defence."""
     out = _gate_text("contact me at foo@bar.com for details", {})
     assert "foo@bar.com" not in out
-    assert "[REDACTED_PII]" in out
+    assert "[EMAIL_1]" in out
 
 
 def test_gate_text_clean_passthrough():
@@ -411,7 +411,7 @@ def test_distill_and_judge_sleeps_with_delay(lib_env, monkeypatch):
 
 
 def test_librarian_gate_applies_vault_pattern(lib_env, monkeypatch):
-    """librarian._gate_text must redact vault patterns with [SENSITIVE:<label>]."""
+    """librarian._gate_text must redact vault patterns without leaking the label (B3)."""
     import json as _json
     import pathlib
 
@@ -424,9 +424,9 @@ def test_librarian_gate_applies_vault_pattern(lib_env, monkeypatch):
     from kage.librarian import _gate_text
     result = _gate_text("I work at Initech on a secret project", {})
 
-    assert "[SENSITIVE:employer-name]" in result
+    assert "[REDACTED_1]" in result          # B3 fix: label never leaks
     assert "Initech" not in result
-    assert "[REDACTED_PII]" not in result
+    assert "SENSITIVE" not in result and "employer-name" not in result
 
 
 # ── Cycle 24 — EPM: rejection correction notes + distill_and_judge prepend ──
@@ -676,7 +676,7 @@ def test_retrieve_ctm_gates_pii_before_returning(lib_env):
     result = _retrieve_ctm("content", {}, lib_env)
     assert len(result) == 1
     assert "user@test.com" not in result[0]
-    assert "[REDACTED_PII]" in result[0]
+    assert "[EMAIL_1]" in result[0]
 
 
 def test_distill_and_judge_injects_ctm_when_present(lib_env, monkeypatch):

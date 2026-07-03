@@ -5481,3 +5481,95 @@ def test_disclosure_gate_withholds_ctm_librarian(monkeypatch, tmp_path):
     assert allowed == []
     assert len(withheld) == 1
     assert withheld[0]["reason"] == "local_only:always_local:kage-ctm-librarian"
+
+
+# ── Cycle 27 — allow + privacy review CLI ────────────────────────────────────
+
+def test_allow_list_empty(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    r = CliRunner().invoke(cli.app, ["allow", "list"])
+    assert r.exit_code == 0
+    assert "empty" in r.output.lower()
+
+
+def test_allow_add_and_list(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    r = CliRunner().invoke(cli.app, ["allow", "add", "my-email", "hello@example.com"])
+    assert r.exit_code == 0
+    assert "Allowlisted" in r.output
+    r2 = CliRunner().invoke(cli.app, ["allow", "list"])
+    assert "hello@example.com" in r2.output
+    assert "my-email" in r2.output
+
+
+def test_allow_remove_existing(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    from kage import gate, runtime
+    from kage.config import Config
+    monkeypatch.setattr(runtime, "config", Config(h))
+    gate.add_allow("my-label", "remove-me@example.com")
+    data = gate.load_allowlist()
+    entry_id = data["values"][0]["id"]
+    r = CliRunner().invoke(cli.app, ["allow", "remove", entry_id])
+    assert r.exit_code == 0
+    assert "Removed" in r.output
+    assert gate.load_allowlist()["values"] == []
+
+
+def test_allow_remove_missing(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    r = CliRunner().invoke(cli.app, ["allow", "remove", "notexist"])
+    assert r.exit_code == 1
+
+
+def test_privacy_review_empty_queue(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    r = CliRunner().invoke(cli.app, ["privacy", "review"])
+    assert r.exit_code == 0
+    assert "No pending" in r.output
+
+
+def test_privacy_review_skip(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    from kage import gate, runtime
+    from kage.config import Config
+    monkeypatch.setattr(runtime, "config", Config(h))
+    gate.append_queue({"value": "skip@test.com", "type": "EMAIL", "placeholder": "[EMAIL_1]",
+                       "source": "ask", "ts": "2026-07-03T00:00:00+00:00", "status": "pending"})
+    r = CliRunner().invoke(cli.app, ["privacy", "review"], input="s\n")
+    assert r.exit_code == 0
+    assert "Skipped" in r.output
+    remaining = [e for e in gate.load_queue() if e.get("status") == "pending"]
+    assert len(remaining) == 1
+
+
+def test_privacy_review_allow(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    from kage import gate, runtime
+    from kage.config import Config
+    monkeypatch.setattr(runtime, "config", Config(h))
+    gate.append_queue({"value": "public@example.com", "type": "EMAIL", "placeholder": "[EMAIL_1]",
+                       "source": "ask", "ts": "2026-07-03T00:00:00+00:00", "status": "pending"})
+    r = CliRunner().invoke(cli.app, ["privacy", "review"], input="a\n")
+    assert r.exit_code == 0
+    assert "allowlist" in r.output.lower()
+    allowed = gate.load_allowlist().get("values", [])
+    assert any("public@example.com" in e["value"] for e in allowed)
+    processed = [e for e in gate.load_queue() if e.get("status") == "allowed"]
+    assert len(processed) == 1
+
+
+def test_privacy_review_vault(monkeypatch, tmp_path):
+    import pathlib
+    h = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(pathlib.Path, "home", lambda: h.parent)
+    from kage import gate, runtime
+    from kage.config import Config
+    monkeypatch.setattr(runtime, "config", Config(h))
+    gate.append_queue({"value": "12345 Main St", "type": "LOCATION", "placeholder": "[LOCATION_1]",
+                       "source": "chat", "ts": "2026-07-03T00:00:00+00:00", "status": "pending"})
+    r = CliRunner().invoke(cli.app, ["privacy", "review"], input="v\n")
+    assert r.exit_code == 0
+    assert "vault" in r.output.lower()
+    processed = [e for e in gate.load_queue() if e.get("status") == "vaulted"]
+    assert len(processed) == 1

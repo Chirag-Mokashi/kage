@@ -60,6 +60,10 @@ _sensitive_app = typer.Typer(help="Sensitive vault commands.")
 app.add_typer(_sensitive_app, name="sensitive")
 _calendar_app = typer.Typer(help="Calendar write commands.")
 app.add_typer(_calendar_app, name="calendar")
+_allow_app = typer.Typer(help="Allowlist commands.")
+app.add_typer(_allow_app, name="allow")
+_privacy_app = typer.Typer(help="Privacy gate commands.")
+app.add_typer(_privacy_app, name="privacy")
 
 # ── Layout ────────────────────────────────────────────────────────────────
 KAGE_HOME = Path(os.environ.get("KAGE_HOME") or Path.home() / ".kage")  # override for relocation/tests
@@ -1980,10 +1984,6 @@ def sensitive_list() -> None:
     else:
         for p in patterns:
             typer.echo(f"[{p['id']}]  {p['label']}  →  {p['pattern']}")
-    typer.echo(
-        "\nNote: vault patterns are enforced in scout and librarian paths only."
-        " `kage ask` and `kage chat` do not apply vault patterns in this release."
-    )
 
 
 @_sensitive_app.command("add")
@@ -2012,6 +2012,83 @@ def sensitive_scan() -> None:
             typer.echo(f"{item['path']}")
             for h in item["hits"]:
                 typer.echo(f"  · {h}")
+
+
+# ── Cycle 27 — allowlist + privacy review commands ─────────────────────────
+
+@_allow_app.command("list")
+def allow_list() -> None:
+    """List allowlisted values (never redacted by the privacy gate)."""
+    from kage import gate
+    entries = gate.load_allowlist().get("values", [])
+    if not entries:
+        typer.echo("Allowlist is empty. Use: kage allow add <label> <value>")
+    else:
+        for e in entries:
+            typer.echo(f"[{e['id']}]  {e['label']}  →  {e['value']}  (added {e['added_at']})")
+
+
+@_allow_app.command("add")
+def allow_add(
+    label: str = typer.Argument(..., help="Short label for this value"),
+    value: str = typer.Argument(..., help="Exact value to allowlist (never redacted)"),
+) -> None:
+    """Add a value to the allowlist (never redacted by the gate)."""
+    from kage import gate
+    gate.add_allow(label, value)
+    typer.echo(f"Allowlisted: {label}  →  {value}")
+
+
+@_allow_app.command("remove")
+def allow_remove(
+    entry_id: str = typer.Argument(..., help="ID shown by 'kage allow list'"),
+) -> None:
+    """Remove an entry from the allowlist by ID."""
+    from kage import gate
+    if gate.remove_allow(entry_id):
+        typer.echo(f"Removed entry {entry_id}.")
+    else:
+        typer.echo(f"No entry with ID {entry_id} found.", err=True)
+        raise typer.Exit(code=1)
+
+
+@_privacy_app.command("review")
+def privacy_review() -> None:
+    """Review pending privacy queue items: [v]ault / [a]llow / [s]kip."""
+    import re as _re
+    from kage import gate
+    from kage.sensitive import add_pattern
+    entries = gate.load_queue()
+    pending = [e for e in entries if e.get("status") == "pending"]
+    if not pending:
+        typer.echo("No pending items in the privacy queue.")
+        return
+    typer.echo(f"{len(pending)} item(s) pending review.\n")
+    changed = False
+    for entry in entries:
+        if entry.get("status") != "pending":
+            continue
+        typer.echo(f"  Value  : {entry['value']}")
+        typer.echo(f"  Type   : {entry['type']}")
+        typer.echo(f"  Source : {entry.get('source', '?')}")
+        typer.echo(f"  Seen   : {entry.get('ts', '?')}")
+        choice = typer.prompt("[v]ault / [a]llow / [s]kip", default="s").strip().lower()
+        if choice == "v":
+            lbl = f"review-{entry['type'].lower()}"
+            add_pattern(lbl, _re.escape(entry["value"]))
+            entry["status"] = "vaulted"
+            changed = True
+            typer.echo(f"  → Added to vault as '{lbl}'\n")
+        elif choice == "a":
+            gate.add_allow(f"review-{entry['type'].lower()}", entry["value"])
+            entry["status"] = "allowed"
+            changed = True
+            typer.echo(f"  → Added to allowlist\n")
+        else:
+            typer.echo(f"  → Skipped\n")
+    if changed:
+        gate.save_queue(entries)
+        typer.echo("Queue updated.")
 
 
 @_calendar_app.command("propose")

@@ -90,6 +90,13 @@ def append_queue(entry: dict) -> None:
     with open(path, "a") as f:
         f.write(json.dumps(entry) + "\n")
 
+def save_queue(entries: list[dict]) -> None:
+    """Rewrite the entire privacy queue (used after review to update statuses)."""
+    path = _stores_dir() / "privacy_queue.jsonl"
+    with open(path, "w") as f:
+        for entry in entries:
+            f.write(json.dumps(entry) + "\n")
+
 def queue_values() -> set[str]:
     queue = load_queue()
     return {_normalize(entry.get("value", "")) for entry in queue}

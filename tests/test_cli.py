@@ -5072,6 +5072,25 @@ def test_browser_arm_snapshot_error_returns_none(monkeypatch):
     assert calls[1][0] == 'browser_snapshot'
 
 
+def test_call_arm_sse_masks_question_before_dispatch(tmp_path, monkeypatch):
+    # B2 regression: sse transport sends query off-machine; must be gated first.
+    import json as _json
+    from kage import runtime, arms
+    from kage.config import Config
+    monkeypatch.setattr(runtime, 'config', Config(tmp_path))
+    (tmp_path / "config.json").write_text(_json.dumps({
+        'arms': {'remote-arm': {'transport': 'sse'}}
+    }))
+    captured = {}
+    async def fake_handler(_arm_name, _arm_cfg, question, _identity, _timeout):
+        captured['question'] = question
+        return 'ok'
+    monkeypatch.setattr(arms, '_TRANSPORT_HANDLERS', {'sse': fake_handler})
+    asyncio.run(arms._call_arm('remote-arm', 'contact leakme@synthetic.test please', 'personal'))
+    assert 'leakme@synthetic.test' not in captured.get('question', '')
+    assert '[EMAIL_1]' in captured.get('question', '')
+
+
 # ── --auto flag (Cycle 18) ────────────────────────────────────────────────────
 
 def test_ask_auto_routes_code_to_claude_opus(monkeypatch, tmp_path):

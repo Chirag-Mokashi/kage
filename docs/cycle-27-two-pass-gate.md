@@ -30,7 +30,7 @@ Chirag's model: **two passes.** Pass 1 = known essentials (vault) auto-redacted,
 ## Non-goals (explicitly deferred)
 
 - **Auto-identity detection/routing** — kage guessing which identity a query belongs to. A probabilistic router must NOT decide privacy boundaries. Identity stays explicitly set via `kage use`. (Future cycle.)
-- **Identity registry + account-scoped arms** — that is Cycle B ([[project_identity_algorithm_separation]]), built after this gate is solid.
+- **Identity registry + account-scoped arms** — that is Cycle 28 ([[project_identity_algorithm_separation]]), built after this gate is solid.
 - **Query-provenance tracking beyond a source label** — we record where a hit came from (arm/notes/web) but don't build a full provenance graph.
 
 ## Locked decisions

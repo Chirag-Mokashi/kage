@@ -64,6 +64,8 @@ _allow_app = typer.Typer(help="Allowlist commands.")
 app.add_typer(_allow_app, name="allow")
 _privacy_app = typer.Typer(help="Privacy gate commands.")
 app.add_typer(_privacy_app, name="privacy")
+_identity_app = typer.Typer(help="Identity registry commands.")
+app.add_typer(_identity_app, name="identity")
 
 # ── Layout ────────────────────────────────────────────────────────────────
 KAGE_HOME = Path(os.environ.get("KAGE_HOME") or Path.home() / ".kage")  # override for relocation/tests
@@ -292,7 +294,8 @@ def _save(
 
 
 def _allowed_note_ids(identity: str, project: str | None) -> set[str]:
-    return runtime.store.allowed_note_ids(identity, project)
+    from kage import identity as _id
+    return runtime.store.allowed_note_ids(_id.active_group(identity), project)
 
 
 def _search_fts(query: str, project: str | None, limit: int, any_terms: bool = False, identity: str = "personal"):
@@ -591,6 +594,10 @@ def remember(
     """Save a note to memory (markdown + index). Confirms before writing (the wall, #16)."""
     _require_init()
     identity, project, source = _resolve_context(identity, project)
+    from kage import identity as _id
+    if _id.active_class(identity) == 'read-only':
+        typer.echo("[kage] read-only identity cannot write to memory.", err=True)
+        raise typer.Exit(code=1)
 
     # The wall (#16): show it and confirm BEFORE anything is written.
     typer.echo(f'\n  "{text}"')
@@ -602,7 +609,7 @@ def remember(
         typer.echo("Discarded — nothing saved.")
         raise typer.Exit()
 
-    mem_id = _save(text, project, local_only=local, identities=[identity], state=state)
+    mem_id = _save(text, project, local_only=local, identities=[_id.active_group(identity)], state=state)
     suffix = "  [local-only]" if local else ""
     typer.echo(f"  ✓ saved   {_disp(KAGE_HOME / f'memory/{mem_id}.md')}   [{mem_id}]   (local){suffix}")
 
@@ -617,6 +624,11 @@ def import_(
     """Bulk-add the .md/.txt files in a folder (curated by which folder you point at)."""
     _require_init()
     identity, project, source = _resolve_context(identity, project)
+    from kage import identity as _id
+    if _id.active_class(identity) == 'read-only':
+        typer.echo("[kage] read-only identity cannot write to memory.", err=True)
+        raise typer.Exit(code=1)
+    group = _id.active_group(identity)
 
     folder = folder.expanduser()
     if not folder.is_dir():
@@ -644,7 +656,7 @@ def import_(
         body = p.read_text(errors="replace").strip()
         if not body:
             continue
-        _save(body, proj, source=str(p), embed=False, identities=[identity])
+        _save(body, proj, source=str(p), embed=False, identities=[group])
         imported += 1
 
     typer.echo(f"  ✓ imported {imported} note(s) into project '{proj}'   (local)")
@@ -2309,6 +2321,92 @@ def learn(
             tmp.write_text(json.dumps(pending, indent=2) + "\n")
             os.replace(tmp, pending_path)
             typer.echo("\nReview the rules above, then run `kage learn --accept` to save.")
+
+
+# ── Cycle 28: identity registry ──────────────────────────────────────────────
+
+@_identity_app.command("list")
+def identity_list():
+    """List all registered identities and their classes."""
+    from kage import identity as _id
+    entries = _id.load_identities().get("identities", [])
+    if not entries:
+        typer.echo("[kage] no identities registered. Run: kage identity bootstrap")
+        return
+    for e in entries:
+        accounts = ", ".join(e.get("accounts", []))
+        typer.echo(f"  {e['label']}  [{e.get('class', 'normal')}]  {accounts}")
+
+
+@_identity_app.command("show")
+def identity_show(label: str = typer.Argument(..., help="Identity label")):
+    """Show details for one identity."""
+    from kage import identity as _id
+    entry = _id.get_identity(label)
+    if entry is None:
+        typer.echo(f"[kage] identity '{label}' not found.", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"label:    {entry['label']}")
+    typer.echo(f"class:    {entry.get('class', 'normal')}")
+    typer.echo(f"accounts: {', '.join(entry.get('accounts', []))}")
+    overrides = entry.get("arm_overrides", {})
+    if overrides:
+        typer.echo("arm_overrides:")
+        for arm, params in overrides.items():
+            typer.echo(f"  {arm}: {params}")
+
+
+@_identity_app.command("set-class")
+def identity_set_class(
+    label: str = typer.Argument(..., help="Identity label"),
+    new_class: str = typer.Argument(..., help="New class: normal or read-only"),
+):
+    """Set the class of an identity (normal or read-only)."""
+    from kage import identity as _id
+    try:
+        _id.set_class(label, new_class)
+    except ValueError as e:
+        typer.echo(f"[kage] error: {e}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"[kage] {label} → class: {new_class}")
+
+
+@_identity_app.command("add-account")
+def identity_add_account(
+    label: str = typer.Argument(..., help="Identity label"),
+    account: str = typer.Argument(..., help="Email address to add"),
+):
+    """Add an email account to an identity."""
+    from kage import identity as _id
+    try:
+        _id.add_account(label, account)
+    except ValueError as e:
+        typer.echo(f"[kage] error: {e}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"[kage] added {account} to {label}")
+
+
+@_identity_app.command("bootstrap")
+def identity_bootstrap():
+    """Seed identities.json with personal/school/family labels (empty accounts). Safe to re-run."""
+    from kage import identity as _id
+    DEFAULT_LABELS = [
+        {"label": "personal", "class": "normal",    "accounts": [], "arm_overrides": {"gmail": {}, "calendar": {}}},
+        {"label": "school",   "class": "normal",    "accounts": [], "arm_overrides": {"gmail": {}}},
+        {"label": "family",   "class": "read-only", "accounts": [], "arm_overrides": {"gmail": {}}},
+    ]
+    data = _id.load_identities()
+    existing = {e["label"] for e in data["identities"]}
+    added = []
+    for entry in DEFAULT_LABELS:
+        if entry["label"] not in existing:
+            data["identities"].append(entry)
+            added.append(entry["label"])
+    _id.save_identities(data)
+    if added:
+        typer.echo(f"[kage] bootstrapped: {', '.join(added)}")
+    else:
+        typer.echo("[kage] all default identities already present")
 
 
 if __name__ == "__main__":  # pragma: no cover

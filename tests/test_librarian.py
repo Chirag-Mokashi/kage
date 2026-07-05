@@ -16,7 +16,7 @@ from kage.librarian import (
     _gate_text, distill_and_judge, ApprovalRequest,
     deposit_to_queue, request_approval, write_note, reject_approval,
     get_catalog_stats, get_staging_queue, _LOCKFILE, _DISTILL_SYSTEM,
-    _emit_ctm_note, _retrieve_ctm,
+    _emit_ctm_note, _retrieve_ctm, list_pending_approvals,
 )
 
 
@@ -752,3 +752,40 @@ def test_distill_and_judge_ctm_disabled_skips_retrieval(lib_env, monkeypatch):
     monkeypatch.setattr(runtime.cloud, "complete", fake_complete)
     distill_and_judge("test content", "manual")
     assert "[kage CTM precedents]" not in captured["system"]
+
+
+# ── list_pending_approvals (Cycle 29) ────────────────────────────────────────
+
+def test_list_pending_approvals_returns_only_undecided(lib_env):
+    staging_id = deposit_to_queue('some content', 'scout')
+    note_json = {'title': 'Test', 'body': 'Body text', 'tags': []}
+    approval_id1 = request_approval(staging_id, 'promote', 'good reason', note_json, 'preview')
+    approval_id2 = request_approval(staging_id, 'promote', 'another reason', note_json, 'preview')
+    conn = _connect()
+    conn.execute("UPDATE approval_queue SET decision='approved' WHERE id=?", (approval_id1,))
+    conn.commit()
+    conn.close()
+    result = list_pending_approvals()
+    assert len(result) == 1
+    assert result[0]['id'] == approval_id2
+
+
+def test_list_pending_approvals_empty_when_all_decided(lib_env):
+    staging_id = deposit_to_queue('some content', 'scout')
+    note_json = {'title': 'Test', 'body': 'Body text', 'tags': []}
+    approval_id = request_approval(staging_id, 'promote', 'good reason', note_json, 'preview')
+    conn = _connect()
+    conn.execute("UPDATE approval_queue SET decision='rejected' WHERE id=?", (approval_id,))
+    conn.commit()
+    conn.close()
+    result = list_pending_approvals()
+    assert len(result) == 0
+
+
+def test_list_pending_approvals_dict_has_required_keys(lib_env):
+    staging_id = deposit_to_queue('some content', 'scout')
+    note_json = {'title': 'Test', 'body': 'Body text', 'tags': []}
+    request_approval(staging_id, 'promote', 'good reason', note_json, 'preview')
+    result = list_pending_approvals()
+    assert len(result) == 1
+    assert all(key in result[0] for key in ['id', 'action', 'reason', 'note_json', 'sanitized_preview', 'created_at'])

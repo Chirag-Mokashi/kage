@@ -1,7 +1,9 @@
 """Tests for kage.monitor (Cycle 16, v0.17.0) — no live LLM, no live MCP, no live Ollama."""
 import json
 import asyncio
+from datetime import datetime, timezone, timedelta
 import pytest
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from kage import runtime, monitor
 from kage.config import Config
@@ -113,7 +115,8 @@ def test_read_pipeline_state_keys(mon_env):
     """read_pipeline_state must return all expected keys."""
     result = read_pipeline_state()
     for key in ("scout_last_run", "librarian_queue_depth", "memory_count",
-                "memory_added_today", "librarian_oldest_pending_hours", "scout_items_today"):
+                "memory_added_today", "librarian_oldest_pending_hours", "scout_items_today",
+                "hours_since_scout_run"):
         assert key in result, f"missing key: {key}"
 
 
@@ -131,6 +134,7 @@ def test_read_pipeline_state_empty_db(mon_env):
     assert result.get("scout_last_run") is None
     assert result.get("librarian_queue_depth") == 0
     assert result.get("memory_count") == 0
+    assert result.get("hours_since_scout_run") is None
 
 
 def test_read_session_log_empty(mon_env):
@@ -544,10 +548,37 @@ def test_digest_impl_writes_md_file(monkeypatch, tmp_path):
     monkeypatch.setattr(monitor, "runtime", FakeRuntime())
     monkeypatch.setattr(monitor, "build_monitor_digest", lambda cfg: None)
     monkeypatch.setattr(_runners, "InMemoryRunner", lambda *a, **kw: FakeRun())
+    monkeypatch.setattr(monitor, "_deposit_context_snapshot", lambda s: None)
+    monkeypatch.setattr(monitor, "_maybe_trigger_learn", lambda p: None)
     monitor._digest_impl({})
     md_path = monitor_dir / f"{today}.md"
     assert md_path.exists()
     assert "## Daily digest" in md_path.read_text()
+
+
+def test_digest_impl_no_deposit_on_empty_digest(monkeypatch, tmp_path):
+    import google.adk.runners as _runners
+    calls = []
+    class FakeSess:
+        id = "s1"
+        state = {"monitor_digest": ""}
+    class FakeSvc:
+        async def create_session(self, **kw): return FakeSess()
+        async def get_session(self, **kw): return FakeSess()
+    class FakeRun:
+        session_service = FakeSvc()
+        def run(self, **kw): return iter([])
+    class FakeConfig:
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+    monkeypatch.setattr(monitor, "runtime", FakeRuntime())
+    monkeypatch.setattr(monitor, "build_monitor_digest", lambda cfg: None)
+    monkeypatch.setattr(_runners, "InMemoryRunner", lambda *a, **kw: FakeRun())
+    monkeypatch.setattr(monitor, "_deposit_context_snapshot", lambda s: calls.append(s))
+    monkeypatch.setattr(monitor, "_maybe_trigger_learn", lambda p: None)
+    monitor._digest_impl({})
+    assert calls == []
 
 
 def test_digest_impl_reads_observations(monkeypatch, tmp_path):
@@ -633,7 +664,7 @@ def test_monitor_run_calls_both(monkeypatch):
 
 
 def test_monitor_install_creates_both_plists(monkeypatch, tmp_path):
-    """monitor_install writes both plist files and calls bootout+bootstrap for each label."""
+    """monitor_install writes all three plist files and calls bootout+bootstrap for each label."""
     import shutil as _shutil, subprocess as _sp, pathlib, kage.monitor as _kmon
     from kage.cli import monitor_install
     from pathlib import Path
@@ -648,13 +679,13 @@ def test_monitor_install_creates_both_plists(monkeypatch, tmp_path):
     monitor_install()
 
     # both plist files must exist
-    for label in ["dev.kage.monitor.observe", "dev.kage.monitor.digest"]:
+    for label in ["dev.kage.monitor.ax", "dev.kage.monitor.observe", "dev.kage.monitor.digest"]:
         plist_path = tmp_path / ".config" / "kage" / f"{label}.plist"
         assert plist_path.exists(), f"{label}.plist not created"
 
-    # bootout + bootstrap called for each of the two plists
+    # bootout + bootstrap called for each of the three plists
     bootstrap_calls = [c for c in sp_calls if "bootstrap" in c and "bootout" not in c]
-    assert len(bootstrap_calls) == 2
+    assert len(bootstrap_calls) == 3
 
 
 # ── Cycle 22 — Monitor correction-count trigger ───────────────────────────────
@@ -725,3 +756,152 @@ def test_maybe_trigger_learn_librarian_fires_at_threshold(monkeypatch, tmp_path)
     _maybe_trigger_learn(tmp_path)
     assert calls == [["kage", "learn", "--librarian"]]
     assert _read_learn_state(home=tmp_path)["last_librarian_learn_count"] == 9
+
+
+# ── AX daemon plist (Cycle 28 monitor fix) ────────────────────────────────────
+
+def test_generate_ax_plist_content():
+    from kage.monitor import _generate_ax_plist
+    content = _generate_ax_plist("uv", "/proj", "/home")
+    assert "dev.kage.monitor.ax" in content
+    assert "ax-daemon" in content
+    assert "<key>KeepAlive</key><true/>" in content
+    assert "StartInterval" not in content
+
+
+def test_monitor_install_writes_ax_plist(tmp_path, monkeypatch):
+    import shutil, subprocess as _sp
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/uv")
+    monkeypatch.setattr(_sp, "run", lambda *a, **kw: None)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    from typer.testing import CliRunner
+    from kage.cli import app
+    result = CliRunner().invoke(app, ["monitor", "install"])
+    assert result.exit_code == 0
+    assert (tmp_path / ".config" / "kage" / "dev.kage.monitor.ax.plist").exists()
+
+
+def test_monitor_uninstall_removes_ax_plist(tmp_path, monkeypatch):
+    import subprocess as _sp
+    monkeypatch.setattr(_sp, "run", lambda *a, **kw: None)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    plist = tmp_path / ".config" / "kage" / "dev.kage.monitor.ax.plist"
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    plist.write_text("")
+    from typer.testing import CliRunner
+    from kage.cli import app
+    result = CliRunner().invoke(app, ["monitor", "uninstall"])
+    assert result.exit_code == 0
+    assert not plist.exists()
+
+
+def test_read_pipeline_state_hours_since_scout_run_recent(mon_env):
+    """hours_since_scout_run must be a small float when scout ran recently."""
+    conn = _connect()
+    conn.execute("CREATE TABLE IF NOT EXISTS scout_runs (created_at TEXT, notes_fetched INTEGER, mode TEXT)")
+    recent = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    conn.execute("INSERT INTO scout_runs (created_at, notes_fetched, mode) VALUES (?, ?, ?)", (recent, 5, "run"))
+    conn.commit()
+    conn.close()
+    result = read_pipeline_state()
+    val = result.get("hours_since_scout_run")
+    assert val is not None
+    assert 1.5 < val < 3.0
+
+
+def test_read_pipeline_state_hours_since_scout_run_stale(mon_env):
+    """hours_since_scout_run must be >= 49 when scout ran 50h ago."""
+    conn = _connect()
+    conn.execute("CREATE TABLE IF NOT EXISTS scout_runs (created_at TEXT, notes_fetched INTEGER, mode TEXT)")
+    stale = (datetime.now(timezone.utc) - timedelta(hours=50)).isoformat()
+    conn.execute("INSERT INTO scout_runs (created_at, notes_fetched, mode) VALUES (?, ?, ?)", (stale, 3, "run"))
+    conn.commit()
+    conn.close()
+    result = read_pipeline_state()
+    val = result.get("hours_since_scout_run")
+    assert val is not None
+    assert val >= 49.0
+
+
+def test_monitor_observe_instruction_scout_reporting():
+    """Instruction must report Scout last-run as a fact, not as a threshold alert."""
+    from kage.monitor import _MONITOR_OBSERVE_INSTRUCTION
+    assert "hours_since_scout_run" in _MONITOR_OBSERVE_INSTRUCTION
+    assert "Do NOT write an alert for Scout" in _MONITOR_OBSERVE_INSTRUCTION
+    # no threshold comparisons
+    assert "48h" not in _MONITOR_OBSERVE_INSTRUCTION
+    assert "36h" not in _MONITOR_OBSERVE_INSTRUCTION
+
+
+# ── _deposit_context_snapshot (Cycle 29) ────────────────────────────────────
+
+def test_deposit_context_snapshot_calls_deposit_to_queue(monkeypatch, tmp_path):
+    class FakeConfig:
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+    monkeypatch.setattr(monitor, 'runtime', FakeRuntime())
+    monkeypatch.setattr(monitor, 'read_pipeline_state', lambda: {'hours_since_scout_run': 2.5, 'librarian_queue_depth': 1, 'memory_count': 42})
+    monkeypatch.setattr('kage.context._read_active', lambda: {'identity': 'personal', 'project': 'kage'})
+    calls = []
+    monkeypatch.setattr('kage.librarian.deposit_to_queue', lambda *a, **kw: calls.append((a, kw)))
+    monitor._deposit_context_snapshot('test summary')
+    assert len(calls) == 1
+    assert calls[0][1].get('source') == 'monitor'
+    assert calls[0][1].get('project') == 'kage'
+
+
+def test_deposit_context_snapshot_content_has_required_fields(monkeypatch, tmp_path):
+    class FakeConfig:
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+    monkeypatch.setattr(monitor, 'runtime', FakeRuntime())
+    monkeypatch.setattr(monitor, 'read_pipeline_state', lambda: {'hours_since_scout_run': 2.5, 'librarian_queue_depth': 1, 'memory_count': 42})
+    monkeypatch.setattr('kage.context._read_active', lambda: {'identity': 'personal', 'project': 'kage'})
+    calls = []
+    monkeypatch.setattr('kage.librarian.deposit_to_queue', lambda *a, **kw: calls.append((a, kw)))
+    monitor._deposit_context_snapshot('test summary')
+    content = calls[0][0][0]
+    assert 'Active project:' in content
+    assert 'Active identity:' in content
+    assert 'Pipeline state' in content
+    assert '2.5h ago' in content
+
+
+def test_deposit_context_snapshot_dedup(mon_env, monkeypatch):
+    monkeypatch.setattr(monitor, 'read_pipeline_state', lambda: {'hours_since_scout_run': None, 'librarian_queue_depth': 0, 'memory_count': 0})
+    monkeypatch.setattr('kage.context._read_active', lambda: {'identity': 'personal', 'project': 'kage'})
+    monitor._deposit_context_snapshot('same')
+    monitor._deposit_context_snapshot('same')
+    from kage.librarian import _connect
+    conn = _connect()
+    count = conn.execute("SELECT COUNT(*) FROM staging_queue WHERE source='monitor'").fetchone()[0]
+    conn.close()
+    assert count == 1
+
+
+def test_digest_impl_calls_deposit_context_snapshot(monkeypatch, tmp_path):
+    import google.adk.runners as _runners
+    monkeypatch.setattr(monitor, 'build_monitor_digest', lambda cfg: None)
+    monkeypatch.setattr(monitor, '_write_state_json', lambda state: None)
+    monkeypatch.setattr(monitor, '_maybe_trigger_learn', lambda path: None)
+    deposit_calls = []
+    monkeypatch.setattr(monitor, '_deposit_context_snapshot', lambda s: deposit_calls.append(s))
+    class FakeSess:
+        id = 's1'
+        state = {'monitor_digest': 'some digest'}
+    class FakeSvc:
+        async def create_session(self, **kw): return FakeSess()
+        async def get_session(self, **kw): return FakeSess()
+    class FakeRun:
+        session_service = FakeSvc()
+        def run(self, **kw): return iter([])
+    class FakeConfig:
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+    monkeypatch.setattr(monitor, 'runtime', FakeRuntime())
+    monkeypatch.setattr(_runners, 'InMemoryRunner', lambda *a, **kw: FakeRun())
+    monitor._digest_impl({})
+    assert len(deposit_calls) == 1

@@ -5952,3 +5952,82 @@ def test_import_blocks_read_only_identity(monkeypatch, tmp_path):
     result = CliRunner().invoke(cli.app, ["import", "--identity", "family", str(folder)])
     assert result.exit_code == 1
     assert "read-only" in result.output
+
+
+# ── Librarian HITL (Cycle 29) ───────────────────────────────────────────────
+
+def test_librarian_queue_shows_awaiting_approval_section(monkeypatch):
+    import json
+    fake_item = {'id': 'abc12345xyz', 'action': 'promote', 'reason': 'good stuff', 'note_json': json.dumps({'title': 'My Note', 'body': 'body text'}), 'sanitized_preview': 'preview', 'created_at': '2026-07-05T10:00:00', 'source': 'scout'}
+    monkeypatch.setattr('kage.librarian.list_pending_approvals', lambda: [fake_item])
+    monkeypatch.setattr('kage.librarian.get_staging_queue', lambda status='pending': [])
+    result = CliRunner().invoke(cli.app, ['librarian', 'queue'])
+    assert 'Awaiting your approval' in result.output
+    assert 'abc12345' in result.output
+    assert 'My Note' in result.output
+    assert 'approve' in result.output
+
+
+def test_librarian_queue_shows_staging_backlog(monkeypatch):
+    monkeypatch.setattr('kage.librarian.list_pending_approvals', lambda: [])
+    monkeypatch.setattr('kage.librarian.get_staging_queue', lambda status='pending': [{'source': 'scout', 'content': 'x'}, {'source': 'monitor', 'content': 'y'}])
+    result = CliRunner().invoke(cli.app, ['librarian', 'queue'])
+    assert 'Staging backlog' in result.output
+    assert 'scout: 1' in result.output
+    assert 'monitor: 1' in result.output
+
+
+def test_librarian_run_approve_prompt(monkeypatch):
+    import json
+    fake_item = {'id': 'abc12345xyz', 'action': 'promote', 'reason': 'good', 'note_json': json.dumps({'title': 'T', 'body': 'B'}), 'sanitized_preview': 'prev', 'created_at': '2026-07-05', 'source': 'scout'}
+    monkeypatch.setattr(cli, '_config', lambda: {})
+    monkeypatch.setattr('kage.librarian.run', lambda cfg: 'processed')
+    monkeypatch.setattr('kage.librarian.list_pending_approvals', lambda: [fake_item])
+    write_calls = []
+    monkeypatch.setattr('kage.librarian.write_note', lambda id: write_calls.append(id) or True)
+    CliRunner().invoke(cli.app, ['librarian', 'run'], input='a\n')
+    assert len(write_calls) == 1
+    assert write_calls[0] == 'abc12345xyz'
+
+
+def test_librarian_run_skip_prompt(monkeypatch):
+    import json
+    fake_item = {'id': 'abc12345xyz', 'action': 'promote', 'reason': 'good', 'note_json': json.dumps({'title': 'T', 'body': 'B'}), 'sanitized_preview': 'prev', 'created_at': '2026-07-05', 'source': 'scout'}
+    monkeypatch.setattr(cli, '_config', lambda: {})
+    monkeypatch.setattr('kage.librarian.run', lambda cfg: 'processed')
+    monkeypatch.setattr('kage.librarian.list_pending_approvals', lambda: [fake_item])
+    write_calls = []
+    monkeypatch.setattr('kage.librarian.write_note', lambda id: write_calls.append(id) or True)
+    CliRunner().invoke(cli.app, ['librarian', 'run'], input='s\n')
+    assert len(write_calls) == 0
+
+
+# ── Scout gate (Cycle 29) ────────────────────────────────────────────────────
+
+def test_scout_run_aborts_on_no(monkeypatch):
+    from kage import cli
+    runner = CliRunner()
+    calls = []
+    monkeypatch.setattr('kage.scout.run', lambda *a, **kw: calls.append(a))
+    result = runner.invoke(cli.app, ['scout', 'run'], input='n\n')
+    assert len(calls) == 0
+    assert 'Aborted' in result.output
+
+def test_scout_run_proceeds_on_y_prompt(monkeypatch):
+    from kage import cli
+    runner = CliRunner()
+    calls = []
+    monkeypatch.setattr('kage.scout.run', lambda *a, **kw: calls.append(a))
+    runner.invoke(cli.app, ['scout', 'run'], input='y\n')
+    assert len(calls) == 1
+    assert 'run' in calls[0]
+
+def test_scout_run_yes_flag_skips_prompt(monkeypatch):
+    from kage import cli
+    runner = CliRunner()
+    calls = []
+    monkeypatch.setattr('kage.scout.run', lambda *a, **kw: calls.append(a))
+    result = runner.invoke(cli.app, ['scout', 'run', '--yes'])
+    assert len(calls) == 1
+    assert 'run' in calls[0]
+    assert 'Proceed' not in result.output

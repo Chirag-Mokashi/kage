@@ -1183,7 +1183,7 @@ def ask(
         else:
             prompt = f"{system}\n\nQUESTION: {question}"
         try:
-            out = _post_json(url, {"model": model, "prompt": prompt, "stream": False, "think": think})
+            out = _post_json(url, {"model": model, "prompt": prompt, "stream": False, "think": think}, timeout=300)
         except urllib.error.URLError:
             typer.echo("Can't reach the local model. Is Ollama running? (`ollama serve`) — or use --cloud.", err=True)
             raise typer.Exit(code=1)
@@ -1862,9 +1862,15 @@ def mcp_serve() -> None:
 
 
 @_scout_app.command("run")
-def scout_run() -> None:
+def scout_run(yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt")) -> None:
     """Fetch all sources, run both ADK stages, write morning report, update cache."""
     from kage import scout as _scout
+    if not yes:
+        typer.echo("Scout will run now. This uses cloud tokens (~5 min, OpenRouter).")
+        answer = typer.prompt("Proceed? [y/N]", default="N")
+        if answer.strip().lower() not in ("y", "yes"):
+            typer.echo("Aborted.")
+            raise typer.Exit(code=0)
     try:
         _scout.run("run")
     except RuntimeError as e:
@@ -1910,6 +1916,28 @@ def librarian_run() -> None:
     cfg = _config()
     result = _lib.run(cfg)
     typer.echo(result)
+    pending = _lib.list_pending_approvals()
+    if not pending:
+        return
+    typer.echo(f"\n--- {len(pending)} item(s) awaiting your approval ---")
+    for item in pending:
+        try:
+            note = json.loads(item["note_json"])
+        except (json.JSONDecodeError, TypeError):
+            note = {}
+        title = note.get("title", "") or item.get("sanitized_preview", "")[:60]
+        body = (note.get("body", "") or "")[:100]
+        typer.echo(f"\n  [{item['id'][:8]}] {item['action']} -- \"{title}\"")
+        typer.echo(f"  Reason: {item['reason']}")
+        typer.echo(f"  Body:   {body}")
+        answer = typer.prompt("  [a]pprove / [r]eject / [s]kip", default="s")
+        choice = answer.strip().lower()
+        if choice in ("a", "approve"):
+            ok = _lib.write_note(item["id"])
+            typer.echo("  approved and written." if ok else "  write failed.")
+        elif choice in ("r", "reject"):
+            _lib.reject_approval(item["id"], "")
+            typer.echo("  rejected.")
 
 
 @_librarian_app.command("approve")
@@ -1940,18 +1968,33 @@ def librarian_reject(
 
 
 @_librarian_app.command("queue")
-def librarian_queue(held: bool = typer.Option(False, "--held", help="Show held items instead of pending")) -> None:
-    """Show queue counts and recent items."""
+def librarian_queue() -> None:
+    """Show pending approvals (full detail) and staging backlog (counts by source)."""
     from kage import librarian as _lib
-    status = "held" if held else "pending"
-    items = _lib.get_staging_queue(status=status)
-    stats = _lib.get_catalog_stats()
-    typer.echo(f"queue [{status}]: {len(items)} items  (total notes: {stats['note_count']})")
-    for item in items[:10]:
-        preview = (item.get("content", "") or "")[:80].replace("\n", " ")
-        typer.echo(f"  {item['id'][:8]}  {item['source']:<10}  {preview}")
-    if len(items) > 10:
-        typer.echo(f"  … and {len(items) - 10} more")
+    approvals = _lib.list_pending_approvals()
+    typer.echo(f"=== Awaiting your approval ({len(approvals)} items) ===")
+    for item in approvals:
+        try:
+            note = json.loads(item["note_json"])
+        except (json.JSONDecodeError, TypeError):
+            note = {}
+        title = note.get("title", "") or item.get("sanitized_preview", "")[:60]
+        body = (note.get("body", "") or "")[:200]
+        typer.echo(f"\n  [{item['id'][:8]}]")
+        typer.echo(f"  Title:   {title}")
+        typer.echo(f"  Body:    {body}")
+        typer.echo(f"  Reason:  {item['reason']}")
+        typer.echo(f"  Source:  {item.get('source', '?'):<10}  Action: {item['action']}")
+        typer.echo(f"  Created: {item['created_at']}")
+        typer.echo(f"  -> kage librarian approve {item['id'][:8]}")
+        typer.echo(f"  -> kage librarian reject  {item['id'][:8]}")
+    staging = _lib.get_staging_queue(status="pending")
+    counts: dict[str, int] = {}
+    for s in staging:
+        counts[s["source"]] = counts.get(s["source"], 0) + 1
+    counts_str = "  ".join(f"{k}: {v}" for k, v in sorted(counts.items())) or "empty"
+    typer.echo(f"\n=== Staging backlog ({len(staging)} pending items) ===")
+    typer.echo(f"  {counts_str}")
 
 
 @_librarian_app.command("locate")
@@ -2010,6 +2053,13 @@ def monitor_run() -> None:
         typer.echo(f"digest error: {e}", err=True)
         return
     typer.echo("Monitor: done.")
+
+
+@_monitor_app.command("ax-daemon")
+def monitor_ax_daemon() -> None:
+    """Run AX event capture daemon (blocks — managed by launchd)."""
+    from kage import observe as _obs
+    _obs.start_observer()
 
 
 @_monitor_app.command("observe")
@@ -2080,6 +2130,7 @@ def monitor_install() -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
     uid = f"gui/{_os.getuid()}"
     for gen_fn, label in [
+        (_mon._generate_ax_plist,      "dev.kage.monitor.ax"),
         (_mon._generate_observe_plist, "dev.kage.monitor.observe"),
         (_mon._generate_digest_plist,  "dev.kage.monitor.digest"),
     ]:
@@ -2091,7 +2142,7 @@ def monitor_install() -> None:
     old = Path.home() / ".config" / "kage" / "dev.kage.monitor.plist"
     if old.exists():
         _sp.run(["launchctl", "bootout", uid, str(old)], check=False)
-    typer.echo(f"Monitor installed (observe + digest). Logs: {log_dir}")
+    typer.echo(f"Monitor installed (ax-daemon + observe + digest). Logs: {log_dir}")
 
 
 @_monitor_app.command("uninstall")
@@ -2099,7 +2150,7 @@ def monitor_uninstall() -> None:
     """Unload Monitor from launchd and remove both plists."""
     import subprocess as _sp, os as _os
     uid = f"gui/{_os.getuid()}"
-    for label in ["dev.kage.monitor.observe", "dev.kage.monitor.digest"]:
+    for label in ["dev.kage.monitor.ax", "dev.kage.monitor.observe", "dev.kage.monitor.digest"]:
         plist_path = Path.home() / ".config" / "kage" / f"{label}.plist"
         _sp.run(["launchctl", "bootout", uid, str(plist_path)], check=False)
         plist_path.unlink(missing_ok=True)

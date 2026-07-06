@@ -562,9 +562,11 @@ def _emit_ctm_note(approval_id: str, home: pathlib.Path) -> None:
             # needs_embed=0 — CTM notes are short metadata, not for ChromaDB.
             (note_id, rel_path, "kage-ctm-librarian", ts, "baseline"),
         )
+        from kage import identity as _identity_mod
+        identity = _identity_mod.resolve_write_identity("personal")
         conn.execute(
             "INSERT OR IGNORE INTO memory_identities(mem_id, identity) VALUES (?, ?)",
-            (note_id, "personal"),
+            (note_id, identity),
         )
         conn.execute(
             "INSERT OR IGNORE INTO memory_projects(mem_id, project) VALUES (?, ?)",
@@ -592,6 +594,9 @@ def write_note(approval_id: str) -> bool:
     Write order: DB INSERT first, then file — stale pointer surfaces in
     'kage reindex' as '⚠ missing file, skipping'; a ghost file has no DB row
     and is permanently undetectable."""
+
+    from kage import identity as _identity_mod
+    import sys
 
     # Step 1 — read note_json from approval_queue; guard against double-write
     conn = _connect()
@@ -636,7 +641,15 @@ def write_note(approval_id: str) -> bool:
 
     # Step 3 — prepare fields
     project = note.get("project") or None
-    identity = note.get("identity") or "personal"
+    try:
+        identity = _identity_mod.resolve_write_identity(note.get("identity") or "personal")
+    except _identity_mod.ReadOnlyIdentityError:
+        reject_approval(approval_id, reason="read-only identity")
+        return False
+    except _identity_mod.RegistryCorruptError as e:
+        print(f"[kage] librarian write_note: identities.json corrupt, leaving "
+              f"approval {approval_id} undecided: {e}", file=sys.stderr)
+        return False
     source = note.get("source", "librarian")
     body = note.get("body", "")
     tags_raw = note.get("tags", [])
@@ -994,9 +1007,11 @@ def reject_approval(approval_id: str, reason: str = "") -> bool:
                 " VALUES (?, ?, ?, ?, 0, ?)",
                 (note_id, rel_path, "kage-corrections-librarian", ts, "scoped"),
             )
+            from kage import identity as _identity_mod
+            identity = _identity_mod.resolve_write_identity("personal")
             conn.execute(
                 "INSERT OR IGNORE INTO memory_identities(mem_id, identity) VALUES (?, ?)",
-                (note_id, "personal"),
+                (note_id, identity),
             )
             conn.execute(
                 "INSERT OR IGNORE INTO memory_projects(mem_id, project) VALUES (?, ?)",

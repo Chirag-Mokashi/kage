@@ -523,6 +523,26 @@ def request_approval(staging_id: str | None, action: str, reason: str,
     return approval_id
 
 
+def list_pending_approvals() -> list[dict]:
+    """Return approval_queue items awaiting decision (decision IS NULL), oldest first."""
+    conn = None
+    try:
+        conn = _connect()
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            "SELECT aq.id, aq.action, aq.reason, aq.note_json, aq.sanitized_preview, "
+            "aq.created_at, sq.source AS source "
+            "FROM approval_queue aq "
+            "LEFT JOIN staging_queue sq ON sq.id = aq.staging_id "
+            "WHERE aq.decision IS NULL ORDER BY aq.created_at ASC"
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        return rows
+    finally:
+        if conn:
+            conn.close()
+
+
 def _emit_ctm_note(approval_id: str, home: pathlib.Path) -> None:
     """Write a CTM precedent note for a successful Librarian approval.
     Self-contained: single connection, all SELECTs in one JOIN."""

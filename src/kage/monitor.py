@@ -72,6 +72,18 @@ def read_pipeline_state() -> dict:
             # scout_runs table doesn't exist yet (Scout never run)
             scout_last_run, scout_items_today = None, 0
 
+        hours_since_scout_run = None
+        if scout_last_run:
+            try:
+                ts = datetime.fromisoformat(scout_last_run)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                hours_since_scout_run = round(
+                    (datetime.now(timezone.utc) - ts).total_seconds() / 3600, 1
+                )
+            except Exception:
+                pass
+
         queue_depth = conn.execute(
             "SELECT COUNT(*) FROM staging_queue WHERE status='pending'"
         ).fetchone()[0]
@@ -100,6 +112,7 @@ def read_pipeline_state() -> dict:
         return {
             "scout_last_run": scout_last_run,
             "scout_items_today": scout_items_today,
+            "hours_since_scout_run": hours_since_scout_run,
             "librarian_queue_depth": queue_depth,
             "librarian_oldest_pending_hours": oldest_pending_hours,
             "memory_count": memory_count,
@@ -434,13 +447,39 @@ def _generate_digest_plist(uv_path: str, project_root: str, home: str) -> str:
 </dict></plist>"""
 
 
+def _generate_ax_plist(uv_path: str, project_root: str, home: str) -> str:
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.kage.monitor.ax</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{uv_path}</string>
+    <string>run</string><string>--project</string>
+    <string>{project_root}</string>
+    <string>kage</string><string>monitor</string><string>ax-daemon</string>
+  </array>
+  <key>KeepAlive</key><true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>{home}</string>
+  </dict>
+  <key>StandardOutPath</key><string>{home}/.kage/logs/monitor-ax.log</string>
+  <key>StandardErrorPath</key><string>{home}/.kage/logs/monitor-ax.err</string>
+</dict></plist>"""
+
+
 # ── ADK Workflow ──────────────────────────────────────────────────────────────
 
 _MONITOR_OBSERVE_INSTRUCTION = (
     "You are Monitor — kage's observer. Your job is to read pipeline state, session logs, "
     "system health, and activity context, then:\n"
     "1. Write alerts for any anomaly you detect (queue backlog, MCP server down, Ollama "
-    "offline, Scout not run in 48h, disk > 90%).\n"
+    "offline, disk > 90%).\n"
+    "   For Scout: report hours_since_scout_run from read_pipeline_state as a fact "
+    "(e.g. 'Scout last ran 4.2h ago' or 'Scout has never run'). "
+    "Do NOT write an alert for Scout — just state when it last ran.\n"
     "2. Detect non-obvious patterns across accumulated signals (topic drift, model switch "
     "patterns, provider latency trends, project going cold).\n"
     "3. Write a concise digest summarising findings.\n\n"
@@ -652,6 +691,39 @@ def _maybe_trigger_learn(home: Path) -> None:
     _write_learn_state(state, home=home)
 
 
+def _deposit_context_snapshot(digest_summary: str) -> None:
+    """Deposit a structured session-context snapshot to Librarian staging queue."""
+    from kage.context import _read_active
+    from kage.librarian import deposit_to_queue
+    active = _read_active()
+    state = read_pipeline_state()
+    hours_display = f"{state['hours_since_scout_run']}h ago" if state.get("hours_since_scout_run") is not None else "never"
+    monitor_dir = Path(runtime.config.home) / "monitor"
+    today = datetime.now().strftime("%Y-%m-%d")
+    obs_path = monitor_dir / f"observations-{today}.jsonl"
+    findings_lines = []
+    if obs_path.exists():
+        for line in obs_path.read_text().splitlines()[-3:]:
+            try:
+                r = json.loads(line)
+                findings_lines.append(r["findings"][:200])
+            except (json.JSONDecodeError, KeyError):
+                pass
+    recent = "\n".join(findings_lines) or digest_summary[:600]
+    content = (
+        "## Monitor context snapshot\n\n"
+        f"**Active project:** {active.get('project') or 'none'}\n"
+        f"**Active identity:** {active.get('identity', 'personal')}\n\n"
+        "### Recent activity (AX observer summary)\n"
+        f"{recent}\n\n"
+        "### Pipeline state\n"
+        f"- Scout last run: {hours_display}\n"
+        f"- Librarian queue depth: {state.get('librarian_queue_depth', 0)} pending\n"
+        f"- Memory notes: {state.get('memory_count', 0)} total\n"
+    )
+    deposit_to_queue(content, source="monitor", project=active.get("project"), identity=active.get("identity"))
+
+
 def _digest_impl(cfg: dict) -> None:
     """Read today's observations and run MonitorDigest to produce daily .md."""
     from google.adk.runners import InMemoryRunner
@@ -704,5 +776,10 @@ def _digest_impl(cfg: dict) -> None:
         "last_updated": datetime.now(timezone.utc).isoformat(),
         "digest_preview": digest[:200] if digest else "",
     })
+    if digest:
+        try:
+            _deposit_context_snapshot(digest[:600])
+        except Exception:
+            pass  # ponytail: non-critical; digest already written
 
     _maybe_trigger_learn(Path(runtime.config.home))

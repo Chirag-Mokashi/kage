@@ -32,8 +32,11 @@ def load_identities() -> dict:
 
 
 def save_identities(data: dict) -> None:
-    with open(_stores_dir() / "identities.json", "w") as f:
+    path = _stores_dir() / "identities.json"
+    with open(path, "w") as f:
         json.dump(data, f, indent=2)
+    from kage import runtime
+    runtime._chmod600(path)
 
 
 def get_identity(label: str) -> dict | None:

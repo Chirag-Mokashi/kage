@@ -39,8 +39,11 @@ def load_allowlist() -> dict:
         return {"values": []}
 
 def save_allowlist(data: dict) -> None:
-    with open(_stores_dir() / "allowlist.json", "w") as f:
+    path = _stores_dir() / "allowlist.json"
+    with open(path, "w") as f:
         json.dump(data, f, indent=2)
+    from kage import runtime
+    runtime._chmod600(path)
 
 def add_allow(label: str, value: str) -> None:
     # guard: reject values whose detected PII type must never reach cloud
@@ -91,9 +94,13 @@ def load_queue() -> list[dict]:
 
 def append_queue(entry: dict) -> None:
     path = _stores_dir() / "privacy_queue.jsonl"
+    existed = path.exists()
     os.makedirs(path.parent, exist_ok=True)
     with open(path, "a") as f:
         f.write(json.dumps(entry) + "\n")
+    from kage import runtime
+    if not existed:
+        runtime._chmod600(path)
 
 def save_queue(entries: list[dict]) -> None:
     """Rewrite the entire privacy queue (used after review to update statuses)."""
@@ -101,6 +108,8 @@ def save_queue(entries: list[dict]) -> None:
     with open(path, "w") as f:
         for entry in entries:
             f.write(json.dumps(entry) + "\n")
+    from kage import runtime
+    runtime._chmod600(path)
 
 # ponytail: O(n) queue scan per gate call; upgrade path: in-memory indexed set if queue grows past ~1000 entries
 def queue_values() -> set[str]:

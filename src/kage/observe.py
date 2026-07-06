@@ -123,7 +123,8 @@ def _write_event(event: ObserveEvent) -> None:
         kage_dir = Path.home() / ".kage" / "observe"
         kage_dir.mkdir(parents=True, exist_ok=True)
         file_path = kage_dir / f"{today}.jsonl"
-        if file_path.exists():
+        existed = file_path.exists()
+        if existed:
             lines = file_path.read_text().splitlines(keepends=True)
             if lines:
                 try:
@@ -138,6 +139,9 @@ def _write_event(event: ObserveEvent) -> None:
         with open(file_path, "a") as f:
             f.write(json.dumps(new_dict) + "\n")
         _last_event = new_dict
+        if not existed:
+            from kage import runtime
+            runtime._chmod600(file_path)
     except Exception as e:
         logger.error(f"observe _write_event: {e}")
 

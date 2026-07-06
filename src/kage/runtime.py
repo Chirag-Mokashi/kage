@@ -28,6 +28,15 @@ vector: VectorIndex = None  # type: ignore[assignment]
 calendar: EventKitBackend = None  # type: ignore[assignment]
 
 
+def _chmod600(path) -> None:
+    """Best-effort tighten permissions on a file that may hold PII (Cycle 28.1)."""
+    import os
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 def reset() -> None:
     """(Re)build all seams from current env. Idempotent; safe to call at startup."""
     global config, store, cloud, embed, vector, calendar

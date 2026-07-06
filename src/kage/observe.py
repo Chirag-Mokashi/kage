@@ -6,7 +6,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 import logging
-from kage import runtime
 
 try:
     from AppKit import NSWorkspace as _NSWorkspace
@@ -44,6 +43,14 @@ class ObserveEvent:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def _active_context() -> tuple[str, str]:
+    """(identity, project) from kage's active-context state — NOT the
+    sessions table (that lookup never worked; see Cycle 28.1)."""
+    from kage.context import _resolve_context
+    identity, project, _ = _resolve_context(None, None)
+    return (identity, project or "")
 
 
 def _pii_strip(text: str) -> str:
@@ -141,17 +148,7 @@ def _observe_loop() -> None:
         if _seconds_since_input() > _AFK_THRESHOLD:
             continue
         ax_text, window = _read_ax_focused()
-        project, identity = "", "personal"
-        try:
-            conn = runtime.store.connect()
-            row = conn.execute(
-                "SELECT project, identity FROM sessions ORDER BY updated_at DESC LIMIT 1"
-            ).fetchone()
-            if row:
-                project, identity = row[0] or "", row[1] or "personal"
-            conn.close()
-        except Exception:
-            pass
+        identity, project = _active_context()
         try:
             fi = _NSWorkspace.sharedWorkspace().frontmostApplication()
             app_name = fi.localizedName() or ""
@@ -219,17 +216,7 @@ def start_observer() -> None:
                 ax_text, window = _read_ax_focused()
                 if not ax_text and not window:
                     window = name
-                project, identity = "", "personal"
-                try:
-                    conn = runtime.store.connect()
-                    row = conn.execute(
-                        "SELECT project, identity FROM sessions ORDER BY updated_at DESC LIMIT 1"
-                    ).fetchone()
-                    if row:
-                        project, identity = row[0] or "", row[1] or "personal"
-                    conn.close()
-                except Exception:
-                    pass
+                identity, project = _active_context()
                 ev = ObserveEvent(
                     ts=time.time(), app=name, bundle=bundle,
                     window=_pii_strip(window), ax_text=_pii_strip(ax_text),

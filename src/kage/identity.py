@@ -5,6 +5,16 @@ from pathlib import Path
 import json
 
 
+class RegistryCorruptError(Exception):
+    """Raised when identities.json exists but cannot be parsed (bad JSON, permission
+    error, etc.). Distinct from 'file simply doesn't exist' (FileNotFoundError case,
+    which stays fail-open — a fresh install legitimately has no registry yet)."""
+
+
+class ReadOnlyIdentityError(ValueError):
+    """Raised when a write is attempted as a read-only identity."""
+
+
 def _stores_dir() -> Path:
     # lazy import to avoid circular deps
     from kage import runtime
@@ -18,9 +28,7 @@ def load_identities() -> dict:
     except FileNotFoundError:
         return {"identities": []}
     except Exception as e:
-        import sys
-        print(f"[kage] warning: identities.json unreadable ({e}), read-only wall inactive", file=sys.stderr)
-        return {"identities": []}
+        raise RegistryCorruptError(f"identities.json unreadable: {e}") from e
 
 
 def save_identities(data: dict) -> None:
@@ -36,14 +44,20 @@ def get_identity(label: str) -> dict | None:
 
 
 def active_class(label: str) -> str:
-    entry = get_identity(label)
+    try:
+        entry = get_identity(label)
+    except RegistryCorruptError:
+        return "read-only"
     if entry is None:
         return "normal"
     return entry.get("class", "normal")
 
 
 def identity_arm_overrides(label: str, arm_name: str) -> dict:
-    entry = get_identity(label)
+    try:
+        entry = get_identity(label)
+    except RegistryCorruptError:
+        return {}
     if entry is None:
         return {}
     return entry.get("arm_overrides", {}).get(arm_name, {})
@@ -73,7 +87,24 @@ def add_account(label: str, account: str) -> None:
 
 
 def active_group(label: str) -> str:
-    entry = get_identity(label)
+    try:
+        entry = get_identity(label)
+    except RegistryCorruptError:
+        return label
     if entry is None:
         return label
+    return entry.get("group", label)
+
+
+def resolve_write_identity(label: str) -> str:
+    """Group-resolve a label for tagging a memory write; raise if read-only.
+    EVERY writer to memory_identities MUST route its tag through this function.
+    Built on get_identity() directly (NOT active_class/active_group) so that a
+    RegistryCorruptError propagates AS ITSELF, uncaught — callers must be able to
+    distinguish 'you may not write' (ReadOnlyIdentityError) from 'the registry is
+    currently unreadable' (RegistryCorruptError) and handle them differently.
+    """
+    entry = get_identity(label) or {}
+    if entry.get("class", "normal") == "read-only":
+        raise ReadOnlyIdentityError(f"read-only identity '{label}' cannot write to memory")
     return entry.get("group", label)

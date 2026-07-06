@@ -5953,3 +5953,217 @@ def test_import_blocks_read_only_identity(monkeypatch, tmp_path):
     result = CliRunner().invoke(cli.app, ["import", "--identity", "family", str(folder)])
     assert result.exit_code == 1
     assert "read-only" in result.output
+
+def test_resolve_write_identity_normal_no_group(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({
+        "identities": [{"label": "personal", "class": "normal", "accounts": [], "arm_overrides": {}}]
+    }))
+    assert kage_identity.resolve_write_identity("personal") == "personal"
+
+
+def test_resolve_write_identity_resolves_to_group(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({
+        "identities": [{"label": "personal-us", "class": "normal", "group": "personal", "accounts": [], "arm_overrides": {}}]
+    }))
+    assert kage_identity.resolve_write_identity("personal-us") == "personal"
+
+
+def test_resolve_write_identity_raises_on_read_only(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({
+        "identities": [{"label": "family", "class": "read-only", "accounts": [], "arm_overrides": {}}]
+    }))
+    with pytest.raises(kage_identity.ReadOnlyIdentityError):
+        kage_identity.resolve_write_identity("family")
+
+
+def test_resolve_write_identity_unknown_label_returns_itself(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    assert kage_identity.resolve_write_identity("nonexistent") == "nonexistent"
+
+
+def test_resolve_write_identity_propagates_registry_corrupt(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text("{not valid json")
+    with pytest.raises(kage_identity.RegistryCorruptError):
+        kage_identity.resolve_write_identity("personal")
+
+
+def test_save_applies_chokepoint_to_frontmatter_and_db(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({
+        "identities": [{"label": "personal-us", "class": "normal", "group": "personal", "accounts": [], "arm_overrides": {}}]
+    }))
+    monkeypatch.setattr(cli, "_embed", lambda *a, **kw: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    mem_id = cli._save("some note body", "proj", identities=["personal-us"])
+    md_path = h / "memory" / f"{mem_id}.md"
+    assert "  - personal" in md_path.read_text()
+    assert "  - personal-us" not in md_path.read_text()
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT identity FROM memory_identities WHERE mem_id=?", (mem_id,))
+    assert cursor.fetchall() == [("personal",)]
+
+
+def test_save_raises_on_read_only_identity(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({
+        "identities": [{"label": "family", "class": "read-only", "accounts": [], "arm_overrides": {}}]
+    }))
+    with pytest.raises(kage_identity.ReadOnlyIdentityError):
+        cli._save("note", "proj", identities=["family"])
+def test_mcp_remember_blocks_read_only_identity(monkeypatch, tmp_path):
+    import json as _j
+    h = _mcp_home(monkeypatch, tmp_path)
+    cfg = _j.loads((h / "config.json").read_text())
+    cfg["mcp_allow_writes"] = True
+    (h / "config.json").write_text(_j.dumps(cfg, indent=2))
+    (h / "identities.json").write_text(_j.dumps({
+        "identities": [{
+            "label": "family",
+            "class": "read-only",
+            "accounts": [],
+            "arm_overrides": {}
+        }]
+    }))
+    result = mcp_server.kage_remember("some note", identity="family")
+    assert result["saved"] is False
+    assert result["id"] is None
+    assert result["reason"] == "read-only identity cannot write"
+
+def test_mcp_remember_resolves_identity_group(monkeypatch, tmp_path):
+    import json as _j
+    import sqlite3
+    h = _mcp_home(monkeypatch, tmp_path)
+    cfg = _j.loads((h / "config.json").read_text())
+    cfg["mcp_allow_writes"] = True
+    (h / "config.json").write_text(_j.dumps(cfg, indent=2))
+    (h / "identities.json").write_text(_j.dumps({
+        "identities": [{
+            "label": "personal-us",
+            "class": "normal",
+            "group": "personal",
+            "accounts": [],
+            "arm_overrides": {}
+        }]
+    }))
+    result = mcp_server.kage_remember("some note", identity="personal-us")
+    assert result["saved"] is True
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT identity FROM memory_identities WHERE mem_id=?", (result["id"],))
+    assert cursor.fetchall() == [("personal",)]
+
+
+def test_identity_repair_dry_run_no_changes(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    mem_id = cli._save("a note", "proj", embed=False, identities=["personal"])
+    result = CliRunner().invoke(cli.app, ["identity", "repair", "--dry-run"])
+    assert result.exit_code == 0
+    assert "No orphaned identity tags found" in result.output
+
+
+def test_doctor_identity_check_passes_with_no_orphans(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    cli._save("a note", "proj", embed=False, identities=["personal"])
+    result = CliRunner().invoke(cli.app, ["doctor"])
+    assert "✓ identity tags canonical" in result.output
+
+
+def test_doctor_identity_check_fails_loudly_on_corrupt_registry(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    cli._save("a note", "proj", embed=False, identities=["personal"])
+    (h / "identities.json").write_text("{not valid json at all")
+    result = CliRunner().invoke(cli.app, ["doctor"])
+    assert result.exit_code == 1
+    assert "✗ identity tags canonical" in result.output
+    assert "corrupt" in result.output.lower()
+
+
+def test_identity_repair_dry_run_reports_without_writing(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({
+        "identities": [{"label": "personal-us", "class": "normal", "group": "personal", "accounts": [], "arm_overrides": {}}]
+    }))
+    mem_id = "test-orphan-note"
+    (h / "memory" / f"{mem_id}.md").write_text(
+        "---\nid: test-orphan-note\nproject: proj\ncreated_at: 2027-01-01T00:00:00\n"
+        "identities:\n  - personal-us\nstate: scoped\n---\n\na note\n"
+    )
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    conn.execute(
+        "INSERT INTO memories (id, content_path, project, created_at, state) VALUES (?, ?, ?, ?, ?)",
+        (mem_id, f"memory/{mem_id}.md", "proj", "2027-01-01T00:00:00", "scoped"),
+    )
+    conn.execute("INSERT INTO memory_identities(mem_id, identity) VALUES (?, ?)", (mem_id, "personal-us"))
+    conn.commit()
+    conn.close()
+
+    result = CliRunner().invoke(cli.app, ["identity", "repair", "--dry-run"])
+    assert result.exit_code == 0
+    assert "personal-us" in result.output
+    assert "1 note" in result.output
+
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    rows = conn.execute("SELECT identity FROM memory_identities WHERE mem_id=?", (mem_id,)).fetchall()
+    conn.close()
+    assert rows == [("personal-us",)]
+
+
+def test_identity_repair_applies_and_dedupes(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({
+        "identities": [{"label": "personal-us", "class": "normal", "group": "personal", "accounts": [], "arm_overrides": {}}]
+    }))
+    mem_id = "test-dedupe-note"
+    (h / "memory" / f"{mem_id}.md").write_text(
+        "---\nid: test-dedupe-note\nproject: proj\ncreated_at: 2027-01-01T00:00:00\n"
+        "identities:\n  - personal-us\n  - personal\nstate: scoped\n---\n\na note\n"
+    )
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    conn.execute(
+        "INSERT INTO memories (id, content_path, project, created_at, state) VALUES (?, ?, ?, ?, ?)",
+        (mem_id, f"memory/{mem_id}.md", "proj", "2027-01-01T00:00:00", "scoped"),
+    )
+    conn.execute("INSERT INTO memory_identities(mem_id, identity) VALUES (?, ?)", (mem_id, "personal-us"))
+    conn.execute("INSERT INTO memory_identities(mem_id, identity) VALUES (?, ?)", (mem_id, "personal"))
+    conn.commit()
+    conn.close()
+
+    result = CliRunner().invoke(cli.app, ["identity", "repair"])
+    assert result.exit_code == 0
+
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    rows = conn.execute("SELECT identity FROM memory_identities WHERE mem_id=? ORDER BY identity", (mem_id,)).fetchall()
+    conn.close()
+    assert rows == [("personal",)]
+
+    content = (h / "memory" / f"{mem_id}.md").read_text()
+    assert content.count("  - personal") == 1
+
+
+def test_doctor_identity_check_fails_with_orphan_tag(monkeypatch, tmp_path):
+    h = _save_home(monkeypatch, tmp_path)
+    (h / "identities.json").write_text(json.dumps({
+        "identities": [{"label": "personal-us", "class": "normal", "group": "personal", "accounts": [], "arm_overrides": {}}]
+    }))
+    mem_id = "test-orphan-note"
+    (h / "memory" / f"{mem_id}.md").write_text(
+        "---\nid: test-orphan-note\nproject: proj\ncreated_at: 2027-01-01T00:00:00\n"
+        "identities:\n  - personal-us\nstate: scoped\n---\n\na note\n"
+    )
+    conn = sqlite3.connect(h / "indexes" / "kage.db")
+    conn.execute(
+        "INSERT INTO memories (id, content_path, project, created_at, state) VALUES (?, ?, ?, ?, ?)",
+        (mem_id, f"memory/{mem_id}.md", "proj", "2027-01-01T00:00:00", "scoped"),
+    )
+    conn.execute("INSERT INTO memory_identities(mem_id, identity) VALUES (?, ?)", (mem_id, "personal-us"))
+    conn.commit()
+    conn.close()
+
+    result = CliRunner().invoke(cli.app, ["doctor"])
+    assert result.exit_code == 1
+    assert "✗ identity tags canonical" in result.output
+    assert "personal-us" in result.output

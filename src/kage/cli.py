@@ -1673,7 +1673,7 @@ def _repair_identity_tags(dry_run: bool = False) -> dict:
         if not m:
             continue
 
-        labels = [line[2:].strip() for line in m.group(1).splitlines()]
+        labels = [line[4:].strip() for line in m.group(1).splitlines()]
         canonical_labels = []
         for label in labels:
             resolved = orphans.get(label, label)

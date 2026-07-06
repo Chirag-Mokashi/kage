@@ -183,7 +183,7 @@ def test_check_mcp_health_timeout(mon_env):
     # Write arms config directly — Config.data reads from config.json in kage_home
     cfg_data = {"arms": {"fake": {"enabled": True, "transport": "shell", "command": "false"}}}
     (mon_env / "config.json").write_text(_json.dumps(cfg_data))
-    with patch("asyncio.create_subprocess_shell", new=AsyncMock(side_effect=asyncio.TimeoutError)):
+    with patch("asyncio.create_subprocess_exec", new=AsyncMock(side_effect=asyncio.TimeoutError)):
         result = asyncio.run(check_mcp_health())
     assert result["fake"]["status"] in ("timeout", "error", "degraded")
 
@@ -725,3 +725,23 @@ def test_maybe_trigger_learn_librarian_fires_at_threshold(monkeypatch, tmp_path)
     _maybe_trigger_learn(tmp_path)
     assert calls == [["kage", "learn", "--librarian"]]
     assert _read_learn_state(home=tmp_path)["last_librarian_learn_count"] == 9
+
+def test_check_mcp_health_blocks_shell_interpreter(mon_env):
+    """A shell arm with a shell interpreter as command must be blocked."""
+    import json as _json
+    from kage.monitor import check_mcp_health
+    cfg_data = {"arms": {"fake": {"enabled": True, "transport": "shell", "command": "bash"}}}
+    (mon_env / "config.json").write_text(_json.dumps(cfg_data))
+    result = asyncio.run(check_mcp_health())
+    assert result["fake"]["status"] == "blocked"
+    assert result["fake"]["error"] == "interpreter"
+
+def test_check_mcp_health_bad_command_syntax(mon_env):
+    """A shell arm with bad command syntax must produce an error."""
+    import json as _json
+    from kage.monitor import check_mcp_health
+    cfg_data = {"arms": {"fake": {"enabled": True, "transport": "shell", "command": "echo \"unterminated"}}}
+    (mon_env / "config.json").write_text(_json.dumps(cfg_data))
+    result = asyncio.run(check_mcp_health())
+    assert result["fake"]["status"] == "error"
+    assert result["fake"]["error"] == "bad command syntax"

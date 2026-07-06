@@ -66,3 +66,24 @@ def test_read_observe_log_multi_day(monkeypatch, tmp_path):
     # hours=48: today + 2 past days = 3 files, 3 events
     long_ = _obs.read_observe_log(hours=48.0)
     assert len(long_) == 3
+
+def test_active_context_honors_sticky_state(tmp_path, monkeypatch):
+    kage_home = tmp_path / ".kage"
+    kage_home.mkdir()
+    state_path = kage_home / "state.json"
+    state_path.write_text('{"identity": "school", "project": "thesis"}')
+    fake_config = type("C", (), {"state_path": state_path})()
+    monkeypatch.setattr(runtime, "config", fake_config)
+    identity, project = _obs._active_context()
+    assert identity == "school"
+    assert project == "thesis"
+
+def test_active_context_falls_back_with_no_state_file(tmp_path, monkeypatch):
+    kage_home = tmp_path / ".kage"
+    kage_home.mkdir()
+    state_path = kage_home / "state.json"
+    fake_config = type("C", (), {"state_path": state_path})()
+    monkeypatch.setattr(runtime, "config", fake_config)
+    identity, project = _obs._active_context()
+    assert identity == "personal"
+    assert project == ""

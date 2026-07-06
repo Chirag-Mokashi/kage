@@ -110,3 +110,9 @@ def test_eventkit_reachable():
     store = EK.EKEventStore.alloc().init()
     status = EK.EKEventStore.authorizationStatusForEntityType_(EK.EKEntityTypeEvent)
     assert status in (0, 1, 2, 3, 4)
+
+def test_reject_already_executed_raises(cal):
+    pid = cw.propose_create(title="A", start="2027-01-01T10:00:00", end="2027-01-01T11:00:00", calendar="Work")
+    cw.approve(pid)
+    with pytest.raises(RuntimeError):
+        cw.reject(pid)

@@ -1937,14 +1937,15 @@ def test_call_cloud_perplexity_url_has_no_v1(monkeypatch):
     assert calls[0] == "https://api.perplexity.ai/chat/completions"
 
 
-def test_call_cloud_gemini_key_in_url(monkeypatch):
+def test_call_cloud_gemini_key_in_header(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "gem-key")
     calls = []
-    monkeypatch.setattr(cloud, "_post_json", lambda url, payload, **kw: calls.append(url) or {"candidates": [{"content": {"parts": [{"text": "ans"}]}}]})
+    monkeypatch.setattr(cloud, "_post_json", lambda url, payload, **kw: calls.append((url, kw)) or {"candidates": [{"content": {"parts": [{"text": "ans"}]}}]})
     result = cli._call_cloud("gemini", "sys", "msg", {})
     assert result == "ans"
-    assert "?key=gem-key" in calls[0]
-    assert "generateContent" in calls[0]
+    assert "?key=" not in calls[0][0]
+    assert "generateContent" in calls[0][0]
+    assert calls[0][1]["headers"] == {"x-goog-api-key": "gem-key"}
 
 
 def test_call_cloud_gemini_safety_block_raises(monkeypatch):

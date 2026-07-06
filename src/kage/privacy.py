@@ -15,11 +15,14 @@ _ALWAYS_LOCAL_PROJECTS: frozenset[str] = frozenset({
 
 def _write_audit(record: dict) -> None:
     """Append one JSON record to the audit log. Best-effort — never raises."""
+    existed = runtime.config.audit_path.exists()
     try:
         with open(runtime.config.audit_path, "a") as f:
             f.write(json.dumps(record) + "\n")
     except OSError:
         pass
+    if not existed:
+        runtime._chmod600(runtime.config.audit_path)
 
 
 def _disclosure_gate(rows: list, cfg: dict, identity: str = "personal", project: str | None = None) -> tuple[list, list[dict], dict[str, list[str]]]:

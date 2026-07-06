@@ -2,7 +2,7 @@
 
 *Entry point for any Claude Code session in this repo. Lightweight orientation only — the canonical planning state lives in [docs/blueprint.md](docs/blueprint.md).*
 
-*Last updated: 2026-07-06 (through Cycle 28.1 merged — v0.28.1; Cycles 26-28 previously shipped as v0.26.0/v0.27.0/v0.28.0 but this file's version stamp had drifted — see git tags for the authoritative list)*
+*Last updated: 2026-07-06 (through Cycle 29 merged — v0.29.0 — Monitor→Librarian pipeline + HITL fix + Scout gate; Cycle 28.1 write-wall hotfix merged on top — v0.28.1's identity chokepoint work landed via a separate branch in parallel, see `docs/cycle-28.1-hotfix.md`)*
 
 ---
 
@@ -60,7 +60,7 @@ Every design decision must be checked against this list. Operational definitions
 
 **Working CLI exists.** The repository is no longer purely Stage 0 planning: `src/kage/cli.py` implements the headless local broker thin slice and all cycles through 25.
 
-Current implemented surface (through Cycle 28.1, v0.28.1):
+Current implemented surface (through Cycle 29, v0.29.0, plus the Cycle 28.1 write-wall hotfix merged on top, v0.28.1):
 - local markdown source of truth under `~/.kage/memory`
 - SQLite FTS5 index and project partition filter
 - ChromaDB chunk/vector index with `kage reindex`
@@ -75,9 +75,9 @@ Current implemented surface (through Cycle 28.1, v0.28.1):
 - MCP server (`kage mcp serve`) exposing `kage_recall`, `kage_remember`, `kage_ask`, `kage_status` (Cycle 6)
 - **Modularity (Cycle 12):** 25 modules, injectable runtime seams, ProviderRegistry + ArmRegistry, egress golden tests
 - **Arms expansion (Cycle 13):** gmail arm (osascript/Mail.app, zero OAuth) + browser arm (Playwright MCP, headless stealth)
-- **Scout agent (Cycle 14):** proactive ADK Workflow — ScoutBroad (local Qwen3) shortlists → ScoutIntegrate (cloud) writes digest; 5 sources; two-stage deep fetch via Jina/GitHub API/Reddit body (Cycle 20)
+- **Scout agent (Cycle 14):** proactive ADK Workflow — ScoutBroad (local Qwen3) shortlists → ScoutIntegrate (cloud) writes digest; 5 sources; two-stage deep fetch via Jina/GitHub API/Reddit body (Cycle 20). **Working cloud provider: `openrouter-reason` (nvidia/nemotron-3-ultra-550b-a55b:free)** — `openrouter-free` hallucinates (calls `scout_recall` then writes about kage's own docs); Gemini via LiteLLM silently writes 0 chars to `output_key` (needs native ADK `Gemini()` integration, deferred). Confirmed producing real 23K-char reports with correct Tier 1/Tier 2 structure.
 - **Librarian agent (Cycle 15):** ADK LlmAgent, 3e-gated distill-and-judge, HITL staging → approval pipeline, sole memory writer
-- **Monitor agent (Cycle 16 + 20):** macOS AX daemon (observe.py) captures app-switch/typing-pause events → `observations-YYYY-MM-DD.jsonl`; cadence split: observe runs every 5 min (launchd StartInterval), digest runs 07:00 daily (StartCalendarInterval); `kage monitor observe/digest/run/install/uninstall/status/last`
+- **Monitor agent (Cycle 16 + 20):** macOS AX daemon (observe.py) captures app-switch/typing-pause events → `observations-YYYY-MM-DD.jsonl`; cadence split: observe runs every 5 min (launchd StartInterval), digest runs 07:00 daily (StartCalendarInterval); `kage monitor observe/digest/run/install/uninstall/status/last`. **AX daemon wiring fixed (Cycle 28, 2026-07-04):** added `pyobjc-framework-ApplicationServices` + `pyobjc-framework-Cocoa` to pyproject.toml; new `kage monitor ax-daemon` command + `_generate_ax_plist()` with `KeepAlive: true`; `kage monitor install` now loads 3 plists (ax-daemon + observe + digest). Confirmed producing real activity-aware digests (tested: Terminal → Calendar → Safari → Mail → Antigravity → Safari → Calendar → Terminal sequence, 49 AX events). Known gap: `kage ask` (non-REPL) does not write to `session_turns` — only `kage chat` does; Monitor sees arm activity via AX events only. Known miscalibration: "Scout not run in 48h" alert fires regardless of actual elapsed time — fix planned (pre-compute `hours_since_scout_run` in `read_pipeline_state()`).
 - **Gap fixes (Cycle 17):** 10 structural gaps across scout/librarian/monitor/observe
 - **Layer 4 router (Cycle 18):** keyword task-class classification (code/research/multimodal/reasoning/chat) → ordered provider candidate list; config-driven routing table override
 - **Sensitive vault (Cycle 19):** user-defined regex PII patterns in `~/.kage/sensitive.json`; `kage sensitive list/add/scan`
@@ -90,7 +90,7 @@ Current implemented surface (through Cycle 28.1, v0.28.1):
 - **Identity registry + account-scoped arms (Cycle 28):** `identity.py` CRUD + `kage identity` CLI; read-only identity class blocks write-permission arms; per-identity arm overrides (e.g. account-scoped Gmail/Calendar routing); identity groups (shared memory pool, distinct arm routing)
 - **Write-wall hotfix (Cycle 28.1):** `identity.resolve_write_identity()` — the single chokepoint every writer to `memory_identities` now routes through (previously only `cli._save`'s CLI callers had it; MCP `kage_remember` and Librarian `write_note` could tag a note with a raw label instead of its canonical group, making it permanently unreachable). `kage identity repair` migrates any notes tagged before the fix; `kage doctor` gained an "identity tags canonical" check that fails loudly, not silently, on registry corruption. See `docs/cycle-28.1-hotfix.md`.
 - **Gate hardening (Cycle 23, v0.23.0):** mask-at-dispatch — condensed query + history + retrieved context are masked through one shared per-request map and restored in the response (closes F13 condensed-query cleartext leak); audit log emits `pii_type_counts` instead of placeholder labels (closes F1). Audit + build plan: `docs/security-audit-2026-07-01.md`, `docs/cycle-23-gate-hardening.md`.
-- 661 tests across 12 test files
+- 723 tests across 13 test files
 
 The long-term blueprint still matters for direction, but docs that say "no code yet" or "Stage 1 has not started" are historical/stale unless explicitly marked current. For implementation truth, inspect `README.md`, `src/kage/cli.py`, and `tests/test_cli.py`.
 

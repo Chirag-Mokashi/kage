@@ -206,11 +206,13 @@ def _save(
     state: str | None = None,
 ) -> str:
     """Write a memory (markdown source-of-truth #70) + index it (#71). Returns its id."""
+    from kage import identity as _identity_mod
     cfg = _config()
     if not local_only and project and project in cfg.get("local_only_projects", []):
         local_only = True
     if state is None:
         state = "scoped" if project else "baseline"
+    identities = [_identity_mod.resolve_write_identity(i) for i in (identities or ["personal"])]
 
     mem_id = _new_id()
     created = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
@@ -221,7 +223,7 @@ def _save(
     if local_only:
         front += "local_only: true\n"
     front += "identities:\n"
-    for ident in (identities or ["personal"]):
+    for ident in identities:
         front += f"  - {ident}\n"
     front += f"state: {state}\n"
     (KAGE_HOME / rel_path).write_text(front + "---\n\n" + text.rstrip() + "\n")
@@ -237,7 +239,7 @@ def _save(
             " VALUES (?, ?, ?, ?, ?, ?)",
             (mem_id, rel_path, project, created, int(local_only), state),
         )
-        for ident in (identities or ["personal"]):
+        for ident in identities:
             conn.execute(
                 "INSERT OR IGNORE INTO memory_identities(mem_id, identity) VALUES (?, ?)",
                 (mem_id, ident),
@@ -1394,6 +1396,41 @@ def doctor() -> None:
         "index drifted from the markdown — a `kage reindex` is the planned fix",
     ))
 
+    from kage import identity as _id
+
+    if db_ok:
+        try:
+            conn = _connect()
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT identity FROM memory_identities")
+            tags = [row[0] for row in cursor.fetchall()]
+            conn.close()
+            orphans = []
+            for tag in tags:
+                entry = _id.get_identity(tag)
+                if entry is None:
+                    canonical = tag
+                else:
+                    canonical = entry.get("group", tag)
+                if tag != canonical:
+                    orphans.append(tag)
+            if orphans:
+                identity_ok = False
+                fix_message = f"Found {len(orphans)} orphan tags: {', '.join(orphans)}. Run 'kage identity repair'."
+            else:
+                identity_ok = True
+                fix_message = ""
+        except _id.RegistryCorruptError as e:
+            identity_ok = False
+            fix_message = f"Registry is corrupt: {e}. Fix this before proceeding."
+        except sqlite3.Error:
+            identity_ok = True
+            fix_message = ""
+    else:
+        identity_ok = True
+        fix_message = ""
+    checks.append((identity_ok, "identity tags canonical", fix_message))
+
     free_gb = shutil.disk_usage(KAGE_HOME if KAGE_HOME.exists() else Path.home()).free / 1e9
     checks.append((free_gb >= 1.0, f"disk space ({free_gb:.1f} GB free)", "low disk — free up space"))
 
@@ -1575,6 +1612,90 @@ def migrate(
     typer.echo(f"  identities added:     {stats['identities_added']}")
     typer.echo(f"  projects added:       {stats['projects_added']}")
     typer.echo(f"  frontmatter updated:  {stats['frontmatter_updated']}")
+
+
+def _repair_identity_tags(dry_run: bool = False) -> dict:
+    """Migrate orphaned identity tags (a label used instead of its canonical
+    group — e.g. 'personal-us' instead of 'personal') to the canonical group,
+    in both memory_identities and note frontmatter. See Cycle 28.1."""
+    import re
+    from kage import identity as _id
+
+    conn = _connect()
+    try:
+        identities = [row[0] for row in conn.execute(
+            "SELECT DISTINCT identity FROM memory_identities"
+        ).fetchall()]
+
+        orphans = {}
+        for identity in identities:
+            entry = _id.get_identity(identity)
+            canonical = entry.get("group", identity) if entry else identity
+            if canonical != identity:
+                orphans[identity] = canonical
+
+        orphan_tags = {}
+        mem_id_paths = {}  # mem_id -> content_path, deduped across all orphan tags
+        for identity in orphans:
+            rows = conn.execute(
+                "SELECT mi.mem_id, m.content_path FROM memory_identities mi "
+                "JOIN memories m ON m.id = mi.mem_id WHERE mi.identity = ?",
+                (identity,),
+            ).fetchall()
+            orphan_tags[identity] = len(rows)
+            for mem_id, content_path in rows:
+                mem_id_paths[mem_id] = content_path
+
+        if not dry_run:
+            for identity, canonical in orphans.items():
+                conn.execute(
+                    "INSERT OR IGNORE INTO memory_identities(mem_id, identity) "
+                    "SELECT mem_id, ? FROM memory_identities WHERE identity = ?",
+                    (canonical, identity),
+                )
+                conn.execute("DELETE FROM memory_identities WHERE identity = ?", (identity,))
+            conn.commit()
+    finally:
+        conn.close()
+
+    notes_repaired = 0
+    notes_to_repair = 0
+    ident_block_re = re.compile(r"identities:\n((?:  - .+\n)+)")
+
+    for mem_id, content_path in mem_id_paths.items():
+        file_path = KAGE_HOME / content_path
+        try:
+            text = file_path.read_text()
+        except OSError:
+            continue
+
+        m = ident_block_re.search(text)
+        if not m:
+            continue
+
+        labels = [line[4:].strip() for line in m.group(1).splitlines()]
+        canonical_labels = []
+        for label in labels:
+            resolved = orphans.get(label, label)
+            if resolved not in canonical_labels:
+                canonical_labels.append(resolved)
+        new_block = "identities:\n" + "".join(f"  - {c}\n" for c in canonical_labels)
+
+        if new_block == m.group(0):
+            continue  # already canonical/deduped, nothing to change
+
+        if dry_run:
+            notes_to_repair += 1
+        else:
+            new_text = text[:m.start()] + new_block + text[m.end():]
+            file_path.write_text(new_text)
+            notes_repaired += 1
+
+    return {
+        "orphan_tags": orphan_tags,
+        "notes_repaired": notes_repaired,
+        "notes_to_repair": notes_to_repair,
+    }
 
 
 @app.command()
@@ -2380,7 +2501,11 @@ def learn(
 def identity_list():
     """List all registered identities and their classes."""
     from kage import identity as _id
-    entries = _id.load_identities().get("identities", [])
+    try:
+        entries = _id.load_identities().get("identities", [])
+    except _id.RegistryCorruptError as e:
+        typer.echo(f"[kage] identities.json is corrupt: {e}", err=True)
+        raise typer.Exit(1)
     if not entries:
         typer.echo("[kage] no identities registered. Run: kage identity bootstrap")
         return
@@ -2393,7 +2518,11 @@ def identity_list():
 def identity_show(label: str = typer.Argument(..., help="Identity label")):
     """Show details for one identity."""
     from kage import identity as _id
-    entry = _id.get_identity(label)
+    try:
+        entry = _id.get_identity(label)
+    except _id.RegistryCorruptError as e:
+        typer.echo(f"[kage] identities.json is corrupt: {e}", err=True)
+        raise typer.Exit(1)
     if entry is None:
         typer.echo(f"[kage] identity '{label}' not found.", err=True)
         raise typer.Exit(1)
@@ -2458,6 +2587,29 @@ def identity_bootstrap():
         typer.echo(f"[kage] bootstrapped: {', '.join(added)}")
     else:
         typer.echo("[kage] all default identities already present")
+
+
+@_identity_app.command("repair")
+def identity_repair(dry_run: bool = typer.Option(False, "--dry-run", "-n", help="Show what would change without writing.")):
+    """Migrate orphaned identity tags (label used instead of canonical group) to their canonical group, in both DB and note frontmatter."""
+    from kage import identity as _id
+    try:
+        result = _repair_identity_tags(dry_run=dry_run)
+    except _id.RegistryCorruptError as e:
+        typer.echo(f"[kage] identities.json is corrupt: {e}", err=True)
+        raise typer.Exit(1)
+    if not result["orphan_tags"]:
+        message = "[DRY RUN] No orphaned identity tags found." if dry_run else "No orphaned identity tags found."
+        typer.echo(message)
+        return
+    for tag, count in result["orphan_tags"].items():
+        typer.echo(f"  {tag}: {count} note(s)")
+    summary = (
+        f"\n{result['notes_to_repair']} note(s) would be repaired. Run without --dry-run to apply."
+        if dry_run
+        else f"\n{result['notes_repaired']} note(s) repaired."
+    )
+    typer.echo(summary)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -21,7 +21,7 @@ import urllib.request
 import os
 
 from kage import runtime
-from kage.arms import _call_internal_arm, _INTERNAL_ARMS
+from kage.arms import _call_internal_arm, _INTERNAL_ARMS, _SHELL_INTERPRETERS
 from kage.cloud import DEFAULT_PROVIDERS
 from kage.pii import _gate_text
 
@@ -170,8 +170,17 @@ async def check_mcp_health() -> dict:
                 if arm.get("transport") == "shell":
                     cmd = arm.get("command", "")
                     if cmd:
-                        proc = await asyncio.create_subprocess_shell(
-                            cmd + " --help",
+                        import shlex
+                        try:
+                            parts = shlex.split(cmd)
+                        except ValueError:
+                            result[name] = {"status": "error", "error": "bad command syntax", "latency_ms": 0}
+                            continue
+                        if not parts or parts[0].rsplit("/", 1)[-1] in _SHELL_INTERPRETERS:
+                            result[name] = {"status": "blocked", "error": "interpreter", "latency_ms": 0}
+                            continue
+                        proc = await asyncio.create_subprocess_exec(
+                            *parts, "--help",
                             stdout=asyncio.subprocess.DEVNULL,
                             stderr=asyncio.subprocess.DEVNULL,
                         )

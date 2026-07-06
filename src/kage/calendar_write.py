@@ -167,6 +167,8 @@ def reject(proposal_id: str) -> dict:
     if not path.exists():
         raise ValueError(f"no such proposal: {proposal_id}")
     p = _read_proposal(path)
+    if p.get("status") != "pending":
+        raise RuntimeError(f"proposal {proposal_id} is {p.get('status')}, not pending")
     p["status"] = "rejected"
     _write_proposal(p)
     _privacy._write_audit({"type": "calendar_write", "op": p.get("op", "create"), "proposal_id": proposal_id, "status": "rejected", "event_identifier": "", "success": True, "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds")})

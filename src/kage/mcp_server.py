@@ -38,8 +38,9 @@ def kage_remember(text: str, project: str | None = None, local: bool = False, id
 
     Write-gated: disabled by default. Enable by setting mcp_allow_writes: true
     in ~/.kage/config.json.
-    Set local=true to mark the note local-only (never sent to cloud providers).
+    Read-only identities cannot write. Set local=true to mark the note local-only (never sent to cloud providers).
     """
+    from kage.identity import ReadOnlyIdentityError
     cfg = _cli._config()
     identity, project, source = _cli._resolve_context(identity, project)
     if not cfg.get("mcp_allow_writes", False):
@@ -48,7 +49,14 @@ def kage_remember(text: str, project: str | None = None, local: bool = False, id
             "id": None,
             "reason": "writes disabled — set mcp_allow_writes in config",
         }
-    mem_id = _cli._save(text, project, local_only=local, identities=[identity])
+    try:
+        mem_id = _cli._save(text, project, local_only=local, identities=[identity])
+    except ReadOnlyIdentityError:
+        return {
+            "saved": False,
+            "id": None,
+            "reason": "read-only identity cannot write"
+        }
     return {"saved": True, "id": mem_id, "reason": "saved", "local_only": local}
 
 

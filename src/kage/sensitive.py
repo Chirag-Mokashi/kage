@@ -22,6 +22,8 @@ def save_vault(vault: dict) -> None:
     path = pathlib.Path.home() / ".kage" / "sensitive.json"
     with path.open("w") as f:
         json.dump(vault, f, indent=2)
+    from kage import runtime
+    runtime._chmod600(path)
 
 
 def add_pattern(label: str, pattern: str) -> None:

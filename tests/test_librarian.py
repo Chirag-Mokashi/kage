@@ -753,6 +753,63 @@ def test_distill_and_judge_ctm_disabled_skips_retrieval(lib_env, monkeypatch):
     distill_and_judge("test content", "manual")
     assert "[kage CTM precedents]" not in captured["system"]
 
+def test_write_note_blocks_read_only_identity(lib_env, monkeypatch):
+    import json as _json
+    (lib_env / "identities.json").write_text(_json.dumps({"identities": [{"label": "family", "class": "read-only", "accounts": [], "arm_overrides": {}}]}))
+    monkeypatch.setattr(runtime, "embed", type("E", (), {"embed": lambda self, *a, **kw: [0.1] * 384})())
+    fake_coll = MagicMock()
+    monkeypatch.setattr(runtime, "vector", type("V", (), {"collection": lambda self, *a, **kw: fake_coll})())
+    staging_id = deposit_to_queue("family content", "scout", identity="family")
+    note_json = {"title": "Family Note", "body": "family content", "tags": [], "project": None, "identity": None, "source": "scout"}
+    approval_id = request_approval(staging_id, "promote", "test", note_json, "family content")
+    ok = write_note(approval_id)
+    assert ok is False
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute("SELECT decision FROM approval_queue WHERE id=?", (approval_id,))
+    assert cur.fetchone()[0] == "rejected"
+    cur.execute("SELECT COUNT(*) FROM memories WHERE project != 'kage-corrections-librarian'")
+    assert cur.fetchone()[0] == 0
+    conn.close()
+
+def test_write_note_registry_corrupt_leaves_approval_undecided(lib_env, monkeypatch):
+    (lib_env / "identities.json").write_text("{not valid json at all")
+    monkeypatch.setattr(runtime, "embed", type("E", (), {"embed": lambda self, *a, **kw: [0.1] * 384})())
+    fake_coll = MagicMock()
+    monkeypatch.setattr(runtime, "vector", type("V", (), {"collection": lambda self, *a, **kw: fake_coll})())
+    staging_id = deposit_to_queue("some content", "scout")
+    note_json = {"title": "T", "body": "some content", "tags": [], "project": None, "identity": None, "source": "scout"}
+    approval_id = request_approval(staging_id, "promote", "test", note_json, "some content")
+    ok = write_note(approval_id)
+    assert ok is False
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute("SELECT decision FROM approval_queue WHERE id=?", (approval_id,))
+    assert cur.fetchone()[0] is None
+    conn.close()
+
+def test_write_note_resolves_group_and_note_is_findable(lib_env, monkeypatch):
+    import json as _json
+    (lib_env / "identities.json").write_text(_json.dumps({"identities": [{"label": "personal-us", "class": "normal", "group": "personal", "accounts": [], "arm_overrides": {}}]}))
+    monkeypatch.setattr(runtime, "embed", type("E", (), {"embed": lambda self, *a, **kw: [0.1] * 384})())
+    fake_coll = MagicMock()
+    monkeypatch.setattr(runtime, "vector", type("V", (), {"collection": lambda self, *a, **kw: fake_coll})())
+    staging_id = deposit_to_queue("US personal fact", "scout", identity="personal-us")
+    note_json = {"title": "US Fact", "body": "US personal fact", "tags": [], "project": None, "identity": None, "source": "scout"}
+    approval_id = request_approval(staging_id, "promote", "test", note_json, "US personal fact")
+    ok = write_note(approval_id)
+    assert ok is True
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute("SELECT mem_id, identity FROM memory_identities")
+    row = cur.fetchone()
+    assert row[1] == "personal"
+    mem_id = row[0]
+    store = runtime.store
+    allowed = store.allowed_note_ids("personal", None)
+    assert mem_id in allowed
+    conn.close()
+
 
 # ── list_pending_approvals (Cycle 29) ────────────────────────────────────────
 

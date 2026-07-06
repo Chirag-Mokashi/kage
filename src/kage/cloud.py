@@ -56,10 +56,7 @@ def _dispatch_openai_compat(pcfg: dict, key: str, system: str, messages: list[di
 
 def _dispatch_gemini(pcfg: dict, key: str, system: str, messages: list[dict]) -> str:
     model = pcfg.get("model", "")
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta"
-        f"/models/{model}:generateContent?key={key}"
-    )
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     contents = [
         {"role": "model" if m["role"] == "assistant" else "user",
          "parts": [{"text": m["content"]}]}
@@ -71,7 +68,7 @@ def _dispatch_gemini(pcfg: dict, key: str, system: str, messages: list[dict]) ->
     }
     if pcfg.get("search_grounding"):
         body["tools"] = [{"google_search": {}}]
-    out = _post_json(url, body)
+    out = _post_json(url, body, headers={"x-goog-api-key": key})
     candidates = out.get("candidates") or []
     if not candidates or "content" not in candidates[0]:
         raise CloudError("Gemini returned no content")

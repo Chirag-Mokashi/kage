@@ -4477,6 +4477,44 @@ class TestChatCommand:
         for turn in captured[1]["history"]:
             assert "test@example.com" not in turn["content"]
 
+    def test_chat_restores_pii_in_answer(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        monkeypatch.setattr("kage.cli._search", lambda *a, **kw: [("note-pii-3", "test", "2026-06-30T00:00:00", "memory/test/note-pii-3.md", "", None, None, None)])
+        monkeypatch.setattr("kage.cli._read_body", lambda path: "My email is pii-chat-test@secret.org")
+        monkeypatch.setattr("kage.cli._disclosure_gate", lambda rows, cfg, **kw: (rows, [], {}))
+        monkeypatch.setattr("kage.cli._gate_conversation", lambda turns, cfg, identity, project: (turns, []))
+        monkeypatch.setattr("kage.cli._answer", lambda question, history, context, destination, cfg: iter(["Your email is [EMAIL_1]"]))
+        seq = iter(["what is my email?", "/exit"])
+        monkeypatch.setattr("builtins.input", lambda _: next(seq))
+        result = CliRunner().invoke(cli.app, ["chat", "--provider", "claude"], catch_exceptions=False)
+        assert "pii-chat-test@secret.org" in result.output
+        assert "[EMAIL_1]" not in result.output
+
+
+def test_mcp_kage_ask_session_restores_pii_in_answer(monkeypatch, tmp_path):
+    _mcp_home(monkeypatch, tmp_path)
+    session_id = cli._session_create('personal', None, 'claude')
+    monkeypatch.setattr(cli, '_search', lambda *a, **kw: [("note-pii-4", "test", "2026-06-30T00:00:00", "memory/test/note-pii-4.md", "", None, None, None)])
+    monkeypatch.setattr(cli, '_read_body', lambda path: "My email is pii-mcpsession-test@secret.org")
+    monkeypatch.setattr(cli, '_disclosure_gate', lambda rows, cfg, **kw: (rows, [], {}))
+    monkeypatch.setattr(cli, '_gate_conversation', lambda turns, cfg, identity, project: (turns, []))
+    monkeypatch.setattr(cli, '_answer', lambda question, history, context, destination, cfg: iter(["Your email is [EMAIL_1]"]))
+    result = asyncio.run(mcp_server.kage_ask("what is my email?", session_id=session_id))
+    assert "pii-mcpsession-test@secret.org" in result["answer"]
+    assert "[EMAIL_1]" not in result["answer"]
+
+
+def test_mcp_kage_ask_single_shot_restores_pii_in_answer(monkeypatch, tmp_path):
+    _mcp_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, '_search', lambda *a, **kw: [("note-pii-5", "test", "2026-06-30T00:00:00", "memory/test/note-pii-5.md", "", None, None, None)])
+    monkeypatch.setattr(cli, '_read_body', lambda path: "My email is pii-mcpsingle-test@secret.org")
+    monkeypatch.setattr(cli, '_disclosure_gate', lambda rows, cfg, **kw: (rows, [], {}))
+    monkeypatch.setattr(cli, '_detect_arms', lambda *a, **kw: [])
+    monkeypatch.setattr(cli, '_call_cloud', lambda provider, system, user_msg, cfg: "Your email is [EMAIL_1]")
+    result = asyncio.run(mcp_server.kage_ask("what is my email?", provider="claude"))
+    assert "pii-mcpsingle-test@secret.org" in result["answer"]
+    assert "[EMAIL_1]" not in result["answer"]
+
 
 # ── Cycle 10: MCP session_id (Step 8) ─────────────────────────────────────────
 

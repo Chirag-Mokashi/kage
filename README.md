@@ -19,7 +19,7 @@ kage is defined at three nested levels, all simultaneously true:
 
 ---
 
-## Current state — v0.28.0
+## Current state — v0.28.1
 
 kage ships as a headless CLI and MCP server. The full UI layer (via Odysseus integration) is in progress.
 
@@ -378,7 +378,10 @@ kage today is a passive broker — it answers when called. The target is an acti
   Cycle 24   Librarian EPM (learn rejections)   SHIPPED — distills rejection patterns into the distill prompt
   Cycle 25   Librarian CTM (learn approvals)    SHIPPED — approved precedents as few-shot examples (MemAPO loop)
   Cycle 26   Calendar-write (first write arm)   SHIPPED — EventKit create-only, propose→approve→execute, HITL-gated
+  Cycle 28.1 Write-wall hotfix                  SHIPPED — identity chokepoint on every memory writer, kage identity repair
 ```
+
+Cycle 28.1 (write-wall hotfix) closed a post-audit gap: the Cycle 28 identity-group invariant (an identity like `personal-us` resolves to its canonical group `personal` for memory tagging) was wired into the CLI's `remember`/`import` path but not into MCP's `kage_remember` or the Librarian's `write_note` — so a note saved through either of those could end up tagged with a raw label instead of its group, making it permanently unreachable from any query (an "invisible note"). `identity.resolve_write_identity()` is now the single chokepoint every writer to `memory_identities` routes through, with a corrupt-registry case handled distinctly from a read-only-identity case (a transient registry read failure never gets recorded as a false Librarian rejection). `kage identity repair [--dry-run]` migrates any notes tagged before this fix, in both the SQLite index and the note's own frontmatter; `kage doctor` gained an "identity tags canonical" check that fails loudly (not silently) if the registry itself is unreadable.
 
 Cycle 23 (gate hardening) closed the HIGH-severity findings from the 2026-07-01 security audit (`docs/security-audit-2026-07-01.md`). The marquee fix is **mask-at-dispatch**: the condensed retrieval query, conversation history, and retrieved context are all masked through one shared per-request placeholder map and restored in the response — closing the condensed-query cleartext leak (F13). The audit log now emits `pii_type_counts` (typed tallies) instead of numbered placeholder labels, so it no longer leaks the placeholder structure (F1). No new capability — defense-in-depth only. Build plan: `docs/cycle-23-gate-hardening.md`.
 

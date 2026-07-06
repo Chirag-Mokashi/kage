@@ -1,6 +1,6 @@
 # Cycle 28.1 — Write-Wall Hotfix (v0.28.1)
 
-*Status: PITCH v2 — 1 cold review done (subagent, against repo at HEAD; verdict APPROVE WITH EDITS — all 9 findings incorporated below). Ready for the 7-step gate.*
+*Status: SHIPPED v0.28.1. All 5 slices built via the 7-step gate. Two cold reviews total: one on the pitch (subagent, APPROVE WITH EDITS, all 9 findings incorporated), one consolidated review on the finished diff before merge (subagent, APPROVE WITH EDITS — 2 MAJOR findings, both closed: missing restore-coverage golden tests for chat/MCP paths, added; missing CHANGELOG/README/CLAUDE.md updates, added). 746 tests passing (720 baseline + 26 new). Two implementation bugs caught by running the new tests against real code (not design bugs — both in literal specs handed to local for transcription): `_repair_identity_tags`'s frontmatter label parser sliced 2 chars instead of 4 (left the bullet dash attached to the label); a test's own assertion was too strict about Librarian's pre-existing correction-log write. Both fixed.*
 *Discipline: 7-step dev-workflow gate. Local (Qwen3) writes all code/tests; cloud plans + reviews.*
 *Date: 2026-07-06. Source: Fable 5 full-codebase audit (post-v0.28.0).*
 

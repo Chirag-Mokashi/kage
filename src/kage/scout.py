@@ -499,27 +499,55 @@ def run(mode: str) -> str:
     # Stage 3: integrate on enriched corpus (cloud)
     enriched = _corpus_enriched(items, shortlisted, full_map)
     _, project, _ = _resolve_context(None, None)
-    runner2 = InMemoryRunner(node=build_integrate_pipeline(cfg), app_name="kage-scout-int")
-    sess2 = asyncio.run(runner2.session_service.create_session(
-        app_name="kage-scout-int", user_id="kage",
-        state={"today": str(_dt.date.today()), "project": project or "kage"},
-    ))
-    list(runner2.run(user_id="kage", session_id=sess2.id, new_message=types.Content(role="user", parts=[types.Part(text=enriched)])))
-    sess2 = asyncio.run(runner2.session_service.get_session(app_name="kage-scout-int", user_id="kage", session_id=sess2.id))
-    final = (sess2.state.get("report") or "") if sess2 else ""
+    today = str(_dt.date.today())
+    project_name = project or "kage"
+
+    # shell-llm providers (e.g. claude CLI) bypass LiteLLM — no API key needed
+    provider = cfg.get("scout", {}).get("cloud_provider", "openrouter-free")
+    pcfg = {**DEFAULT_PROVIDERS.get(provider, {}), **cfg.get("providers", {}).get(provider, {})}
+    if pcfg.get("type") == "shell-llm":
+        import subprocess as _sp
+        command = pcfg.get("command", "claude")
+        instruction = _INTEGRATE_INSTRUCTION.format(today=today, project=project_name)
+        result = _sp.run(
+            [command, "-p", instruction + "\n\n" + enriched],
+            capture_output=True, text=True, timeout=300,
+        )
+        final = result.stdout.strip()
+    else:
+        runner2 = InMemoryRunner(node=build_integrate_pipeline(cfg), app_name="kage-scout-int")
+        sess2 = asyncio.run(runner2.session_service.create_session(
+            app_name="kage-scout-int", user_id="kage",
+            state={"today": today, "project": project_name},
+        ))
+        list(runner2.run(user_id="kage", session_id=sess2.id, new_message=types.Content(role="user", parts=[types.Part(text=enriched)])))
+        sess2 = asyncio.run(runner2.session_service.get_session(app_name="kage-scout-int", user_id="kage", session_id=sess2.id))
+        final = (sess2.state.get("report") or "") if sess2 else ""
 
     _write_report(mode, final)
     _update_cache(cache, items)
     try:
         in_tier1 = False
+        current_card: list[str] = []
         for line in final.splitlines():
             if line.startswith("## Tier 1"):
                 in_tier1 = True
                 continue
-            if line.startswith("## Tier 2") or line.startswith("---"):
+            if in_tier1 and line.startswith("## Tier 2"):
+                if current_card:
+                    deposit_to_queue("\n".join(current_card).strip(), "scout", project=project)
+                    current_card = []
                 break
-            if in_tier1 and line.startswith("- "):
-                deposit_to_queue(line.lstrip("- "), "scout", project=project)
+            if not in_tier1:
+                continue
+            if line.startswith("### "):
+                if current_card:
+                    deposit_to_queue("\n".join(current_card).strip(), "scout", project=project)
+                current_card = [line]
+            elif current_card:
+                current_card.append(line)
+        if current_card:
+            deposit_to_queue("\n".join(current_card).strip(), "scout", project=project)
     except Exception:
         pass
     _token_log(mode, items, final)

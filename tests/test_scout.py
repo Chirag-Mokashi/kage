@@ -549,10 +549,12 @@ def test_scout_deposits_tier1_to_queue(monkeypatch, tmp_path):
     from unittest.mock import patch
 
     tier1_output = (
-        "## Tier 1\n"
-        "- First item\n"
-        "- Second item\n"
-        "## Tier 2\n"
+        "## Tier 1 — Actionable\n\n"
+        "### [hn] First item\n"
+        "**Tech:** foo\n\n"
+        "### [hn] Second item\n"
+        "**Tech:** bar\n\n"
+        "## Tier 2 — Good to Know\n"
         "- Should not deposit\n"
     )
     item = {"source": "hn", "title": "T", "url": "http://x", "score": 1, "snippet": "s"}
@@ -608,9 +610,9 @@ def test_scout_deposits_tier1_to_queue(monkeypatch, tmp_path):
 
     assert mock_deposit.call_count == 2
     calls = [c.args[0] for c in mock_deposit.call_args_list]
-    assert "First item" in calls
-    assert "Second item" in calls
-    assert "Should not deposit" not in calls
+    assert calls[0].startswith("### [hn] First item")
+    assert calls[1].startswith("### [hn] Second item")
+    assert all("Should not deposit" not in c for c in calls)
 
 
 def test_scout_pii_seam_strips_email():
@@ -933,3 +935,291 @@ def test_bootstrap_stops_after_stage1(monkeypatch, tmp_path):
     result = scout.run("bootstrap")
     assert result == "2. reason"
     assert integrate_calls == []
+
+
+def test_run_shell_llm_calls_subprocess_not_adk(monkeypatch, tmp_path):
+    """When cloud_provider is shell-llm, Stage 3 uses subprocess.run, not a second InMemoryRunner."""
+    import subprocess
+    subprocess_calls = []
+    runner_app_names = []
+    item = {"source": "hn", "title": "T", "url": "http://x", "score": 1, "snippet": "s"}
+
+    class FakeSess:
+        id = "s1"
+        state = {"shortlist_indices": "1. T"}
+    class FakeSvc:
+        async def create_session(self, **kw): return FakeSess()
+        async def get_session(self, **kw): return FakeSess()
+    class FakeRun:
+        session_service = FakeSvc()
+        def run(self, **kw): return iter([])
+
+    class FakeConfig:
+        data = {
+            "scout": {"cloud_provider": "claude-sonnet"},
+            "providers": {"claude-sonnet": {"type": "shell-llm", "command": "claude", "model": "claude-sonnet-4-6"}},
+        }
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+        store = MagicMock()
+
+    fake_proc = MagicMock()
+    fake_proc.stdout = "## Scout Report\n- item1"
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: subprocess_calls.append(a) or fake_proc)
+    monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    monkeypatch.setattr(scout, "_load_seen_cache", lambda: {"seen"})
+    monkeypatch.setattr(scout, "fetch", lambda cfg: [item])
+    monkeypatch.setattr(scout, "build_broad_pipeline", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "InMemoryRunner", lambda app_name=None, **kw: runner_app_names.append(app_name) or FakeRun())
+    monkeypatch.setattr(scout, "_parse_shortlist_indices", lambda *a: [item])
+    monkeypatch.setattr(scout, "_fetch_full", lambda it: "full body")
+    monkeypatch.setattr(scout, "_corpus_enriched", lambda *a: "enriched corpus")
+    monkeypatch.setattr(scout, "_resolve_context", lambda *a: (None, "kage", None))
+    monkeypatch.setattr(scout, "_write_report", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_update_cache", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "deposit_to_queue", lambda *a, **kw: None)
+
+    scout.run("run")
+    assert len(subprocess_calls) == 1
+    assert subprocess_calls[0][0][0] == "claude"
+    assert subprocess_calls[0][0][1] == "-p"
+    # shell-llm path: only ScoutBroad runner created, not ScoutIntegrate
+    assert "kage-scout-int" not in runner_app_names
+
+
+def test_run_shell_llm_formats_today_and_project(monkeypatch, tmp_path):
+    """shell-llm path substitutes {today} and {project} into the instruction."""
+    import subprocess, datetime
+    captured_prompt = []
+    item = {"source": "hn", "title": "T", "url": "http://x", "score": 1, "snippet": "s"}
+
+    class FakeSess:
+        id = "s1"
+        state = {"shortlist_indices": "1. T"}
+    class FakeSvc:
+        async def create_session(self, **kw): return FakeSess()
+        async def get_session(self, **kw): return FakeSess()
+    class FakeRun:
+        session_service = FakeSvc()
+        def run(self, **kw): return iter([])
+
+    class FakeConfig:
+        data = {
+            "scout": {"cloud_provider": "claude-sonnet"},
+            "providers": {"claude-sonnet": {"type": "shell-llm", "command": "claude", "model": "claude-sonnet-4-6"}},
+        }
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+        store = MagicMock()
+
+    fake_proc = MagicMock()
+    fake_proc.stdout = "report"
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: captured_prompt.append(a[0][2]) or fake_proc)
+    monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    monkeypatch.setattr(scout, "_load_seen_cache", lambda: {"seen"})
+    monkeypatch.setattr(scout, "fetch", lambda cfg: [item])
+    monkeypatch.setattr(scout, "build_broad_pipeline", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "InMemoryRunner", lambda *a, **kw: FakeRun())
+    monkeypatch.setattr(scout, "_parse_shortlist_indices", lambda *a: [item])
+    monkeypatch.setattr(scout, "_fetch_full", lambda it: "full body")
+    monkeypatch.setattr(scout, "_corpus_enriched", lambda *a: "enriched corpus")
+    monkeypatch.setattr(scout, "_resolve_context", lambda *a: (None, "myproject", None))
+    monkeypatch.setattr(scout, "_write_report", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_update_cache", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "deposit_to_queue", lambda *a, **kw: None)
+
+    scout.run("run")
+    assert len(captured_prompt) == 1
+    prompt = captured_prompt[0]
+    assert str(datetime.date.today()) in prompt
+    assert "myproject" in prompt
+    assert "{today}" not in prompt
+    assert "{project}" not in prompt
+
+
+def test_deposit_loop_two_tier1_cards(monkeypatch, tmp_path):
+    import subprocess
+    item = {"source": "hn", "title": "T", "url": "http://x", "score": 1, "snippet": "s"}
+
+    class FakeSess:
+        id = "s1"
+        state = {"shortlist_indices": "1. T"}
+    class FakeSvc:
+        async def create_session(self, **kw): return FakeSess()
+        async def get_session(self, **kw): return FakeSess()
+    class FakeRun:
+        session_service = FakeSvc()
+        def run(self, **kw): return iter([])
+    class FakeConfig:
+        data = {
+            "scout": {"cloud_provider": "claude-sonnet"},
+            "providers": {"claude-sonnet": {"type": "shell-llm", "command": "claude", "model": "claude-sonnet-4-6"}},
+        }
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+        store = MagicMock()
+
+    fake_proc = MagicMock()
+    fake_proc.stdout = "## Tier 1 — Actionable\n\n### [hn] Alpha\n**Tech:** foo\n\n### [hn] Beta\n**Tech:** bar\n\n## Tier 2\n"
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_proc)
+    monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    monkeypatch.setattr(scout, "_load_seen_cache", lambda: {"seen"})
+    monkeypatch.setattr(scout, "fetch", lambda cfg: [item])
+    monkeypatch.setattr(scout, "build_broad_pipeline", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "InMemoryRunner", lambda app_name=None, **kw: FakeRun())
+    monkeypatch.setattr(scout, "_parse_shortlist_indices", lambda *a: [item])
+    monkeypatch.setattr(scout, "_fetch_full", lambda it: "full body")
+    monkeypatch.setattr(scout, "_corpus_enriched", lambda *a: "enriched corpus")
+    monkeypatch.setattr(scout, "_resolve_context", lambda *a: (None, "kage", None))
+    monkeypatch.setattr(scout, "_write_report", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_update_cache", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None)
+    deposited = []
+    monkeypatch.setattr(scout, "deposit_to_queue", lambda content, source, project=None: deposited.append(content))
+
+    scout.run("run")
+    assert len(deposited) == 2
+    assert deposited[0].startswith("### [hn] Alpha")
+    assert deposited[1].startswith("### [hn] Beta")
+
+
+def test_deposit_loop_tier2_not_deposited(monkeypatch, tmp_path):
+    import subprocess
+    item = {"source": "hn", "title": "T", "url": "http://x", "score": 1, "snippet": "s"}
+
+    class FakeSess:
+        id = "s1"
+        state = {"shortlist_indices": "1. T"}
+    class FakeSvc:
+        async def create_session(self, **kw): return FakeSess()
+        async def get_session(self, **kw): return FakeSess()
+    class FakeRun:
+        session_service = FakeSvc()
+        def run(self, **kw): return iter([])
+    class FakeConfig:
+        data = {
+            "scout": {"cloud_provider": "claude-sonnet"},
+            "providers": {"claude-sonnet": {"type": "shell-llm", "command": "claude", "model": "claude-sonnet-4-6"}},
+        }
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+        store = MagicMock()
+
+    fake_proc = MagicMock()
+    fake_proc.stdout = "## Tier 1 — Actionable\n\n### [hn] Alpha\n**Tech:** foo\n\n## Tier 2 — Good to Know\n\n### [hn] Beta\n**Tech:** bar\n"
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_proc)
+    monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    monkeypatch.setattr(scout, "_load_seen_cache", lambda: {"seen"})
+    monkeypatch.setattr(scout, "fetch", lambda cfg: [item])
+    monkeypatch.setattr(scout, "build_broad_pipeline", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "InMemoryRunner", lambda app_name=None, **kw: FakeRun())
+    monkeypatch.setattr(scout, "_parse_shortlist_indices", lambda *a: [item])
+    monkeypatch.setattr(scout, "_fetch_full", lambda it: "full body")
+    monkeypatch.setattr(scout, "_corpus_enriched", lambda *a: "enriched corpus")
+    monkeypatch.setattr(scout, "_resolve_context", lambda *a: (None, "kage", None))
+    monkeypatch.setattr(scout, "_write_report", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_update_cache", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None)
+    deposited = []
+    monkeypatch.setattr(scout, "deposit_to_queue", lambda content, source, project=None: deposited.append(content))
+
+    scout.run("run")
+    assert len(deposited) == 1
+    assert deposited[0].startswith("### [hn] Alpha")
+
+
+def test_deposit_loop_none_tier1(monkeypatch, tmp_path):
+    import subprocess
+    item = {"source": "hn", "title": "T", "url": "http://x", "score": 1, "snippet": "s"}
+
+    class FakeSess:
+        id = "s1"
+        state = {"shortlist_indices": "1. T"}
+    class FakeSvc:
+        async def create_session(self, **kw): return FakeSess()
+        async def get_session(self, **kw): return FakeSess()
+    class FakeRun:
+        session_service = FakeSvc()
+        def run(self, **kw): return iter([])
+    class FakeConfig:
+        data = {
+            "scout": {"cloud_provider": "claude-sonnet"},
+            "providers": {"claude-sonnet": {"type": "shell-llm", "command": "claude", "model": "claude-sonnet-4-6"}},
+        }
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+        store = MagicMock()
+
+    fake_proc = MagicMock()
+    fake_proc.stdout = "## Tier 1 — Actionable\n\n(none)\n\n## Tier 2\n"
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_proc)
+    monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    monkeypatch.setattr(scout, "_load_seen_cache", lambda: {"seen"})
+    monkeypatch.setattr(scout, "fetch", lambda cfg: [item])
+    monkeypatch.setattr(scout, "build_broad_pipeline", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "InMemoryRunner", lambda app_name=None, **kw: FakeRun())
+    monkeypatch.setattr(scout, "_parse_shortlist_indices", lambda *a: [item])
+    monkeypatch.setattr(scout, "_fetch_full", lambda it: "full body")
+    monkeypatch.setattr(scout, "_corpus_enriched", lambda *a: "enriched corpus")
+    monkeypatch.setattr(scout, "_resolve_context", lambda *a: (None, "kage", None))
+    monkeypatch.setattr(scout, "_write_report", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_update_cache", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None)
+    deposited = []
+    monkeypatch.setattr(scout, "deposit_to_queue", lambda content, source, project=None: deposited.append(content))
+
+    scout.run("run")
+    assert len(deposited) == 0
+
+
+def test_deposit_loop_trailing_card_no_boundary(monkeypatch, tmp_path):
+    import subprocess
+    item = {"source": "hn", "title": "T", "url": "http://x", "score": 1, "snippet": "s"}
+
+    class FakeSess:
+        id = "s1"
+        state = {"shortlist_indices": "1. T"}
+    class FakeSvc:
+        async def create_session(self, **kw): return FakeSess()
+        async def get_session(self, **kw): return FakeSess()
+    class FakeRun:
+        session_service = FakeSvc()
+        def run(self, **kw): return iter([])
+    class FakeConfig:
+        data = {
+            "scout": {"cloud_provider": "claude-sonnet"},
+            "providers": {"claude-sonnet": {"type": "shell-llm", "command": "claude", "model": "claude-sonnet-4-6"}},
+        }
+        home = tmp_path
+    class FakeRuntime:
+        config = FakeConfig()
+        store = MagicMock()
+
+    fake_proc = MagicMock()
+    fake_proc.stdout = "## Tier 1 — Actionable\n\n### [hn] Alpha\n**Tech:** foo\n"
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_proc)
+    monkeypatch.setattr(scout, "runtime", FakeRuntime())
+    monkeypatch.setattr(scout, "_load_seen_cache", lambda: {"seen"})
+    monkeypatch.setattr(scout, "fetch", lambda cfg: [item])
+    monkeypatch.setattr(scout, "build_broad_pipeline", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "InMemoryRunner", lambda app_name=None, **kw: FakeRun())
+    monkeypatch.setattr(scout, "_parse_shortlist_indices", lambda *a: [item])
+    monkeypatch.setattr(scout, "_fetch_full", lambda it: "full body")
+    monkeypatch.setattr(scout, "_corpus_enriched", lambda *a: "enriched corpus")
+    monkeypatch.setattr(scout, "_resolve_context", lambda *a: (None, "kage", None))
+    monkeypatch.setattr(scout, "_write_report", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_update_cache", lambda *a, **kw: None)
+    monkeypatch.setattr(scout, "_token_log", lambda *a, **kw: None)
+    deposited = []
+    monkeypatch.setattr(scout, "deposit_to_queue", lambda content, source, project=None: deposited.append(content))
+
+    scout.run("run")
+    assert len(deposited) == 1
+    assert deposited[0].startswith("### [hn] Alpha")

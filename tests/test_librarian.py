@@ -846,3 +846,28 @@ def test_list_pending_approvals_dict_has_required_keys(lib_env):
     result = list_pending_approvals()
     assert len(result) == 1
     assert all(key in result[0] for key in ['id', 'action', 'reason', 'note_json', 'sanitized_preview', 'created_at'])
+
+
+def test_locate_memory_tolerates_fts5_punctuation(lib_env):
+    from kage.librarian import locate_memory
+    result = locate_memory('cycle-28: "the plan"? (draft) * ^foo')
+    assert isinstance(result, list)
+
+
+def test_write_note_matches_on_id_prefix(lib_env, monkeypatch):
+    from kage import runtime
+    from unittest.mock import MagicMock
+    monkeypatch.setattr(runtime, "embed",
+                        type("E", (), {"embed": lambda self, *a, **kw: [0.1] * 384})())
+    monkeypatch.setattr(runtime, "vector",
+                        type("V", (), {"collection": lambda self, *a, **kw: MagicMock()})())
+    staging_id = deposit_to_queue("prefix match content", "scout")
+    note_json = {"title": "Prefix", "body": "prefix body", "tags": [],
+                 "project": None, "identity": "personal", "source": "scout"}
+    approval_id = request_approval(staging_id, "promote", "prefix test", note_json, "prefix body")
+    ok = write_note(approval_id[:8])
+    assert ok is True
+    conn = _connect()
+    row = conn.execute("SELECT id FROM memories WHERE source='scout'").fetchone()
+    conn.close()
+    assert row is not None, "prefix id must resolve the same approval row"

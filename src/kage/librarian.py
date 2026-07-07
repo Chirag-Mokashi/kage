@@ -156,7 +156,8 @@ def locate_memory(query: str, identity: str | None = None, project: str | None =
             " JOIN memory_identities mi ON mi.mem_id = m.id"
             " WHERE memory_fts MATCH ?"
         )
-        params: list = [query]
+        # ponytail: strip FTS5 operator chars so punctuated queries can't raise syntax errors; ceiling — loses exact-phrase/punctuated-term matching. Upgrade: quote+escape into a proper FTS5 phrase query.
+        params: list = [re.sub(r'[^\w\s]', ' ', query).strip() or '""']
         if identity:
             sql += " AND mi.identity = ?"
             params.append(identity)
@@ -622,8 +623,8 @@ def write_note(approval_id: str) -> bool:
     conn = _connect()
     try:
         row = conn.execute(
-            "SELECT note_json, staging_id, decision FROM approval_queue WHERE id = ?",
-            (approval_id,),
+            "SELECT note_json, staging_id, decision FROM approval_queue WHERE id = ? OR id LIKE ?",
+            (approval_id, approval_id + "%"),
         ).fetchone()
         if not row:
             return False

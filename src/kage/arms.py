@@ -175,6 +175,10 @@ async def _call_arm_browser(
                     if getattr(nav, 'isError', False):
                         _privacy._write_audit({'type': 'arm_call', 'arm': arm_name, 'tool': 'browser_navigate', 'identity': identity, 'ts': ts, 'success': False})
                         return None
+                    # ponytail: JS-rendered SPAs (confirmed on kaggle.com, 2026-07-07) return an
+                    # empty/incomplete accessibility snapshot without this wait -- the page hasn't
+                    # finished rendering yet. Ceiling: fixed 3s wait, not a real load-complete signal.
+                    await session.call_tool('browser_wait_for', {'time': 3})
                     result = await session.call_tool('browser_snapshot', {})
                     data = _serialize_arm_result(result)
                     _privacy._write_audit({'type': 'arm_call', 'arm': arm_name, 'tool': 'browser_navigate+snapshot', 'identity': identity, 'ts': ts, 'success': data is not None})
@@ -182,6 +186,19 @@ async def _call_arm_browser(
     except Exception:
         _privacy._write_audit({'type': 'arm_call', 'arm': arm_name, 'tool': 'browser', 'identity': identity, 'ts': ts, 'success': False})
         return None
+
+
+async def _browser_click(session: ClientSession, element: str, ref: str):
+    """Click an element found in a prior browser_snapshot.
+
+    ponytail: Playwright MCP's browser_click tool takes the snapshot ref under the
+    param name 'target', NOT 'ref' -- the natural-looking name silently fails with
+    an 'Invalid arguments' error. This broke a full Kaggle pagination scrape on
+    2026-07-07 because the error was swallowed by a try/except wrapper. Route all
+    future multi-step browser clicks through this helper instead of re-deriving
+    the call shape.
+    """
+    return await session.call_tool('browser_click', {'element': element, 'target': ref})
 
 
 _TRANSPORT_HANDLERS: dict[str, Callable] = {}

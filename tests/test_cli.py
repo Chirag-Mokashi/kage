@@ -5107,9 +5107,41 @@ def test_browser_arm_snapshot_error_returns_none(monkeypatch):
     calls = _make_browser_mocks(monkeypatch, snapshot_is_error=True)
     result = asyncio.run(arms._call_arm_browser('browser', {}, 'find something', 'personal', 10.0))
     assert result is None
-    assert len(calls) == 2
+    assert len(calls) == 3
     assert calls[0][0] == 'browser_navigate'
-    assert calls[1][0] == 'browser_snapshot'
+    assert calls[1][0] == 'browser_wait_for'
+    assert calls[2][0] == 'browser_snapshot'
+
+
+def test_browser_arm_waits_between_navigate_and_snapshot(monkeypatch):
+    """browser_wait_for is called between navigate and snapshot -- regression test for
+    the empty-snapshot-on-JS-SPA bug (kaggle.com, 2026-07-07)."""
+    calls = _make_browser_mocks(monkeypatch)
+    result = asyncio.run(arms._call_arm_browser('browser', {}, 'find something', 'personal', 10.0))
+    assert len(calls) == 3
+    assert calls[0][0] == 'browser_navigate'
+    assert calls[1][0] == 'browser_wait_for'
+    assert calls[1][1]['time'] == 3
+    assert calls[2][0] == 'browser_snapshot'
+    assert result == 'page content'
+
+
+def test_browser_click_uses_target_param():
+    """_browser_click must send 'target', not 'ref' -- Playwright MCP's browser_click
+    tool silently fails on 'ref' with an 'Invalid arguments' error. Regression test
+    for the bug that broke a full Kaggle pagination scrape on 2026-07-07."""
+    calls = []
+
+    async def fake_call_tool(name, params=None):
+        calls.append((name, dict(params) if params is not None else {}))
+        return mock.MagicMock(isError=False, content=[])
+
+    fake_session = mock.AsyncMock()
+    fake_session.call_tool.side_effect = fake_call_tool
+
+    asyncio.run(arms._browser_click(fake_session, 'Go to page 2', 'e509'))
+
+    assert calls == [('browser_click', {'element': 'Go to page 2', 'target': 'e509'})]
 
 
 def test_call_arm_sse_masks_question_before_dispatch(tmp_path, monkeypatch):

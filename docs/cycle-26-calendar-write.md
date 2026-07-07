@@ -1,7 +1,7 @@
 # Cycle 26 — Calendar-write: kage's first write arm (v0.26.0)
 
 *Status: PITCH v3 — **BUILD-READY** (2026-07-02, cloud-authored). One cold review (subagent vs. real repo) + a live B1 spike. Scope: **CREATE-ONLY** (write-only access, proven on the machine). NOT built yet.*
-*Brainstorm source: [orchestrator-brainstorm.md](orchestrator-brainstorm.md) + the 7 locked decisions (D1–D7).*
+*Brainstorm source: orchestrator-brainstorm.md (local working doc, not tracked in the repo) + the 7 locked decisions (D1–D7).*
 *Dev workflow: plan cloud → write local (Qwen3) → review cloud → plan tests cloud → write tests local → review tests cloud → run tests local.*
 
 > **v3 changelog:** cold-review B1 was **resolved empirically** — a live spike showed EventKit **full access is NOT grantable** in kage's runtime context (write-only already set → macOS won't re-prompt → returns write-only; delete never ran). Full access also has a fragile TCC identity story for a CLI. So **v1 ships create-only** (write-only, proven), and `delete` + reschedule + undo-composition **defer to a later cycle** bundled with a signed-helper / stable-identity for full access. Also folded from cold review #1: dropped the `native` transport-handler framing (writes go via the `runtime.calendar` seam, never `_call_arm`); `doctor` gets a write-arm branch; audit via `_write_audit`/`runtime.config.audit_path`; `EventKitBackend` lazy-imports EventKit so `runtime.reset()` survives non-mac CI; malformed proposal → fail safe.

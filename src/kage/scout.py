@@ -333,7 +333,7 @@ def build_broad_pipeline(cfg: dict) -> Workflow:
     local_model = cfg.get("local_model", "qwen3:14b")
     broad = LlmAgent(
         name="ScoutBroad",
-        model=LiteLlm(model=f"ollama_chat/{local_model}"),
+        model=LiteLlm(model=f"ollama_chat/{local_model}", num_ctx=cfg.get("ollama_num_ctx", 16384)),
         instruction=_BROAD_SHORTLIST_INSTRUCTION,
         output_key="shortlist_indices",
     )

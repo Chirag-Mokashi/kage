@@ -1223,3 +1223,11 @@ def test_deposit_loop_trailing_card_no_boundary(monkeypatch, tmp_path):
     scout.run("run")
     assert len(deposited) == 1
     assert deposited[0].startswith("### [hn] Alpha")
+
+
+def test_build_broad_pipeline_sets_num_ctx():
+    from kage.scout import build_broad_pipeline
+    cfg = {"local_model": "qwen3:14b"}
+    workflow = build_broad_pipeline(cfg)
+    agent = workflow.edges[0][1]
+    assert agent.model._additional_args["num_ctx"] == 16384

@@ -252,7 +252,15 @@ async def kage_ask(question: str, provider: str | None = None, project: str | No
         else:
             prompt = f"{system}\n\nQUESTION: {question}"
         try:
-            out = _cli._post_json(url, {"model": model, "prompt": prompt, "stream": False})
+            out = _cli._post_json(url, {"model": model, "prompt": prompt, "stream": False, "options": {"num_ctx": cfg.get("ollama_num_ctx", 16384)}})
+            _num_ctx = cfg.get("ollama_num_ctx", 16384)
+            _peval = out.get("prompt_eval_count")
+            if _peval is not None and _peval >= _num_ctx - 8:
+                _cli._write_audit({
+                    "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "type": "context_window_filled",
+                    "prompt_eval_count": _peval, "num_ctx": _num_ctx,
+                })
             answer = out.get("response", "").strip()
             used_provider = f"local:{model}"
         except Exception as exc:

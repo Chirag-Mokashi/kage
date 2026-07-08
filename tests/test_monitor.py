@@ -357,6 +357,34 @@ def test_monitor_digest_output_key_set(mon_env, monkeypatch):
     assert digest_agent.output_key == "monitor_digest"
 
 
+def test_build_monitor_observe_agent_sets_num_ctx(mon_env, monkeypatch):
+    from kage import monitor
+    from kage.monitor import build_monitor
+    monkeypatch.setattr(monitor, "_litellm_target", lambda p, c: ("ollama_chat/qwen3:14b", None, None))
+    cfg = {"local_model": "qwen3:14b", "cloud_provider": "openrouter-free"}
+    workflow = build_monitor(cfg)
+    observe_agent = workflow.edges[0][1]
+    assert observe_agent.model._additional_args["num_ctx"] == 16384
+
+
+def test_build_monitor_observe_agent_honors_num_ctx_override(mon_env, monkeypatch):
+    from kage import monitor
+    from kage.monitor import build_monitor
+    monkeypatch.setattr(monitor, "_litellm_target", lambda p, c: ("ollama_chat/qwen3:14b", None, None))
+    cfg = {"local_model": "qwen3:14b", "cloud_provider": "openrouter-free", "ollama_num_ctx": 8192}
+    workflow = build_monitor(cfg)
+    observe_agent = workflow.edges[0][1]
+    assert observe_agent.model._additional_args["num_ctx"] == 8192
+
+
+def test_build_monitor_observe_only_sets_num_ctx(mon_env, monkeypatch):
+    from kage.monitor import build_monitor_observe
+    cfg = {"local_model": "qwen3:14b"}
+    workflow = build_monitor_observe(cfg)
+    observe_agent = workflow.edges[0][1]
+    assert observe_agent.model._additional_args["num_ctx"] == 16384
+
+
 def test_check_mcp_health_stdio_ping(monkeypatch):
     """check_mcp_health must send a JSON-RPC initialize ping and return healthy."""
     import asyncio

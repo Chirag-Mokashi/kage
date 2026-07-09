@@ -427,10 +427,23 @@ def _answer(
             "messages": [{"role": "system", "content": system_prompt}] + messages,
             "stream": False,
         }
+        payload["options"] = {"num_ctx": cfg.get("ollama_num_ctx", 16384)}
         if think is not None:
             payload["think"] = think
         try:
             out = _post_json(ollama_url, payload)
+            _num_ctx = payload["options"]["num_ctx"]
+            _peval = out.get("prompt_eval_count")
+            if _peval is not None and _peval >= _num_ctx - 8:
+                typer.echo(
+                    "[kage] ⚠ prompt filled the context window — output may be missing context",
+                    err=True,
+                )
+                _write_audit({
+                    "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "type": "context_window_filled",
+                    "prompt_eval_count": _peval, "num_ctx": _num_ctx,
+                })
             yield out["message"]["content"].strip()
         except (urllib.error.URLError, KeyError, TimeoutError) as exc:
             raise OllamaUnavailable(str(exc)) from exc
@@ -1183,10 +1196,22 @@ def ask(
         else:
             prompt = f"{system}\n\nQUESTION: {question}"
         try:
-            out = _post_json(url, {"model": model, "prompt": prompt, "stream": False, "think": think}, timeout=300)
+            out = _post_json(url, {"model": model, "prompt": prompt, "stream": False, "think": think, "options": {"num_ctx": cfg.get("ollama_num_ctx", 16384)}}, timeout=300)
         except urllib.error.URLError:
             typer.echo("Can't reach the local model. Is Ollama running? (`ollama serve`) — or use --cloud.", err=True)
             raise typer.Exit(code=1)
+        _num_ctx = cfg.get("ollama_num_ctx", 16384)
+        _peval = out.get("prompt_eval_count")
+        if _peval is not None and _peval >= _num_ctx - 8:
+            typer.echo(
+                "[kage] ⚠ prompt filled the context window — output may be missing context",
+                err=True,
+            )
+            _write_audit({
+                "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                "type": "context_window_filled",
+                "prompt_eval_count": _peval, "num_ctx": _num_ctx,
+            })
         answer = out.get("response", "").strip()
         thinking = out.get("thinking", "").strip() if think else ""
 
@@ -1472,6 +1497,27 @@ def doctor() -> None:
     typer.echo(f"  {'✓' if ok_ollama else '⚠'} local model: {detail}")
     if not ok_ollama:
         typer.echo(f"      → for `kage ask`: start Ollama (`ollama serve`) + `ollama pull {model}`")
+
+    # Advisory — local context window: configured ollama_num_ctx vs. model's native
+    # context length, plus a headroom warning against the session token budget.
+    if ok_ollama:
+        num_ctx = cfg.get("ollama_num_ctx", 16384)
+        ollama_url = cfg.get("ollama_url", "http://localhost:11434")
+        try:
+            resp = _post_json(ollama_url + "/api/show", {"model": model})
+            native_ctx = None
+            for key, value in resp.get("model_info", {}).items():
+                if key.endswith(".context_length"):
+                    native_ctx = value
+                    break
+            if native_ctx is not None and num_ctx > native_ctx:
+                typer.echo(f"  ✗ configured ollama_num_ctx ({num_ctx}) exceeds model's native context ({native_ctx})")
+                typer.echo("      → lower ollama_num_ctx in ~/.kage/config.json")
+            if 4000 + 2000 > 0.75 * num_ctx:
+                typer.echo(f"  ⚠ ollama_num_ctx ({num_ctx}) may be too small for long chat sessions")
+                typer.echo("      → consider raising ollama_num_ctx in ~/.kage/config.json")
+        except Exception:
+            pass
 
     # Advisory — cloud provider key status
     user_providers = cfg.get("providers", {})

@@ -553,7 +553,7 @@ def build_monitor(cfg: dict):
     local_model = cfg.get("local_model", "qwen3:14b")
     observe_agent = LlmAgent(
         name="MonitorObserve",
-        model=LiteLlm(model=f"ollama_chat/{local_model}"),
+        model=LiteLlm(model=f"ollama_chat/{local_model}", num_ctx=cfg.get("ollama_num_ctx", 16384)),
         instruction=_MONITOR_OBSERVE_INSTRUCTION,
         tools=observe_tools,
     )
@@ -592,7 +592,7 @@ def build_monitor_observe(cfg: dict):
     local_model = cfg.get("local_model", "qwen3:14b")
     observe_agent = LlmAgent(
         name="MonitorObserve",
-        model=LiteLlm(model=f"ollama_chat/{local_model}"),
+        model=LiteLlm(model=f"ollama_chat/{local_model}", num_ctx=cfg.get("ollama_num_ctx", 16384)),
         instruction=_MONITOR_OBSERVE_INSTRUCTION,
         tools=observe_tools,
         output_key="monitor_findings",

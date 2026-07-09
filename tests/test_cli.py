@@ -2054,6 +2054,104 @@ def test_ask_local_path_unchanged(monkeypatch, tmp_path):
     assert "local ans" in r.output
 
 
+# ── num_ctx truncation hotfix (2026-07-07) ───────────────────────────────────
+
+def test_ask_local_payload_includes_default_num_ctx(monkeypatch, tmp_path):
+    home = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    calls = []
+    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append((url, payload)) or {"response": "local ans"})
+    r = CliRunner().invoke(cli.app, ["ask", "q"])
+    assert any("11434" in c[0] for c in calls)
+    assert calls[0][1]["options"]["num_ctx"] == 16384
+
+
+def test_ask_local_payload_honors_num_ctx_config_override(monkeypatch, tmp_path):
+    home = _save_home(monkeypatch, tmp_path)
+    (home / "config.json").write_text('{"ollama_num_ctx": 8192}')
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    calls = []
+    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append((url, payload)) or {"response": "local ans"})
+    r = CliRunner().invoke(cli.app, ["ask", "q"])
+    assert any("11434" in c[0] for c in calls)
+    assert calls[0][1]["options"]["num_ctx"] == 8192
+
+
+def test_ask_tripwire_warns_when_context_window_filled(monkeypatch, tmp_path):
+    home = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: {"response": "ans", "prompt_eval_count": 16380})
+    r = CliRunner().invoke(cli.app, ["ask", "q"])
+    assert "prompt filled the context window" in r.output
+
+
+def test_ask_no_tripwire_when_context_window_not_filled(monkeypatch, tmp_path):
+    home = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: {"response": "ans", "prompt_eval_count": 500})
+    r = CliRunner().invoke(cli.app, ["ask", "q"])
+    assert "prompt filled the context window" not in r.output
+
+
+def test_ask_tripwire_writes_audit_record(monkeypatch, tmp_path):
+    home = _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+    audit_logs = []
+    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: {"response": "ans", "prompt_eval_count": 16380})
+    monkeypatch.setattr(cli, "_write_audit", lambda record: audit_logs.append(record))
+    r = CliRunner().invoke(cli.app, ["ask", "q"])
+    assert any(record["type"] == "context_window_filled" and record["prompt_eval_count"] == 16380 for record in audit_logs)
+
+
+def test_doctor_context_window_ok_when_within_native(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    monkeypatch.setattr(cli, "_ollama_status", lambda cfg, model: (True, "qwen3:14b ready"))
+    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: {"model_info": {"qwen3.context_length": 40960}})
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert "exceeds model's native context" not in r.output
+
+
+def test_doctor_context_window_fails_when_exceeds_native(monkeypatch, tmp_path):
+    home = _save_home(monkeypatch, tmp_path)
+    (home / "config.json").write_text('{"ollama_num_ctx": 99999}')
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    monkeypatch.setattr(cli, "_ollama_status", lambda cfg, model: (True, "qwen3:14b ready"))
+    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: {"model_info": {"qwen3.context_length": 40960}})
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert "exceeds model's native context" in r.output
+    assert "99999" in r.output
+    assert "40960" in r.output
+
+
+def test_doctor_context_window_headroom_warning(monkeypatch, tmp_path):
+    home = _save_home(monkeypatch, tmp_path)
+    (home / "config.json").write_text('{"ollama_num_ctx": 4096}')
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    monkeypatch.setattr(cli, "_ollama_status", lambda cfg, model: (True, "qwen3:14b ready"))
+    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: {"model_info": {"qwen3.context_length": 40960}})
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert "may be too small for long chat sessions" in r.output
+
+
+def test_doctor_context_window_skips_gracefully_on_api_show_failure(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    monkeypatch.setattr(cli, "_ollama_status", lambda cfg, model: (True, "qwen3:14b ready"))
+    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert r.exception is None
+
+
+def test_doctor_context_window_skipped_when_ollama_down(monkeypatch, tmp_path):
+    _save_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    monkeypatch.setattr(cli, "_ollama_status", lambda cfg, model: (False, "not reachable"))
+    monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("_post_json should not be called when ollama is down")))
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert r.exception is None
+
+
 # ── doctor cloud providers (Cycle 5 Step 3) ──────────────────────────────────
 
 def test_doctor_cloud_key_set_shows_checkmark(monkeypatch, tmp_path):
@@ -2196,6 +2294,26 @@ def test_mcp_ask_local_returns_answer(monkeypatch, tmp_path):
     assert result["answer"] == "Paris."
     assert isinstance(result["sources"], list)
     assert result["provider"].startswith("local:")
+
+
+def test_mcp_ask_local_payload_includes_num_ctx(monkeypatch, tmp_path):
+    _mcp_home(monkeypatch, tmp_path)
+    cli._save("the eiffel tower is in paris", "test", embed=False)
+    calls = []
+    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: calls.append(payload) or {"response": "Paris."})
+    result = asyncio.run(mcp_server.kage_ask("where is the eiffel tower"))
+    assert calls[0]["options"]["num_ctx"] == 16384
+
+
+def test_mcp_ask_tripwire_writes_audit_on_window_filled(monkeypatch, tmp_path):
+    _mcp_home(monkeypatch, tmp_path)
+    cli._save("the eiffel tower is in paris", "test", embed=False)
+    audit_calls = []
+    monkeypatch.setattr(cli, "_write_audit", lambda record: audit_calls.append(record))
+    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: {"response": "Paris.", "prompt_eval_count": 16380})
+    result = asyncio.run(mcp_server.kage_ask("where is the eiffel tower"))
+    assert len(audit_calls) == 1
+    assert audit_calls[0]["type"] == "context_window_filled"
 
 
 def test_mcp_ask_with_provider(monkeypatch, tmp_path):

@@ -6,6 +6,7 @@ import xml.etree.ElementTree as _ET
 from collections import deque
 from kage import http as _http
 from kage import privacy as _privacy
+from kage import guard
 from kage import runtime
 from kage.cli import _search, _disclosure_gate
 from kage.context import _resolve_context
@@ -492,9 +493,27 @@ def run(mode: str) -> str:
         conn.commit(); conn.close()
         return shortlist_text
 
-    # Stage 2: deep fetch for shortlisted items
+    # Stage 2: deep fetch for shortlisted items (Cycle 30.2: each block is
+    # inbound-guarded before it reaches the corpus -- neutralized per block,
+    # not after assembly, so the corpus char cap below can never sever a
+    # block's closing delimiter)
     shortlisted = _parse_shortlist_indices(shortlist_text, items)
-    full_map = {id(it): _fetch_full(it) for it in shortlisted}
+    full_map = {}
+    for it in shortlisted:
+        fetched = _fetch_full(it)
+        suspicious = guard._scout_triage(fetched, cfg)
+        fetched, findings = guard.neutralize(fetched, source=f"scout:{it.get('source', '')}")
+        if findings or suspicious:
+            _privacy._write_audit({
+                "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                "type": "inbound_injection_flagged",
+                "source": "scout",
+                "item_title": it.get("title", ""),
+                "count": len(findings),
+                "patterns": [f["pattern"] for f in findings],
+                "local_triage_flagged": suspicious,
+            })
+        full_map[id(it)] = fetched
 
     # Stage 3: integrate on enriched corpus (cloud)
     enriched = _corpus_enriched(items, shortlisted, full_map)
@@ -526,6 +545,7 @@ def run(mode: str) -> str:
 
     _write_report(mode, final)
     _update_cache(cache, items)
+    deposited_count = 0
     try:
         in_tier1 = False
         current_card: list[str] = []
@@ -536,6 +556,7 @@ def run(mode: str) -> str:
             if in_tier1 and line.startswith("## Tier 2"):
                 if current_card:
                     deposit_to_queue("\n".join(current_card).strip(), "scout", project=project)
+                    deposited_count += 1
                     current_card = []
                 break
             if not in_tier1:
@@ -543,13 +564,26 @@ def run(mode: str) -> str:
             if line.startswith("### "):
                 if current_card:
                     deposit_to_queue("\n".join(current_card).strip(), "scout", project=project)
+                    deposited_count += 1
                 current_card = [line]
             elif current_card:
                 current_card.append(line)
         if current_card:
             deposit_to_queue("\n".join(current_card).strip(), "scout", project=project)
+            deposited_count += 1
     except Exception:
-        pass
+        _privacy._write_audit({
+            "event": "scout_deposit_parse_error",
+            "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "deposited_before_error": deposited_count,
+        })
+    if final.strip() and deposited_count == 0:
+        print("[kage] ⚠ Scout parsed 0 cards from a non-empty report (header drift?) — nothing handed to the Librarian")
+        _privacy._write_audit({
+            "event": "scout_deposit_empty",
+            "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "report_chars": len(final),
+        })
     _token_log(mode, items, final)
 
     conn = runtime.store.connect()

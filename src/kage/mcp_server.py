@@ -199,6 +199,19 @@ async def kage_ask(question: str, provider: str | None = None, project: str | No
             arm_results.append(f"[{arm_name}]\n{result}")
     arm_context = "\n\n".join(arm_results) if arm_results else ""
 
+    _mcp_inbound_findings: list[dict] = []
+    if arm_context:
+        from kage import guard
+        arm_context, _mcp_inbound_findings = guard.neutralize(arm_context, source="mcp")
+        if _mcp_inbound_findings:
+            _cli._write_audit({
+                "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                "type": "inbound_injection_flagged",
+                "source": "mcp",
+                "count": len(_mcp_inbound_findings),
+                "patterns": [f["pattern"] for f in _mcp_inbound_findings],
+            })
+
     _mcp_sub_map: dict[str, str] = {}
     if provider:
         from kage import gate
@@ -274,6 +287,7 @@ async def kage_ask(question: str, provider: str | None = None, project: str | No
         "provider": used_provider,
         "withheld_count": withheld_count,
         "withheld_reasons": withheld_reasons,
+        "warnings": [f["pattern"] for f in _mcp_inbound_findings],
     }
 
 

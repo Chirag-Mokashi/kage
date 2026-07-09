@@ -78,6 +78,26 @@ def neutralize(text: str, source: str = "") -> tuple[str, list[dict]]:
     return wrapped, findings
 
 
+def sanitize_fact(text: str, source: str = "") -> tuple[str, list[dict]]:
+    """Sanitize-only half of neutralize(), fence-free -- for the 60-token
+    warm-context bar, where neutralize()'s ~38-token delimiter would blow
+    the budget. Same normalize + injection-scan; no fence, no sentinel.
+    Caller drops the fact entirely on a finding rather than rendering it.
+    """
+    if not text:
+        return text, []
+
+    normalized = unicodedata.normalize("NFKC", text)
+    normalized = _ZERO_WIDTH_RE.sub("", normalized)
+
+    findings: list[dict] = []
+    for pattern in _INJECTION_PATTERNS:
+        if pattern.search(normalized):
+            findings.append({"source": source, "pattern": pattern.pattern})
+
+    return normalized, findings
+
+
 def _scout_triage(text: str, cfg: dict) -> bool:
     """Local Qwen3 checks fetched content for injection intent (Cycle 30.2,
     Scout path only -- Scout runs unattended and its digest can be promoted

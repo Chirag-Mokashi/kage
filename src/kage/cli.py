@@ -427,7 +427,13 @@ def _answer(
             "messages": [{"role": "system", "content": system_prompt}] + messages,
             "stream": False,
         }
-        payload["options"] = {"num_ctx": cfg.get("ollama_num_ctx", 16384)}
+        from kage import budget
+        _num_ctx = cfg.get("ollama_num_ctx", 16384)
+        _reserved = cfg.get("reserved_output", budget.DEFAULT_RESERVED_OUTPUT)
+        payload["options"] = {
+            "num_ctx": _num_ctx,
+            "num_predict": budget.num_predict_for(_num_ctx, _reserved),
+        }
         if think is not None:
             payload["think"] = think
         try:
@@ -555,6 +561,7 @@ def _ollama_status(cfg: dict, model: str) -> tuple[bool, str]:
 def use_(
     context: str | None = typer.Argument(None, help="Identity or identity/project. Use --clear to reset."),
     clear: bool = typer.Option(False, "--clear", help="Reset active context to fallback (personal / no project)."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the unknown-identity confirm prompt (for scripts/tests)."),
 ) -> None:
     """Set the active identity and project so you don't have to pass --identity/--project on every call."""
     _require_init()
@@ -574,7 +581,31 @@ def use_(
     if not identity:
         typer.echo("Identity cannot be empty.", err=True)
         raise typer.Exit(code=1)
+    from kage import identity as _id
+    try:
+        known = _id.get_identity(identity) is not None
+    except _id.RegistryCorruptError as e:
+        typer.echo(f"[kage] identities.json is corrupt: {e}", err=True)
+        raise typer.Exit(code=1)
+    if not known and not yes:
+        if not typer.confirm(
+            f"'{identity}' is not in the identity registry (see: kage identity list). "
+            "3a will treat it as its own trusted write partition once you switch to it. "
+            "Continue anyway?",
+            default=False,
+        ):
+            typer.echo("  aborted — no change made.")
+            raise typer.Exit(code=1)
     active = _read_active()
+    if active.pop("_project_inferred_pending", False):
+        active["_project_inference_misses"] = active.get("_project_inference_misses", 0) + 1
+        _save(
+            f"3a miss: kage use overrode an inferred project resolution "
+            f"(new identity={identity}, new project={project or '(none)'})",
+            "kage-corrections",
+            identities=["personal"],
+            state="baseline",
+        )
     active["identity"] = identity
     if project is not None:
         active["project"] = project
@@ -608,7 +639,16 @@ def remember(
 ) -> None:
     """Save a note to memory (markdown + index). Confirms before writing (the wall, #16)."""
     _require_init()
-    identity, project, source = _resolve_context(identity, project)
+    cfg = _config()
+    _project_inferred = False
+    if cfg.get("warm_context", False):
+        from kage.context import _resolve_context_rich, _mark_project_inferred
+        _resolution = _resolve_context_rich(identity, project)
+        identity, project = _resolution.identity.value, _resolution.project.value
+        _project_inferred = _resolution.project.confidence == "inferred"
+        _mark_project_inferred(_project_inferred)
+    else:
+        identity, project, _source = _resolve_context(identity, project)
     from kage import identity as _id
     if _id.active_class(identity) == 'read-only':
         typer.echo("[kage] read-only identity cannot write to memory.", err=True)
@@ -616,7 +656,8 @@ def remember(
 
     # The wall (#16): show it and confirm BEFORE anything is written.
     typer.echo(f'\n  "{text}"')
-    typer.echo(f"  project: {project or '(none)'}")
+    _project_note = "  (inferred from .kage)" if _project_inferred else ""
+    typer.echo(f"  project: {project or '(none)'}{_project_note}")
     typer.echo(f"  identity: {identity}")
     if local:
         typer.echo("  local-only: yes (will not be sent to cloud)")
@@ -1018,10 +1059,19 @@ def ask(
 ) -> None:
     """Answer a question using your recalled notes — local model by default, --cloud to use a cloud provider."""
     _require_init()
-    identity, project, source = _resolve_context(identity, project)
+    cfg = _config()
+    _warm_on = cfg.get("warm_context", False)
+    if _warm_on:
+        from kage.context import _resolve_context_rich, _mark_project_inferred
+        _resolution = _resolve_context_rich(identity, project)
+        identity, project = _resolution.identity.value, _resolution.project.value
+        _project_inferred = _resolution.project.confidence == "inferred"
+        _mark_project_inferred(_project_inferred)
+    else:
+        identity, project, _source = _resolve_context(identity, project)
+        _project_inferred = False
 
     rows = _search(question, project, limit, any_terms=True, identity=identity)
-    cfg = _config()
     candidates: list[str] = []
     task_class: str = _classify(question)
 
@@ -1141,7 +1191,41 @@ def ask(
         if text:
             context_parts.append(f"[{note_id}] {text}")
             sources.append((note_id, path, section_title))
+
+    if not cloud:
+        from kage import budget
+        _num_ctx = cfg.get("ollama_num_ctx", 16384)
+        _reserved = cfg.get("reserved_output", budget.DEFAULT_RESERVED_OUTPUT)
+        # ponytail: fixed_estimate is a rough allowance for system+bar+question
+        # -- the real system prompt isn't assembled until later, so this is a
+        # trim decision, not an exact accounting. The 29.1 tripwire still
+        # catches an actual overflow if this estimate runs short.
+        _fixed_estimate = budget.estimate_tokens(question) + 500
+        _trimmed = budget.trim_notes_to_budget(context_parts, _fixed_estimate, _num_ctx, _reserved)
+        sources = sources[:len(_trimmed)]
+        context_parts = _trimmed
+
     context = "\n\n".join(context_parts) or "(no relevant notes found)"
+
+    context_bar = ""
+    if _warm_on:
+        from kage import warm, warm_producers
+        # ponytail: refresh_kernel blocks on a genuine page-fault (~1-3s,
+        # calendar arm) but most invocations hit warm facts before TTL and
+        # pay ~0ms. Ceiling: a cold-fault still blocks this answer. Upgrade:
+        # background refresh once kage runs as a daemon, not a one-shot CLI.
+        try:
+            asyncio.run(warm_producers.refresh_kernel(
+                runtime.config.warm_path, identity, keys=warm_producers._BAR_KEYS,
+            ))
+        except Exception:
+            pass
+        _facts = {
+            f.key: f.value for f in warm.active_facts(runtime.config.warm_path, identity)
+            if f.value
+        }
+        context_bar = warm_producers.render_s(identity, project, _project_inferred, _facts)
+        typer.echo(f"〔{context_bar}〕")
 
     # ── Arm calls (Cycle 11) ──────────────────────────────────────────────
     arm_names = _detect_arms(question, identity)
@@ -1173,12 +1257,15 @@ def ask(
 
     sub_mapping: dict[str, str] = {}
     masked_question = question
+    masked_context_bar = context_bar
     if cloud:
         from kage import gate
         context, sub_mapping = gate.two_pass_gate(context, source="ask", existing_mapping=sub_mapping)
         if arm_context:
             arm_context, sub_mapping = gate.two_pass_gate(arm_context, source="ask", existing_mapping=sub_mapping)
         masked_question, sub_mapping = gate.two_pass_gate(question, source="ask", existing_mapping=sub_mapping)
+        if context_bar:
+            masked_context_bar, sub_mapping = gate.two_pass_gate(context_bar, source="ask", existing_mapping=sub_mapping)
         if sub_mapping:
             _sub_types = sorted(set(k.rsplit("_", 1)[0].lstrip("[") for k in sub_mapping))
             typer.echo(f"[kage] {len(sub_mapping)} PII span(s) substituted before dispatch "
@@ -1208,7 +1295,11 @@ def ask(
 
     answer = ""
     if cloud:
-        user_msg = masked_question if arm_context else f"CONTEXT:\n{effective_context}\n\nQUESTION: {masked_question}"
+        _bar_line = f"[{masked_context_bar}]\n" if masked_context_bar else ""
+        user_msg = (
+            f"{_bar_line}{masked_question}" if arm_context
+            else f"CONTEXT:\n{effective_context}\n\n{_bar_line}QUESTION: {masked_question}"
+        )
         if auto and candidates:
             for pname in candidates:
                 _pcfg = {**DEFAULT_PROVIDERS.get(pname, {}), **cfg.get("providers", {}).get(pname, {})}
@@ -1249,12 +1340,18 @@ def ask(
         _learned = _load_lp(task_class, home=KAGE_HOME)
         if _learned:
             system = system + f"\n\n[kage learned rules — {task_class}]\n{_learned}"
+        _bar_line = f"[{context_bar}]\n" if context_bar else ""
         if effective_context:
-            prompt = f"{system}\n\nCONTEXT (the user's notes):\n{effective_context}\n\nQUESTION: {question}"
+            prompt = f"{system}\n\nCONTEXT (the user's notes):\n{effective_context}\n\n{_bar_line}QUESTION: {question}"
         else:
-            prompt = f"{system}\n\nQUESTION: {question}"
+            prompt = f"{system}\n\n{_bar_line}QUESTION: {question}"
         try:
-            out = _post_json(url, {"model": model, "prompt": prompt, "stream": False, "think": think, "options": {"num_ctx": cfg.get("ollama_num_ctx", 16384)}}, timeout=300)
+            from kage import budget
+            _num_predict = budget.num_predict_for(
+                cfg.get("ollama_num_ctx", 16384),
+                cfg.get("reserved_output", budget.DEFAULT_RESERVED_OUTPUT),
+            )
+            out = _post_json(url, {"model": model, "prompt": prompt, "stream": False, "think": think, "options": {"num_ctx": cfg.get("ollama_num_ctx", 16384), "num_predict": _num_predict}}, timeout=300)
         except urllib.error.URLError:
             typer.echo("Can't reach the local model. Is Ollama running? (`ollama serve`) — or use --cloud.", err=True)
             raise typer.Exit(code=1)
@@ -1400,6 +1497,15 @@ def status(
 
     typer.echo("\nkage status")
     typer.echo(f"  context  {_ac_display}  [{_ac_source}]")
+    _active_raw = _read_active()
+    _inf_total = _active_raw.get("_project_inference_total", 0)
+    if _inf_total > 0:
+        _inf_misses = _active_raw.get("_project_inference_misses", 0)
+        _hit_rate = round(100 * (_inf_total - _inf_misses) / _inf_total)
+        typer.echo(
+            f"  3a       {_hit_rate}% project-inference hit-rate  "
+            f"({_inf_total - _inf_misses}/{_inf_total} kept)"
+        )
     typer.echo(f"  store    {_disp(KAGE_HOME)}   (config v{version})")
     typer.echo(f"  memory   {total} note(s) across {len(by_proj)} project(s){lo_suffix}")
     for p, c in by_proj:
@@ -1571,7 +1677,13 @@ def doctor() -> None:
             if native_ctx is not None and num_ctx > native_ctx:
                 typer.echo(f"  ✗ configured ollama_num_ctx ({num_ctx}) exceeds model's native context ({native_ctx})")
                 typer.echo("      → lower ollama_num_ctx in ~/.kage/config.json")
-            if 4000 + 2000 > 0.75 * num_ctx:
+            from kage import budget
+            reserved_output = cfg.get("reserved_output", budget.DEFAULT_RESERVED_OUTPUT)
+            # ponytail: 4500 is a ballpark for system + warm bar + retrieved
+            # context + history combined, not an exact accounting -- same
+            # estimate ceiling as budget.estimate_tokens (len/4, not a real
+            # tokenizer). Good enough for an advisory, not a hard gate.
+            if reserved_output + 4500 > num_ctx:
                 typer.echo(f"  ⚠ ollama_num_ctx ({num_ctx}) may be too small for long chat sessions")
                 typer.echo("      → consider raising ollama_num_ctx in ~/.kage/config.json")
         except Exception:
@@ -1812,6 +1924,14 @@ def chat(
     """Dev/debug cockpit: stateful conversation with kage. Identity and project are pinned; destination is switchable via /use."""
     _require_init()
     cfg = _config()
+    _warm_on = cfg.get("warm_context", False)
+    _project_inferred = False
+    if _warm_on:
+        from kage.context import _resolve_context_rich, _mark_project_inferred
+        _resolution = _resolve_context_rich(identity, project)
+        project = _resolution.project.value
+        _project_inferred = _resolution.project.confidence == "inferred"
+        _mark_project_inferred(_project_inferred)
     destination = provider or "ollama"
     session_id = _session_create(identity, project, destination)
     _last_sources: list = []
@@ -1912,13 +2032,40 @@ def chat(
                 context_parts.append(f"[{note_id}] {text}")
                 _last_sources.append((note_id, path, section_title))
                 note_ids_this_turn.append(note_id)
+
+        if destination == "ollama":
+            from kage import budget
+            _num_ctx = cfg.get("ollama_num_ctx", 16384)
+            _reserved = cfg.get("reserved_output", budget.DEFAULT_RESERVED_OUTPUT)
+            _fixed_estimate = budget.estimate_tokens(condensed) + 500
+            _trimmed = budget.trim_notes_to_budget(context_parts, _fixed_estimate, _num_ctx, _reserved)
+            _last_sources = _last_sources[:len(_trimmed)]
+            note_ids_this_turn = note_ids_this_turn[:len(_trimmed)]
+            context_parts = _trimmed
+
         context = "\n\n".join(context_parts)
+        context_bar = ""
+        if _warm_on:
+            from kage import warm, warm_producers
+            try:
+                asyncio.run(warm_producers.refresh_kernel(
+                    runtime.config.warm_path, identity, keys=warm_producers._BAR_KEYS,
+                ))
+            except Exception:
+                pass
+            _facts = {
+                f.key: f.value for f in warm.active_facts(runtime.config.warm_path, identity)
+                if f.value
+            }
+            context_bar = warm_producers.render_s(identity, project, _project_inferred, _facts)
+            typer.echo(f"〔{context_bar}〕")
+        condensed_for_answer = f"[{context_bar}]\n{condensed}" if context_bar else condensed
         _req_map: dict[str, str] = {}
         if destination != "ollama":
             from kage import gate
             # per-request mapping: one shared map so the same real value gets one placeholder;
             # discarded after restore (never accumulated across turns).
-            condensed, _req_map = gate.two_pass_gate(condensed, source="chat", existing_mapping=_req_map)
+            condensed_for_answer, _req_map = gate.two_pass_gate(condensed_for_answer, source="chat", existing_mapping=_req_map)
             masked_history: list[dict] = []
             for _t in history_for_answer:
                 _mc, _req_map = gate.two_pass_gate(_t["content"], source="chat", existing_mapping=_req_map)
@@ -1926,7 +2073,7 @@ def chat(
             history_for_answer = masked_history
             context, _req_map = gate.two_pass_gate(context, source="chat", existing_mapping=_req_map)
         try:
-            answer = next(iter(_answer(condensed, history_for_answer, context, destination, cfg)))
+            answer = next(iter(_answer(condensed_for_answer, history_for_answer, context, destination, cfg)))
         except OllamaUnavailable as e:
             typer.echo(f"[kage] Ollama unavailable: {e}", err=True)
             continue

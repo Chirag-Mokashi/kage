@@ -11,6 +11,7 @@ class Config:
         self.db_path = home / "indexes" / "kage.db"
         self.chroma_dir = home / "chroma"
         self.state_path = home / "state.json"
+        self.warm_path = home / "state" / "warm.json"
         self.audit_path = home / "audit.jsonl"
         self._config_path = home / "config.json"
 

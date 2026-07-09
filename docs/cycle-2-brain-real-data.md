@@ -1,7 +1,7 @@
 # Cycle 2 Pitch — kage v0.2 (the brain + real data)
 
 > **Status:** SHIPPED v0.2 (`1f35365`). Original pitch — appetite ~1 cycle.
-> *Date: 2026-06-05.* Companion: [cycle-1-pitch.md](cycle-1-pitch.md) (shipped v0.1) · [blueprint.md](blueprint.md).
+> *Date: 2026-06-05.* Companion: [cycle-1-thin-slice.md](cycle-1-thin-slice.md) (shipped v0.1) · [blueprint.md](blueprint.md).
 
 ---
 

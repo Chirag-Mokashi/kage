@@ -99,9 +99,9 @@ The long-term blueprint still matters for direction, but docs that say "no code 
 | File | What it is |
 |---|---|
 | [docs/blueprint.md](docs/blueprint.md) | **Read this for strategic context.** The detailed long-term planning state. Some status language is historical; current implementation may be ahead of it. |
-| [docs/cycle-1-pitch.md](docs/cycle-1-pitch.md) | Historical v0.1 thin-slice pitch. Useful for original scope, not a complete description of current code. |
+| [docs/cycle-1-thin-slice.md](docs/cycle-1-thin-slice.md) | Historical v0.1 thin-slice pitch. Useful for original scope, not a complete description of current code. |
 | [docs/architecture.md](docs/architecture.md) | ⚠️ LEGACY (Session 1) — superseded by blueprint.md §4 (Odysseus substrate). See banner in file. |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | ⚠️ LEGACY (Session 1) — superseded by cycle-1-pitch.md + blueprint.md. See banner in file. |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | ⚠️ LEGACY (Session 1) — superseded by cycle-1-thin-slice.md + blueprint.md. See banner in file. |
 | [docs/competitor-flowcharts.md](docs/competitor-flowcharts.md) | Engine-level comparisons with prior art |
 
 For a fresh coding session: read `README.md`, then `src/kage/cli.py`, `tests/test_cli.py`, and `docs/blueprint.md` for strategic context.

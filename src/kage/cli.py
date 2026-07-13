@@ -36,7 +36,7 @@ from kage import arms as _arms
 # CloudError + DEFAULT_PROVIDERS now live in kage.cloud (Cycle 12 Slice 1); re-export so
 # cli.CloudError / cli.DEFAULT_PROVIDERS stay the public/test surface.
 from kage.cloud import CloudError, DEFAULT_PROVIDERS  # noqa: E402,F401
-from kage.router import _classify, _candidates, _local_eligible
+from kage.router import _classify, _candidates
 
 
 app = typer.Typer(
@@ -971,38 +971,6 @@ def arm_auth() -> None:
     typer.echo("✓ Refresh token saved to config.json — Google arms are ready.")
 
 
-def _triage_simple(question: str, cfg: dict) -> bool:
-    """Local Qwen3 rates query difficulty 1-5; True = simple enough to answer locally
-    instead of cloud (Cycle 30.1). Fail-closed: any error, timeout, or unparseable
-    reply routes to cloud (today's behavior) rather than risk a bad local answer or
-    a hang -- Ollama can hang past a configured timeout with no exception ever
-    raised (see kage-corrections memory, 2026-07-07), so a short timeout here is a
-    mitigation, not a guarantee; the except clause is the real safety net."""
-    model = cfg.get("model", "qwen3:14b")
-    url = cfg.get("ollama_url", "http://localhost:11434") + "/api/generate"
-    max_simple = cfg.get("auto_triage_max_simple", 2)
-    timeout = cfg.get("auto_triage_timeout", 15)
-    prompt = (
-        "Rate this question's difficulty from 1 to 5 "
-        "(1=trivial/factual, 5=deep multi-step reasoning). "
-        "Reply with only the digit, nothing else.\n\n"
-        f"Q: {question}"
-    )
-    try:
-        out = _post_json(
-            url,
-            {"model": model, "prompt": prompt, "stream": False, "think": False},
-            timeout=timeout,
-        )
-        response = out.get("response", "").strip()
-        for ch in response:
-            if ch.isdigit():
-                return int(ch) <= max_simple
-        return False
-    except Exception:
-        return False
-
-
 @app.command()
 def ask(
     question: str = typer.Argument(..., help="Your question."),
@@ -1030,19 +998,9 @@ def ask(
             typer.echo("[kage] --auto is mutually exclusive with --cloud / --provider.", err=True)
             raise typer.Exit(code=1)
         candidates = _candidates(task_class, cfg)
-        if candidates and not (_local_eligible(task_class) and _triage_simple(question, cfg)):
+        if candidates:
             cloud = True
             provider = candidates[0]
-        elif candidates:
-            typer.echo("[kage] Answering locally to conserve cloud — re-run with --cloud if the answer falls short.\n")
-            _write_audit({
-                "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-                "provider": "", "project": project,
-                "notes_retrieved": len(rows), "notes_withheld": 0,
-                "withheld_reasons": [], "pii_detected": [],
-                "user_approved": None, "outcome": "auto_downrouted_local",
-                "substitution_count": 0, "placeholder_labels": [],
-            })
 
     # 3e disclosure gate — runs before context assembly, cloud path only
     provider_name: str = ""

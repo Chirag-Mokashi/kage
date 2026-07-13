@@ -1,4 +1,4 @@
-from kage.router import _classify, _candidates, _local_eligible
+from kage.router import _classify, _candidates
 
 
 def test_classify_code_keyword():
@@ -87,23 +87,3 @@ def test_candidates_returns_copy():
     result = _candidates("code", {})
     result.clear()
     assert len(_candidates("code", {})) > 0
-
-
-def test_local_eligible_code():
-    assert _local_eligible("code") is True
-
-
-def test_local_eligible_reasoning():
-    assert _local_eligible("reasoning") is True
-
-
-def test_local_eligible_research_false():
-    assert _local_eligible("research") is False
-
-
-def test_local_eligible_multimodal_false():
-    assert _local_eligible("multimodal") is False
-
-
-def test_local_eligible_chat_false():
-    assert _local_eligible("chat") is False

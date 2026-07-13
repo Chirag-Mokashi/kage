@@ -42,15 +42,7 @@ def _classify(question: str) -> str:
 
 def _candidates(task_class: str, cfg: dict) -> list[str]:
     """Return ordered provider names for task_class. User cfg.routing_table rows replace defaults."""
-    # ponytail: custom routing_table keys accepted silently; upgrade = validation + upgrade + warning
+    # ponytail: custom routing_table keys accepted silently; upgrade = validation + warning
     user_table: dict[str, list[str]] = cfg.get("routing_table", {})
     table = {**_ROUTING_TABLE, **user_table}
     return list(table.get(task_class, []))
-
-
-def _local_eligible(task_class: str) -> bool:
-    """Whitelist of task classes local Qwen3 can serve under --auto down-routing
-    (Cycle 30.1). 'research' needs live web access and 'multimodal' needs vision --
-    local Qwen3 has neither capability, so they are never eligible for local
-    down-routing regardless of how simple the query looks."""
-    return task_class in ("code", "reasoning")

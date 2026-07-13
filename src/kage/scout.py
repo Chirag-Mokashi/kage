@@ -545,7 +545,6 @@ def run(mode: str) -> str:
 
     _write_report(mode, final)
     _update_cache(cache, items)
-    deposited_count = 0
     try:
         in_tier1 = False
         current_card: list[str] = []
@@ -556,7 +555,6 @@ def run(mode: str) -> str:
             if in_tier1 and line.startswith("## Tier 2"):
                 if current_card:
                     deposit_to_queue("\n".join(current_card).strip(), "scout", project=project)
-                    deposited_count += 1
                     current_card = []
                 break
             if not in_tier1:
@@ -564,26 +562,13 @@ def run(mode: str) -> str:
             if line.startswith("### "):
                 if current_card:
                     deposit_to_queue("\n".join(current_card).strip(), "scout", project=project)
-                    deposited_count += 1
                 current_card = [line]
             elif current_card:
                 current_card.append(line)
         if current_card:
             deposit_to_queue("\n".join(current_card).strip(), "scout", project=project)
-            deposited_count += 1
     except Exception:
-        _privacy._write_audit({
-            "event": "scout_deposit_parse_error",
-            "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-            "deposited_before_error": deposited_count,
-        })
-    if final.strip() and deposited_count == 0:
-        print("[kage] ⚠ Scout parsed 0 cards from a non-empty report (header drift?) — nothing handed to the Librarian")
-        _privacy._write_audit({
-            "event": "scout_deposit_empty",
-            "ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-            "report_chars": len(final),
-        })
+        pass
     _token_log(mode, items, final)
 
     conn = runtime.store.connect()

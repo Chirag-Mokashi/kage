@@ -16,6 +16,8 @@ import sqlite3
 import subprocess
 import sys
 import urllib.error
+from datetime import datetime
+from pathlib import Path
 
 import chromadb
 
@@ -2141,6 +2143,26 @@ def test_doctor_context_window_skips_gracefully_on_api_show_failure(monkeypatch,
     monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
     r = CliRunner().invoke(cli.app, ["doctor"])
     assert r.exception is None
+
+
+def test_doctor_headroom_respects_reserved_output_config(monkeypatch, tmp_path):
+    home = _save_home(monkeypatch, tmp_path)
+    (home / "config.json").write_text(json.dumps({"ollama_num_ctx": 5000, "reserved_output": 1500}))
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    monkeypatch.setattr(cli, "_ollama_status", lambda cfg, model: (True, "qwen3:14b ready"))
+    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: {"model_info": {"qwen3.context_length": 40960}})
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert "may be too small for long chat sessions" in r.output
+
+
+def test_doctor_headroom_ok_when_reserved_output_lowered(monkeypatch, tmp_path):
+    home = _save_home(monkeypatch, tmp_path)
+    (home / "config.json").write_text(json.dumps({"ollama_num_ctx": 5000, "reserved_output": 0}))
+    monkeypatch.setattr(cli, "_get_chroma", lambda: (_ for _ in ()).throw(cli.OllamaUnavailable("down")))
+    monkeypatch.setattr(cli, "_ollama_status", lambda cfg, model: (True, "qwen3:14b ready"))
+    monkeypatch.setattr(cli, "_post_json", lambda url, payload, **kw: {"model_info": {"qwen3.context_length": 40960}})
+    r = CliRunner().invoke(cli.app, ["doctor"])
+    assert "may be too small for long chat sessions" not in r.output
 
 
 def test_doctor_context_window_skipped_when_ollama_down(monkeypatch, tmp_path):
@@ -4412,6 +4434,20 @@ class TestAnswerDispatcher:
         user_msgs = [m for m in payload["messages"] if m["role"] == "user"]
         assert user_msgs[-1]["content"] == "my question"
 
+    def test_answer_ollama_sets_num_predict(self, monkeypatch):
+        fake, calls = self._fake_post({"message": {"content": "x"}})
+        monkeypatch.setattr(cli, "_post_json", fake)
+        list(cli._answer("q", [], "", "ollama", {}))
+        payload = calls[0][1]
+        assert payload["options"]["num_predict"] == 1500
+
+    def test_answer_ollama_num_predict_respects_reserved_output_config(self, monkeypatch):
+        fake, calls = self._fake_post({"message": {"content": "x"}})
+        monkeypatch.setattr(cli, "_post_json", fake)
+        list(cli._answer("q", [], "", "ollama", {"reserved_output": 200}))
+        payload = calls[0][1]
+        assert payload["options"]["num_predict"] == 200
+
     def test_answer_yields_once(self, monkeypatch):
         fake, _ = self._fake_post({"message": {"content": "x"}})
         monkeypatch.setattr(cli, "_post_json", fake)
@@ -4732,6 +4768,258 @@ def test_mcp_ask_session_history_threaded(monkeypatch, tmp_path):
     assert any(t['role'] == 'assistant' for t in captured['history'])
 
 
+# ── Cycle 31 Slice 4 — warm-context S-render bar ─────────────────────────────
+
+class TestWarmContextBar:
+    """The S-render context bar wired into ask/chat/remember.
+    warm_context defaults False; these tests explicitly opt in per-test."""
+
+    def _setup(self, monkeypatch, tmp_path):
+        h = tmp_path / ".kage"
+        _patch_home(monkeypatch, h)
+        CliRunner().invoke(cli.app, ["init"])
+        return h
+
+    def test_ask_warm_context_off_by_default_no_bar(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+        r = CliRunner().invoke(cli.app, ["ask", "hello"])
+        assert "〔" not in r.output
+        assert not (h / "state" / "warm.json").exists()
+
+    def test_ask_warm_context_on_prints_bar(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        (h / "config.json").write_text(json.dumps({"warm_context": True}))
+        monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+        from kage import warm_producers as _wp
+        monkeypatch.setattr(_wp, "refresh_kernel", mock.AsyncMock(return_value={}))
+        r = CliRunner().invoke(cli.app, ["ask", "hello"], catch_exceptions=False)
+        assert "〔identity=personal" in r.output
+
+    def test_ask_cloud_masks_context_bar_before_dispatch(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        (h / "config.json").write_text(json.dumps({"warm_context": True}))
+        monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+        from kage import warm, warm_producers as _wp
+        monkeypatch.setattr(_wp, "refresh_kernel", mock.AsyncMock(return_value={}))
+        now_iso = datetime.now().astimezone().isoformat(timespec="seconds")
+        warm.refresh(runtime.config.warm_path, warm.WarmFact(
+            key="calendar_next", value="meet secret@synthetic.test at 3pm",
+            identity="personal", valid_from=now_iso, ttl_seconds=900, provenance="test",
+        ))
+        captured = {}
+        def fake_cloud(_name, _system, user_msg, _cfg):
+            captured["user_msg"] = user_msg
+            return "ok"
+        monkeypatch.setattr(cli, "_call_cloud", fake_cloud)
+        CliRunner().invoke(cli.app, ["ask", "what's next?", "--cloud"], catch_exceptions=False)
+        assert "secret@synthetic.test" not in captured.get("user_msg", "")
+        assert "[EMAIL_1]" in captured.get("user_msg", "")
+
+    def test_ask_local_bar_is_unmasked(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        (h / "config.json").write_text(json.dumps({"warm_context": True}))
+        monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+        from kage import warm, warm_producers as _wp
+        monkeypatch.setattr(_wp, "refresh_kernel", mock.AsyncMock(return_value={}))
+        now_iso = datetime.now().astimezone().isoformat(timespec="seconds")
+        warm.refresh(runtime.config.warm_path, warm.WarmFact(
+            key="calendar_next", value="meet secret@synthetic.test at 3pm",
+            identity="personal", valid_from=now_iso, ttl_seconds=900, provenance="test",
+        ))
+        captured = {}
+        def fake_post_json(url, payload, *a, **kw):
+            captured["prompt"] = payload["prompt"]
+            return {"response": "ok"}
+        monkeypatch.setattr(cli, "_post_json", fake_post_json)
+        CliRunner().invoke(cli.app, ["ask", "what's next?"], catch_exceptions=False)
+        assert "secret@synthetic.test" in captured.get("prompt", "")
+
+    def test_chat_warm_context_masks_bar_before_dispatch(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        (h / "config.json").write_text(json.dumps({"warm_context": True}))
+        from kage import warm, warm_producers as _wp
+        monkeypatch.setattr(_wp, "refresh_kernel", mock.AsyncMock(return_value={}))
+        now_iso = datetime.now().astimezone().isoformat(timespec="seconds")
+        warm.refresh(runtime.config.warm_path, warm.WarmFact(
+            key="calendar_next", value="meet secret@synthetic.test at 3pm",
+            identity="personal", valid_from=now_iso, ttl_seconds=900, provenance="test",
+        ))
+        captured = []
+        def fake_answer(question, history, context, destination, cfg):
+            captured.append(question)
+            return iter(["ok"])
+        monkeypatch.setattr(cli, "_answer", fake_answer)
+        monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+        seq = iter(["what's next?", "/exit"])
+        monkeypatch.setattr("builtins.input", lambda _: next(seq))
+        CliRunner().invoke(cli.app, ["chat", "--provider", "claude"], catch_exceptions=False)
+        assert len(captured) == 1
+        assert "secret@synthetic.test" not in captured[0]
+        assert "[EMAIL_1]" in captured[0]
+
+    def test_chat_warm_context_off_condensed_unchanged(self, monkeypatch, tmp_path):
+        self._setup(monkeypatch, tmp_path)
+        captured = []
+        def fake_answer(question, history, context, destination, cfg):
+            captured.append(question)
+            return iter(["ok"])
+        monkeypatch.setattr(cli, "_answer", fake_answer)
+        monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+        seq = iter(["what's next?", "/exit"])
+        monkeypatch.setattr("builtins.input", lambda _: next(seq))
+        CliRunner().invoke(cli.app, ["chat"], catch_exceptions=False)
+        assert captured == ["what's next?"]
+
+    def test_remember_wall_shows_inferred_project_annotation(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        (h / "config.json").write_text(json.dumps({
+            "warm_context": True, "project_inference": True,
+        }))
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: work)
+        monkeypatch.setattr(Path, "cwd", lambda: work)
+        (work / ".kage").write_text("project=widget\n")
+        r = CliRunner().invoke(cli.app, ["remember", "a note", "--yes"], catch_exceptions=False)
+        assert "project: widget  (inferred from .kage)" in r.output
+
+    def test_remember_flag_off_no_inferred_annotation(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: work)
+        monkeypatch.setattr(Path, "cwd", lambda: work)
+        (work / ".kage").write_text("project=widget\n")
+        r = CliRunner().invoke(cli.app, ["remember", "a note", "--yes"], catch_exceptions=False)
+        assert "(inferred from .kage)" not in r.output
+
+
+# ── Cycle 31 Slice 5 — output-buffer reservation / budget trim ──────────────
+
+class TestBudgetTrimIntegration:
+    def _setup(self, monkeypatch, tmp_path):
+        h = tmp_path / ".kage"
+        _patch_home(monkeypatch, h)
+        CliRunner().invoke(cli.app, ["init"])
+        return h
+
+    def _rows(self, n):
+        return [
+            (f"note{i}", None, "2026-01-01", f"memory/note{i}.md", "", None, None, None)
+            for i in range(n)
+        ]
+
+    def test_ask_local_trims_notes_when_over_num_ctx_budget(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        (h / "config.json").write_text(json.dumps({"ollama_num_ctx": 3600, "reserved_output": 100}))
+        monkeypatch.setattr(cli, "_search", lambda *a, **kw: self._rows(5))
+        monkeypatch.setattr(cli, "_read_body", lambda path: "y" * 5000)
+        captured = {}
+        def fake_post_json(url, payload, *a, **kw):
+            captured["prompt"] = payload["prompt"]
+            return {"response": "ok"}
+        monkeypatch.setattr(cli, "_post_json", fake_post_json)
+        CliRunner().invoke(cli.app, ["ask", "q"], catch_exceptions=False)
+        included = sum(1 for i in range(5) if f"[note{i}]" in captured["prompt"])
+        assert 0 < included < 5
+
+    def test_ask_cloud_does_not_trim_notes(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        (h / "config.json").write_text(json.dumps({"ollama_num_ctx": 3600, "reserved_output": 100}))
+        monkeypatch.setattr(cli, "_search", lambda *a, **kw: self._rows(5))
+        monkeypatch.setattr(cli, "_read_body", lambda path: "y" * 5000)
+        monkeypatch.setattr(cli, "_disclosure_gate", lambda rows, cfg, **kw: (rows, [], {}))
+        captured = {}
+        def fake_cloud(_name, _system, user_msg, _cfg):
+            captured["user_msg"] = user_msg
+            return "ok"
+        monkeypatch.setattr(cli, "_call_cloud", fake_cloud)
+        CliRunner().invoke(cli.app, ["ask", "q", "--cloud"], catch_exceptions=False)
+        included = sum(1 for i in range(5) if f"[note{i}]" in captured["user_msg"])
+        assert included == 5
+
+    def test_chat_ollama_trims_notes_when_over_num_ctx_budget(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        (h / "config.json").write_text(json.dumps({"ollama_num_ctx": 3600, "reserved_output": 100}))
+        monkeypatch.setattr(cli, "_search", lambda *a, **kw: self._rows(5))
+        monkeypatch.setattr(cli, "_read_body", lambda path: "y" * 5000)
+        captured = []
+        def fake_answer(question, history, context, destination, cfg):
+            captured.append(context)
+            return iter(["ok"])
+        monkeypatch.setattr(cli, "_answer", fake_answer)
+        seq = iter(["q", "/exit"])
+        monkeypatch.setattr("builtins.input", lambda _: next(seq))
+        CliRunner().invoke(cli.app, ["chat"], catch_exceptions=False)
+        included = sum(1 for i in range(5) if f"[note{i}]" in captured[0])
+        assert 0 < included < 5
+
+
+# ── Cycle 31 Slice 6 — miss-metric / inference hit-rate ──────────────────────
+
+class TestMissMetric:
+    def _setup(self, monkeypatch, tmp_path):
+        h = tmp_path / ".kage"
+        _patch_home(monkeypatch, h)
+        CliRunner().invoke(cli.app, ["init"])
+        return h
+
+    def _trigger_inference(self, monkeypatch, tmp_path, h):
+        (h / "config.json").write_text(json.dumps({
+            "warm_context": True, "project_inference": True,
+        }))
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: work)
+        monkeypatch.setattr(Path, "cwd", lambda: work)
+        (work / ".kage").write_text("project=widget\n")
+        monkeypatch.setattr(cli, "_search", lambda *a, **kw: [])
+        monkeypatch.setattr(cli, "_post_json", lambda *a, **kw: {"response": "ok"})
+        CliRunner().invoke(cli.app, ["ask", "hello"], catch_exceptions=False)
+
+    def _corrections_count(self, h):
+        conn = sqlite3.connect(h / "indexes" / "kage.db")
+        count = conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE project = ?", ("kage-corrections",)
+        ).fetchone()[0]
+        conn.close()
+        return count
+
+    def test_use_after_inferred_resolution_logs_miss(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        self._trigger_inference(monkeypatch, tmp_path, h)
+        r = CliRunner().invoke(cli.app, ["use", "personal/other-project", "--yes"], catch_exceptions=False)
+        assert r.exit_code == 0
+        assert self._corrections_count(h) == 1
+
+    def test_use_without_prior_inference_does_not_log_miss(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        r = CliRunner().invoke(cli.app, ["use", "personal/other-project", "--yes"], catch_exceptions=False)
+        assert r.exit_code == 0
+        assert self._corrections_count(h) == 0
+
+    def test_status_shows_hit_rate_after_inference(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        self._trigger_inference(monkeypatch, tmp_path, h)
+        r = CliRunner().invoke(cli.app, ["status"])
+        assert "100% project-inference hit-rate" in r.output
+        assert "(1/1 kept)" in r.output
+
+    def test_status_shows_lower_hit_rate_after_miss(self, monkeypatch, tmp_path):
+        h = self._setup(monkeypatch, tmp_path)
+        self._trigger_inference(monkeypatch, tmp_path, h)
+        CliRunner().invoke(cli.app, ["use", "personal/other-project", "--yes"])
+        r = CliRunner().invoke(cli.app, ["status"])
+        assert "0% project-inference hit-rate" in r.output
+        assert "(0/1 kept)" in r.output
+
+    def test_status_no_hit_rate_line_when_no_inference_yet(self, monkeypatch, tmp_path):
+        self._setup(monkeypatch, tmp_path)
+        r = CliRunner().invoke(cli.app, ["status"])
+        assert "project-inference hit-rate" not in r.output
+
+
 # ── Cycle 10.5 — Active Context ──────────────────────────────────────────────
 
 class TestActiveContext:
@@ -4782,7 +5070,7 @@ class TestActiveContext:
     def test_kage_use_sets_context(self, monkeypatch, tmp_path):
         h = self._setup(monkeypatch, tmp_path)
         r = CliRunner()
-        result = r.invoke(cli.app, ["use", "neu/kaggle-capstone"])
+        result = r.invoke(cli.app, ["use", "neu/kaggle-capstone", "--yes"])
         assert result.exit_code == 0
         state = json.loads((h / "state.json").read_text())
         assert state["identity"] == "neu"
@@ -4791,7 +5079,7 @@ class TestActiveContext:
     def test_kage_where_shows_resolved_context(self, monkeypatch, tmp_path):
         h = self._setup(monkeypatch, tmp_path)
         r = CliRunner()
-        r.invoke(cli.app, ["use", "neu/kaggle-capstone"])
+        r.invoke(cli.app, ["use", "neu/kaggle-capstone", "--yes"])
         result = r.invoke(cli.app, ["where"])
         assert result.exit_code == 0
         assert "neu" in result.output

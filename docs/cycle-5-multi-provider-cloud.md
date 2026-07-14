@@ -251,7 +251,7 @@ New:     `model    qwen3:14b local · {model} via {provider} (--cloud)`
 
 - `src/kage/cli.py` — `CloudError`, `DEFAULT_PROVIDERS`, `_call_cloud()`, updated `ask` / `doctor` / `status`
 - `tests/test_cli.py` — new tests per step
-- `docs/cycle-5-pitch.md` — this file
+- `docs/cycle-5-multi-provider-cloud.md` — this file
 
 ---
 

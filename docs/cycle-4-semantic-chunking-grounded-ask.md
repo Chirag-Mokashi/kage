@@ -1,7 +1,7 @@
 # Cycle 4 Pitch — kage v0.4 (semantic chunking + grounded ask)
 
 > **Status:** SHIPPED v0.4 (`85e6eb2`). Reviewed ×2 — two independent cold-agent audits complete.
-> *Date: 2026-06-07.* Companion: [cycle-3-pitch.md](cycle-3-pitch.md) (shipped v0.3) · [blueprint.md](blueprint.md).
+> *Date: 2026-06-07.* Companion: [cycle-3-hybrid-retrieval.md](cycle-3-hybrid-retrieval.md) (shipped v0.3) · [blueprint.md](blueprint.md).
 
 ---
 
@@ -97,7 +97,7 @@ Context:
 [blueprint.md § Layer 3e — Selective Disclosure]
 <section text — focused ~1000 chars>
 
-[cycle-3-pitch.md § Retrieval]
+[cycle-3-hybrid-retrieval.md § Retrieval]
 <section text — focused ~800 chars>
 ```
 
@@ -107,7 +107,7 @@ Answer: Selective Disclosure is Layer 3e — ...
 
 Sources:
   • blueprint.md  §  Layer 3e — Selective Disclosure
-  • cycle-3-pitch.md  §  Retrieval
+  • cycle-3-hybrid-retrieval.md  §  Retrieval
 ```
 
 `--no-sources` flag suppresses the Sources block for scripting use.
